@@ -81,7 +81,10 @@ laser_mapping_node:
         shift_avg_ratio: 0.2
         shift_undistortion: true
 
-        local_mode: false
+        # local_mode intentionally NOT set here: in this ROS distro the yaml
+        # file OVERRIDES the launch dict (file wins), which silently broke
+        # localization:=true. It is controlled exclusively by the launch chain
+        # (system_real_robot_g1.launch 'localization' arg).
         read_pose_file: false
         init_x: 0.0
         init_y: 0.0

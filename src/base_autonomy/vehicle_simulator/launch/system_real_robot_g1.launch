@@ -78,6 +78,28 @@ def generate_launch_description():
     description='Wired NIC on the 192.168.123.x robot net (used by the sdk backend).'
   )
 
+  # Record registered scans to install/vehicle_simulator/log/pointcloud_<ts>.txt
+  # (x y z intensity time -- the exact format laser_mapping's map_dir loader
+  # reads back for local_mode relocalization). Turn on for a one-time
+  # environment pre-scan; keep off for normal runs.
+  savePcd = LaunchConfiguration('savePcd')
+  declare_savePcd = DeclareLaunchArgument('savePcd', default_value='false', description='')
+
+  # Relocalization against a pre-scanned map: the map frame becomes the
+  # recording run's frame, so goal coordinates (e.g. maps/end_pose.yaml) stay
+  # valid across runs. Start the robot near the recording run's start pose.
+  localization = LaunchConfiguration('localization')
+  declare_localization = DeclareLaunchArgument(
+    'localization', default_value='false',
+    description='true: SLAM localizes against localization_map instead of mapping fresh.'
+  )
+  localization_map = LaunchConfiguration('localization_map')
+  declare_localization_map = DeclareLaunchArgument(
+    'localization_map',
+    default_value='/workspace/autonomy_stack/maps/prior_map.txt',
+    description='Prior map text file (x y z intensity time per line).'
+  )
+
   start_local_planner = IncludeLaunchDescription(
     PythonLaunchDescriptionSource(os.path.join(
       get_package_share_directory('local_planner'), 'launch', 'local_planner.launch.py')
@@ -116,7 +138,11 @@ def generate_launch_description():
   start_arise_slam = IncludeLaunchDescription(
     PythonLaunchDescriptionSource(os.path.join(
       get_package_share_directory('arise_slam_mid360'), 'launch', 'arize_slam.launch.py')
-    )
+    ),
+    launch_arguments={
+      'local_mode': localization,
+      'map_dir': localization_map,
+    }.items()
   )
 
   start_visualization_tools = IncludeLaunchDescription(
@@ -125,6 +151,7 @@ def generate_launch_description():
     ),
     launch_arguments={
       'world_name': world_name,
+      'savePcd': savePcd,
     }.items()
   )
 
@@ -204,6 +231,9 @@ def generate_launch_description():
   ld.add_action(declare_device_type)
   ld.add_action(declare_control_backend)
   ld.add_action(declare_network_interface)
+  ld.add_action(declare_savePcd)
+  ld.add_action(declare_localization)
+  ld.add_action(declare_localization_map)
 
   ld.add_action(start_local_planner)
   ld.add_action(start_terrain_analysis)

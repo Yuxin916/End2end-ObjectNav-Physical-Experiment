@@ -1,6 +1,7 @@
 <launch>
 
   <arg name="world_name" default="garage"/>
+  <arg name="savePcd" default="false"/>
 
   <node pkg="visualization_tools" exec="visualizationTools" name="visualizationTools" output="screen">
     <param name="metricFile" value="$(find-pkg-prefix vehicle_simulator)/log/metrics" />
@@ -16,7 +17,7 @@
     <param name="exploredAreaDisplayInterval" value="1" />
     <param name="saveMetric" value="false" />
     <param name="saveTraj" value="false" />
-    <param name="savePcd" value="false" />
+    <param name="savePcd" value="$(var savePcd)" />
   </node>
 
   <!--node pkg="visualization_tools" exec="realTimePlot.py" name="realTimePlot" output="screen"/-->

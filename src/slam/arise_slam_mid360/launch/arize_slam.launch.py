@@ -5,6 +5,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 import launch_ros
 
@@ -59,6 +60,19 @@ def generate_launch_description():
         "sensor_frame_rot",
         default_value="sensor_rot",
     )
+    # Relocalization against a pre-scanned map: local_mode=true loads map_dir
+    # (text pointcloud, 'x y z intensity time' per line) as the prior map and
+    # starts from init pose in that map's frame instead of building a fresh
+    # map at the boot pose. Record the map with savePcd or
+    # scripts/save_prior_map.py.
+    local_mode_arg = DeclareLaunchArgument(
+        "local_mode",
+        default_value="false",
+    )
+    map_dir_arg = DeclareLaunchArgument(
+        "map_dir",
+        default_value=os.path.join(home_directory, "Desktop/pointcloud_local.txt"),
+    )
 
     feature_extraction_node = Node(
         package="arise_slam_mid360",
@@ -86,7 +100,8 @@ def generate_launch_description():
         },
         parameters=[LaunchConfiguration("config_file"),
             { "calibration_file": LaunchConfiguration("calibration_file"),
-             "map_dir": os.path.join(home_directory, "Desktop/pointcloud_local.txt"),
+             "map_dir": LaunchConfiguration("map_dir"),
+             "local_mode": ParameterValue(LaunchConfiguration("local_mode"), value_type=bool),
         }],
         remappings=[
             ("laser_odom_to_init", LaunchConfiguration("odom_topic")),
@@ -121,6 +136,8 @@ def generate_launch_description():
         world_frame_rot_arg,
         sensor_frame_arg,
         sensor_frame_rot_arg,
+        local_mode_arg,
+        map_dir_arg,
         feature_extraction_node,
         laser_mapping_node,
         imu_preintegration_node,

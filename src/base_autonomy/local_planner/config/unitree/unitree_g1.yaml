@@ -57,8 +57,8 @@ localPlanner:
     maxRelZ: 0.3
 
     # Speed limits
-    maxSpeed: 1.0
-    autonomySpeed: 1.0
+    maxSpeed: 0.75
+    autonomySpeed: 0.75
 
     # Direction / heading
     dirWeight: 0.02
@@ -66,10 +66,18 @@ localPlanner:
     dirToVehicle: false
 
     # Path planning
-    pathScale: 0.875
+    # Obstacle clearance rides on pathScale: the path-vs-obstacle check uses
+    # a fixed 0.45 m searchRadius at unit scale, so lateral clearance from
+    # the path centerline ~= 0.45 * pathScale. 0.875 left only ~14 cm between
+    # the body edge and obstacles (robot visibly hugged them on stage); 1.25
+    # still read as "too close" in the 07-10 field test; 1.5 keeps ~42 cm.
+    # When a corridor is blocked the planner still shrinks toward
+    # minPathScale on its own. pathScaleBySpeed off: it multiplied pathScale
+    # by joySpeed, so walking slower REDUCED clearance -- exactly backwards.
+    pathScale: 1.5
     minPathScale: 0.675
     pathScaleStep: 0.1
-    pathScaleBySpeed: true
+    pathScaleBySpeed: false
     minPathRange: 0.8
     pathRangeStep: 0.6
     pathRangeBySpeed: true
@@ -102,7 +110,7 @@ pathFollower:
 
     # Driving mode
     lookAheadDis: 0.5
-    maxSpeed: 1.0
+    maxSpeed: 0.75
     maxAccel: 1.0
     switchTimeThre: 1.0
     omniDirDiffThre: 1.5
@@ -125,7 +133,7 @@ pathFollower:
     noRotAtGoal: true
 
     # Speed / autonomy
-    autonomySpeed: 0.50
+    autonomySpeed: 0.375
 
     # Yaw control
     goalYawGain: 2.0

@@ -1,0 +1,15 @@
+# Fixed experiment end pose, in the prior_map.txt frame. v5 (map re-recorded
+# 2026-07-10 after the stage environment changed slightly).
+# Captured live from /state_estimation with the robot parked on the stage
+# center marker during the mapping run: mean of 4 consistent samples (one
+# sway outlier dropped; standing sway is +-3 cm). Map + pose recorded in the
+# same run => same frame.
+#
+# The map frame origin = the start marker; every localization-mode run must
+# begin on that marker, roughly same facing.
+end_pose:
+  x: 8.0947       # m
+  y: -8.2609      # m
+  z: 0.053        # m (ground; informational)
+  yaw: -0.0022    # rad (= -0.1 deg; ~same facing as the start direction)
+map_file: maps/prior_map.txt

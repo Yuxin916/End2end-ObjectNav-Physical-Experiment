@@ -39,6 +39,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ros-jazzy-rmw-cyclonedds-cpp \
     && rm -rf /var/lib/apt/lists/*
 
+# WebRTC control backend (control_backend:=webrtc). The unitree_webrtc_ros node
+# imports unitree_webrtc_connect, which drives the robot over an aiortc data
+# channel. Unlike the sdk backend it adds NO participant to the robot's domain-0
+# DDS, so it sidesteps the discovery-congestion SLAM drift. (Replaces the old
+# /opt/uvenv venv removed above -- installed into system python so the node's
+# `#!/usr/bin/env python3` shebang picks it up with no venv activation.)
+#   --ignore-installed: install the dep tree into /usr/local (shadows the apt
+#   copies on sys.path) so pip never tries to uninstall the RECORD-less debian
+#   numpy/cryptography and abort. numpy pinned to the ROS-compatible 1.26.4.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      portaudio19-dev libsrtp2-1 libopus0 libvpx-dev libgl1 libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir --break-system-packages --ignore-installed \
+       unitree_webrtc_connect==2.1.2 PyYAML numpy==1.26.4 opencv-python==4.10.0.84
+
 # Isolate ROS2 traffic from the robot's native DDS (domain 0) via ROS_DOMAIN_ID=1.
 # RMW = Fast DDS (default). cyclonedds was tried (will_nx) but CAUSED LIO drift on
 # the Jetson (drops/delays 200Hz IMU + lidar under load); owner commit d92956f also

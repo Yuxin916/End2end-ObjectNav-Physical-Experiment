@@ -21,6 +21,10 @@ sudo jetson_clocks
 #     漏到 wlan0（详见 §6.3）
 sudo ip route add 192.168.123.120/32 dev eth0 src 192.168.123.164
 
+# (b2) 笔记本网线直连调试时(笔记本静态 IP 192.168.123.103),Jetson 回包也会漏到
+#      wlan0(同一个坑的反方向)—— ssh/scp/NoMachine 全部超时。加同样的 host 路由:
+sudo ip route add 192.168.123.103/32 dev eth0 src 192.168.123.164
+
 # (c) 放开 X 服务器本地访问，让容器里(以 root 运行)的 RViz 能在物理显示器(:0)弹窗
 sudo env DISPLAY=:0 XAUTHORITY=/var/run/lightdm/root/:0 xhost +local:
 ```

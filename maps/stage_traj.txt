@@ -1,0 +1,21 @@
+# taught route, map frame, one "x y" per line
+# outbound leg of 2026-07-10 take3 (via operator mid waypoint):
+# 1 s median buckets + despike + 1.5 m smoothing; starts at the map
+# origin (start marker), last point pinned to end_pose v5
+0.0000 0.0000
+1.1409 -0.3077
+1.7602 -0.5875
+2.2616 -0.6914
+2.7796 -0.6434
+3.3317 -0.5054
+4.1364 -0.3845
+4.4441 -0.3909
+4.9349 -0.5252
+5.5094 -0.7485
+6.7377 -2.2308
+7.0168 -2.7187
+7.8262 -4.1520
+8.2201 -5.7854
+8.2465 -6.0542
+8.2995 -7.6459
+8.0947 -8.2609

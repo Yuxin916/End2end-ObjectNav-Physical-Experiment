@@ -5,13 +5,20 @@ Subscribes to cmd_vel and provides sport mode command services.
 """
 
 import asyncio
+import math
 import os
 import threading
+import time
+
+import yaml
 
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
-from geometry_msgs.msg import TwistStamped
+from geometry_msgs.msg import TwistStamped, PointStamped
+from nav_msgs.msg import Odometry
+from sensor_msgs.msg import Joy
+from std_msgs.msg import Float32, Int8
 from std_srvs.srv import Trigger
 
 from unitree_webrtc_connect.webrtc_driver import UnitreeWebRTCConnection, WebRTCConnectionMethod
@@ -34,6 +41,86 @@ class UnitreeControlNode(Node):
         # once via unitree_webrtc_connect.unitree_cloud.fetch_aes_key().
         self.declare_parameter('aes_128_key', '')
         self.declare_parameter('device_type', 'G1')  # 'Go2' or 'G1'
+        # Joystick gesture buttons (招手 etc.). The nav stack holds the only
+        # WebRTC connection, so the phone app can't trigger gestures -- do it
+        # from the same /joy the driver already uses. Rising edge fires the
+        # mapped G1 arm action. Format "button:action_id,..."; empty disables.
+        # Xbox layout: 0=A 1=B 2=X 3=Y 4=LB 5=RB. LT/RT are the pathFollower
+        # autonomy/manual mode switches (axes 2/5) -- never map gestures
+        # there, and NOTE: this gamepad ALSO reports the held trigger on
+        # buttons[6]/[7] (hybrid trigger-as-button), so 6/7 fire spuriously
+        # while driving (robot did the arms-crossed 'reject' mid-walk).
+        # Keep 6/7 unmapped. Arm actions: 11=two-hand kiss, 12/13=left/right
+        # kiss, 15=hands up, 17=clap, 18=high five, 19=hug, 20=heart,
+        # 21=right heart, 22=reject, 23=right hand up, 24=x-ray,
+        # 25=face wave, 26=high wave, 27=shake hand, 99=release arm (reset).
+        # Default: A=face wave, B=shake hand, X=release arm, Y=high wave,
+        #          LB=clap, RB=heart.
+        self.declare_parameter('gesture_buttons',
+                               '0:25,1:27,2:99,3:26,4:17,5:20')
+        # While a gesture plays, mute cmd_vel forwarding for this many seconds.
+        # 0 (default) disables muting -- G1 arm actions are an upper-body
+        # overlay, so it can gesture while walking. >0 makes the robot pause.
+        self.declare_parameter('wave_mute_sec', 0.0)
+        # --- "Go home" (fixed end pose) ---
+        # Rising edge on buttons[home_button] toggles homing: publish the end
+        # pose from end_pose_file as /way_point (drive there under the local
+        # planner -- hold the autonomy trigger), then rotate in place to the
+        # recorded yaw and stop. Requires localization:=true so the map frame
+        # matches the recorded pose. -1 disables. Default 10 = right stick click.
+        self.declare_parameter('home_button', 10)
+        self.declare_parameter('end_pose_file', '/workspace/autonomy_stack/maps/end_pose.yaml')
+        self.declare_parameter('goal_tolerance', 0.35)     # m: switch to fine-align phase
+        self.declare_parameter('yaw_tolerance', 0.08)      # rad (~5 deg): done
+        self.declare_parameter('homing_yaw_rate', 0.5)     # rad/s cap for final rotation
+        # The local planner only plans nearby -- feed it a moving carrot
+        # waypoint at most this far ahead along the straight line to the goal.
+        self.declare_parameter('waypoint_step', 3.0)       # m
+        # Autonomy speed while homing/retracing, as a fraction of pathFollower
+        # maxSpeed. It rides on the synthetic /joy axes[4] (joySpeed) -- which
+        # also blocks the /speed topic override while nonzero. 07-10 field
+        # test: 0.5 looked too slow on stage -> back to 1.0; the near-goal
+        # taper + fine-align keep the stop clean. Drop to ~0.8 if the
+        # crab-walk / S-wobble reappears at full stick.
+        self.declare_parameter('homing_speed', 1.0)
+        # Near-goal approach: taper joySpeed from homing_speed down to
+        # approach_speed inside slowdown_dis of the real goal (pathFollower's
+        # slowDwnDisThre only sees the moving carrot, not the goal).
+        self.declare_parameter('slowdown_dis', 2.0)        # m
+        self.declare_parameter('approach_speed', 0.3)      # joySpeed floor near goal
+        # Fine-align: inside goal_tolerance, bypass planner+follower (their
+        # cmd_vel is dropped) and P-servo the map-frame position error with
+        # small omni steps, then rotate to the recorded yaw.
+        self.declare_parameter('fine_tolerance', 0.08)     # m: accept position
+        self.declare_parameter('fine_speed', 0.2)          # cap for fine steps
+        self.declare_parameter('fine_timeout', 15.0)       # s: give up -> rotate
+        # --- taught trajectory (recorded fixed route) ---
+        # The straight-line carrot walks INTO anything sitting between the
+        # robot and the goal. If traj_file exists, homing follows this
+        # recorded polyline instead (and return follows it reversed) -- the
+        # route goes around obstacles the way the operator drove it.
+        # Record (under localization:=true so the frame matches the map):
+        #   ros2 service call /traj_record_start std_srvs/srv/Trigger
+        #   ... joystick-drive the ideal route start -> stage center ...
+        #   ros2 service call /traj_record_stop std_srvs/srv/Trigger
+        # Stop saves the file and activates it immediately.
+        self.declare_parameter('traj_file', '/workspace/autonomy_stack/maps/stage_traj.txt')
+        self.declare_parameter('traj_lookahead', 1.5)      # m: carrot ahead along the route
+        self.declare_parameter('traj_min_gap', 0.2)        # m between recorded breadcrumbs
+        # --- "Return to start" (回起点) ---
+        # Rising edge on buttons[return_button] drives back to where this run
+        # started (first odom fix), with the same carrot guidance as homing.
+        # Works in any frame (no prior map needed). -1 disables.
+        # Default 9 = left stick click.
+        self.declare_parameter('return_button', 9)
+        # --- "Perform" (演讲模式) ---
+        # Optional: after Homing DONE, cycle through arm actions every
+        # perform_period seconds until homing/return is pressed again (which
+        # releases the arms and drives off). DISABLED by default (empty) --
+        # the operator triggers gestures manually on the joystick instead.
+        # Enable with e.g. perform_actions:='23,15,26,20'.
+        self.declare_parameter('perform_actions', '')
+        self.declare_parameter('perform_period', 6.0)      # s between actions
 
         # Get parameters
         self.robot_ip = self.get_parameter('robot_ip').value
@@ -41,6 +128,52 @@ class UnitreeControlNode(Node):
         self.control_mode = self.get_parameter('control_mode').value
         self.device_type = self.get_parameter('device_type').value
         self.aes_128_key = self.get_parameter('aes_128_key').value or os.environ.get('UNITREE_AES_KEY', '')
+        self.wave_mute_sec = float(self.get_parameter('wave_mute_sec').value)
+        # Parse "button:action_id,..." -> {button_index: action_id}
+        self.gesture_map = {}
+        spec = str(self.get_parameter('gesture_buttons').value).strip()
+        if spec:
+            for pair in spec.split(','):
+                btn, _, act = pair.partition(':')
+                self.gesture_map[int(btn)] = int(act)
+        self._prev_buttons = ()           # edge-detect state for gesture buttons
+        self._wave_mute_until = 0.0       # monotonic deadline; cmd_vel muted until then
+
+        # --- homing state ---
+        self.home_button = int(self.get_parameter('home_button').value)
+        self.goal_tolerance = float(self.get_parameter('goal_tolerance').value)
+        self.yaw_tolerance = float(self.get_parameter('yaw_tolerance').value)
+        self.homing_yaw_rate = float(self.get_parameter('homing_yaw_rate').value)
+        self.waypoint_step = float(self.get_parameter('waypoint_step').value)
+        self.homing_speed = float(self.get_parameter('homing_speed').value)
+        self.slowdown_dis = float(self.get_parameter('slowdown_dis').value)
+        self.approach_speed = float(self.get_parameter('approach_speed').value)
+        self.fine_tolerance = float(self.get_parameter('fine_tolerance').value)
+        self.fine_speed = float(self.get_parameter('fine_speed').value)
+        self.fine_timeout = float(self.get_parameter('fine_timeout').value)
+        self._fine_deadline = 0.0
+        self._fine_rounds = 0
+        self._last_latch_speed = self.homing_speed
+        self.traj_file = str(self.get_parameter('traj_file').value)
+        self.traj_lookahead = float(self.get_parameter('traj_lookahead').value)
+        self.traj_min_gap = float(self.get_parameter('traj_min_gap').value)
+        self.traj = self._load_traj(self.traj_file)   # [(x, y), ...] map frame
+        self.recording = False            # taught-route recording in progress
+        self._record = []
+        self._route = []                  # active route for this homing/return
+        self._traj_idx = 0                # monotonic progress along _route
+        self._spike_count = 0             # consecutive rejected odom teleports
+        self.return_button = int(self.get_parameter('return_button').value)
+        self.start_pose = None            # (x, y) of the first odom fix this run
+        spec = str(self.get_parameter('perform_actions').value).strip()
+        self.perform_actions = [int(a) for a in spec.split(',')] if spec else []
+        self.perform_period = float(self.get_parameter('perform_period').value)
+        self.performing = False           # cycling talk-gestures at the end pose
+        self._perform_i = 0
+        self._next_perform_t = 0.0
+        self.end_pose = self._load_end_pose(str(self.get_parameter('end_pose_file').value))
+        self.homing = None                # None | 'drive' | 'fine' | 'rotate' | 'return'
+        self.cur_pose = None              # (x, y, yaw) from /state_estimation
 
         # Map connection method string to enum
         connection_method_map = {
@@ -96,6 +229,47 @@ class UnitreeControlNode(Node):
             qos_profile
         )
 
+        # Subscribe to /joy so controller buttons can trigger gestures while
+        # the nav stack owns the (single) WebRTC connection.
+        if self.gesture_map or self.home_button >= 0:
+            self.joy_sub = self.create_subscription(Joy, 'joy', self.joy_callback, 10)
+            self.get_logger().info(
+                f'Gestures mapped on /joy: {self.gesture_map}'
+                f' (mute cmd_vel {self.wave_mute_sec:.1f}s during gesture)'
+            )
+
+        # Homing/return: waypoint/speed/stop/joy out, odom in, 20 Hz tick.
+        want_home = self.home_button >= 0 and self.end_pose
+        want_return = self.return_button >= 0
+        if want_home or want_return:
+            self.waypoint_pub = self.create_publisher(PointStamped, 'way_point', 5)
+            self.speed_pub = self.create_publisher(Float32, 'speed', 5)
+            self.stop_pub = self.create_publisher(Int8, 'stop', 5)
+            self.joy_pub = self.create_publisher(Joy, 'joy', 5)
+            self._tick_count = 0
+            self.create_subscription(Odometry, 'state_estimation', self.odom_callback, 10)
+            self.create_timer(0.05, self.homing_tick)
+        if want_home:
+            ex, ey, eyaw = self.end_pose
+            self.get_logger().info(
+                f'Homing: buttons[{self.home_button}] -> ({ex:.2f}, {ey:.2f}, yaw {math.degrees(eyaw):.0f} deg)'
+            )
+        elif self.home_button >= 0:
+            self.get_logger().warn('Homing disabled: end_pose_file missing/unreadable')
+        if want_return:
+            self.get_logger().info(f'Return: buttons[{self.return_button}] -> back to the run start')
+        if want_home or want_return:
+            self.create_service(Trigger, 'traj_record_start', self.traj_record_start_cb)
+            self.create_service(Trigger, 'traj_record_stop', self.traj_record_stop_cb)
+            if self.traj:
+                self.get_logger().info(
+                    f'Taught route: {len(self.traj)} points from {self.traj_file}; '
+                    'homing/return will follow it instead of the straight line.')
+            else:
+                self.get_logger().info(
+                    f'No taught route ({self.traj_file}); homing/return use the '
+                    'straight-line carrot. Record one via /traj_record_start|stop.')
+
         # Create services for sport commands
         self.standup_srv = self.create_service(Trigger, 'standup', self.standup_callback)
         self.liedown_srv = self.create_service(Trigger, 'liedown', self.liedown_callback)
@@ -136,14 +310,434 @@ class UnitreeControlNode(Node):
         finally:
             self.loop.close()
 
+    def _gesture_request(self, action_id: int):
+        """Device-specific gesture (topic, request) for the datachannel.
+
+        G1 (fw >= 1.5.x): arm gestures live on the dedicated 'arm' service
+        (rt/api/arm/request), api 7106 EXECUTE_ACTION with {"data": action_id}.
+        The loco SetTaskId path (same api number 7106 but on
+        rt/api/sport/request) is ACKed by the robot but not executed on this
+        firmware -- verified 2026-07-08. Go2 has no arm: any gesture button
+        falls back to the classic sport Hello=1016.
+        """
+        if self.device_type == 'G1':
+            return ("rt/api/arm/request",
+                    {"api_id": 7106, "parameter": {"data": action_id}})
+        return (RTC_TOPIC["SPORT_MOD"], {"api_id": SPORT_CMD["Hello"]})
+
+    def joy_callback(self, msg: Joy):
+        """Fire arm gestures on rising edges of the mapped buttons."""
+        # Synthetic joy messages (RViz waypoint/goalpoint tools set
+        # buttons[7]=1 and axes[2]=-1 to latch autonomy; our own homing
+        # re-latch does the same) are NOT human button presses -- they once
+        # made the robot cross its arms (buttons[7] was mapped to 'reject').
+        if msg.header.frame_id in ('waypoint_tool', 'goalpoint_tool', 'homing'):
+            return
+        prev = self._prev_buttons
+        self._prev_buttons = tuple(msg.buttons)
+        if not prev:
+            # First message is baseline only. The joydev driver replays the
+            # current button state on open -- a stale/phantom 'pressed' there
+            # must not fire a gesture (robot crossed arms at startup once).
+            return
+        # Home button (right stick click by default): toggle go-to-end-pose.
+        if (self.end_pose and 0 <= self.home_button < len(msg.buttons)
+                and msg.buttons[self.home_button] == 1
+                and not (self.home_button < len(prev) and prev[self.home_button] == 1)):
+            self._toggle_homing()
+        # Return button (left stick click by default): toggle back-to-start.
+        if (0 <= self.return_button < len(msg.buttons)
+                and msg.buttons[self.return_button] == 1
+                and not (self.return_button < len(prev) and prev[self.return_button] == 1)):
+            self._toggle_return()
+        for btn, action_id in self.gesture_map.items():
+            if btn >= len(msg.buttons):
+                continue
+            if msg.buttons[btn] == 1 and not (btn < len(prev) and prev[btn] == 1):
+                self._wave_mute_until = time.monotonic() + self.wave_mute_sec
+                self.get_logger().info(f'Gesture button {btn} -> arm action {action_id}')
+                self._fire_action(action_id)
+
+    def _fire_action(self, action_id: int):
+        """Fire-and-forget an arm action on the WebRTC loop; never blocks the
+        ROS executor. The robot's response is logged so a no-op is visible."""
+        if not self.conn or not self.loop:
+            return
+        topic, request = self._gesture_request(action_id)
+        async def async_gesture(t=topic, r=request):
+            return await self.conn.datachannel.pub_sub.publish_request_new(t, r)
+        fut = asyncio.run_coroutine_threadsafe(async_gesture(), self.loop)
+        def _log_result(f, act=action_id):
+            try:
+                self.get_logger().info(f'action {act} response: {f.result()}')
+            except Exception as e:  # noqa: BLE001
+                self.get_logger().error(f'action {act} failed: {e}')
+        fut.add_done_callback(_log_result)
+
+    def _stop_performing(self, release: bool = True):
+        if self.performing:
+            self.performing = False
+            if release:
+                self._fire_action(99)     # release arm -> neutral
+            self.get_logger().warn('Perform mode OFF')
+
+    # ---- homing (fixed end pose) ----
+
+    def _load_end_pose(self, path):
+        """Read (x, y, yaw) from end_pose.yaml; None if unavailable."""
+        try:
+            with open(path) as fh:
+                d = yaml.safe_load(fh)['end_pose']
+            return (float(d['x']), float(d['y']), float(d['yaw']))
+        except Exception as e:  # noqa: BLE001
+            self.get_logger().warn(f'end_pose_file {path}: {e}')
+            return None
+
+    def _load_traj(self, path):
+        """Read the taught route ("x y" per line, map frame); [] if missing."""
+        try:
+            pts = []
+            with open(path) as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line or line.startswith('#'):
+                        continue
+                    x, y = line.split()[:2]
+                    pts.append((float(x), float(y)))
+            return pts if len(pts) >= 2 else []
+        except OSError:
+            return []
+
+    def traj_record_start_cb(self, request, response):
+        if not self.cur_pose:
+            response.success = False
+            response.message = 'no /state_estimation yet'
+            return response
+        self.recording = True
+        self._record = [self.cur_pose[:2]]
+        response.success = True
+        response.message = 'recording taught route; drive the ideal path now'
+        self.get_logger().warn('Taught route: RECORDING started')
+        return response
+
+    def traj_record_stop_cb(self, request, response):
+        self.recording = False
+        if self.cur_pose and self._record:
+            self._record.append(self.cur_pose[:2])   # exact stop spot
+        if len(self._record) < 2:
+            response.success = False
+            response.message = 'too few points recorded, route unchanged'
+            return response
+        try:
+            with open(self.traj_file, 'w') as fh:
+                fh.write('# taught route, map frame, one "x y" per line\n')
+                for px, py in self._record:
+                    fh.write(f'{px:.4f} {py:.4f}\n')
+        except OSError as e:
+            response.success = False
+            response.message = f'cannot write {self.traj_file}: {e}'
+            return response
+        self.traj = list(self._record)
+        response.success = True
+        response.message = f'saved {len(self.traj)} points to {self.traj_file}, active now'
+        self.get_logger().warn(f'Taught route: SAVED {len(self.traj)} points -> {self.traj_file}')
+        return response
+
+    def _start_route(self, x, y, reverse):
+        """Arm _route for this homing/return: taught route (reversed for
+        return) densified to 0.1 m spacing, starting nearest the robot.
+        Densifying matters: with sparse points the carrot could land inside
+        pathFollower's stopDisThre and park the robot for good."""
+        raw = list(reversed(self.traj)) if reverse else list(self.traj)
+        dense = []
+        for a, b in zip(raw, raw[1:]):
+            seg = math.hypot(b[0] - a[0], b[1] - a[1])
+            n = max(1, int(seg / 0.1))
+            for k in range(n):
+                dense.append((a[0] + (b[0] - a[0]) * k / n,
+                              a[1] + (b[1] - a[1]) * k / n))
+        if raw:
+            dense.append(raw[-1])
+        self._route = dense
+        if self._route:
+            self._traj_idx = min(
+                range(len(self._route)),
+                key=lambda k: (self._route[k][0] - x) ** 2 + (self._route[k][1] - y) ** 2)
+
+    def _traj_carrot(self, x, y, gx, gy):
+        """Carrot along the taught route: advance the (monotonic) nearest
+        index, then walk traj_lookahead meters forward ALONG the route.
+        The carrot is measured from route progress, not from the robot, so
+        it stays a live goal ahead of the planner even if the robot stalls
+        (a robot-relative window once deadlocked: robot stops -> carrot
+        stops -> robot never restarts). Near the route end it snaps to the
+        exact goal."""
+        pts = self._route
+        i = self._traj_idx
+        while (i + 1 < len(pts)
+               and math.hypot(pts[i + 1][0] - x, pts[i + 1][1] - y)
+               <= math.hypot(pts[i][0] - x, pts[i][1] - y)):
+            i += 1
+        self._traj_idx = i
+        j = i
+        acc = 0.0
+        while j + 1 < len(pts) and acc < self.traj_lookahead:
+            acc += math.hypot(pts[j + 1][0] - pts[j][0], pts[j + 1][1] - pts[j][1])
+            j += 1
+        if j >= len(pts) - 1:
+            return gx, gy
+        return pts[j]
+
+    def odom_callback(self, msg: Odometry):
+        p = msg.pose.pose.position
+        q = msg.pose.pose.orientation
+        yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                         1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+        # /state_estimation throws transient 0.4-2 m spikes while walking
+        # (observed 2026-07-10). A teleport between consecutive ~100 Hz
+        # samples is physically impossible for the G1 -- drop it so it can't
+        # fake goal arrival or yank the route index forward. >20 consecutive
+        # "spikes" means a real relocalization correction: accept it.
+        if self.cur_pose is not None:
+            if math.hypot(p.x - self.cur_pose[0], p.y - self.cur_pose[1]) > 0.5:
+                self._spike_count += 1
+                if self._spike_count <= 20:
+                    return
+            self._spike_count = 0
+        self.cur_pose = (p.x, p.y, yaw)
+        if self.start_pose is None:
+            self.start_pose = (p.x, p.y)  # where this run began
+        if self.recording:
+            lx, ly = self._record[-1]
+            if math.hypot(p.x - lx, p.y - ly) >= self.traj_min_gap:
+                self._record.append((p.x, p.y))
+
+    def _publish_autonomy_latch(self, speed=None):
+        """Synthetic /joy like the RViz waypoint tool: axes[2]=-1 latches
+        autonomyMode in localPlanner/pathFollower until real joystick input,
+        axes[4] sets joySpeed. This is how the stack engages autonomy without
+        physically holding LT."""
+        sp = min(1.0, self.homing_speed if speed is None else speed)
+        j = Joy()
+        j.header.stamp = self.get_clock().now().to_msg()
+        j.header.frame_id = 'homing'
+        j.axes = [0.0, 0.0, -1.0, 0.0, sp, 1.0, 0.0, 0.0]
+        j.buttons = [0] * 11
+        self.joy_pub.publish(j)
+        self._last_latch_speed = sp
+
+    def _toggle_homing(self):
+        self._stop_performing()
+        if self.homing in ('drive', 'fine', 'rotate'):
+            self.homing = None
+            self._send_vel(0.0, 0.0, 0.0)
+            self.get_logger().warn('Homing CANCELLED')
+            return
+        if not self.cur_pose:
+            self.get_logger().warn('Homing: no /state_estimation yet, ignored')
+            return
+        self.homing = 'drive'
+        self._start_route(*self.cur_pose[:2], reverse=False)
+        # Resume navigation in case a safety stop is latched (RViz 'Resume').
+        self.stop_pub.publish(Int8(data=0))
+        self._publish_autonomy_latch()
+        ex, ey, eyaw = self.end_pose
+        self.get_logger().warn(
+            ('Homing STARTED (taught route, %d pts)' % len(self._route)
+             if self._route else 'Homing STARTED (straight-line carrot)')
+            + f' -> ({ex:.2f}, {ey:.2f}); autonomy latched, no LT needed. '
+            'Touching the joystick pauses it (re-latched within 1 s); press the home '
+            'button again to cancel. Auto-rotate to %.0f deg on arrival.'
+            % math.degrees(eyaw))
+
+    def _toggle_return(self):
+        self._stop_performing()
+        if self.homing == 'return':
+            self.homing = None
+            self.get_logger().warn('Return CANCELLED')
+            return
+        if not self.cur_pose or not self.start_pose:
+            self.get_logger().warn('Return: no /state_estimation yet, ignored')
+            return
+        self.homing = 'return'
+        self._start_route(*self.cur_pose[:2], reverse=True)
+        self.stop_pub.publish(Int8(data=0))
+        self._publish_autonomy_latch()
+        sx, sy = self.start_pose
+        self.get_logger().warn(
+            ('Return STARTED (taught route reversed)' if self._route
+             else 'Return STARTED (straight-line carrot)')
+            + f' -> run start ({sx:.2f}, {sy:.2f}). Press again to cancel.')
+
+    def _publish_carrot(self, wx, wy, speed=None):
+        sp = self.homing_speed if speed is None else speed
+        wp = PointStamped()
+        wp.header.stamp = self.get_clock().now().to_msg()
+        wp.header.frame_id = 'map'
+        wp.point.x, wp.point.y, wp.point.z = wx, wy, 0.0
+        self.waypoint_pub.publish(wp)
+        self.speed_pub.publish(Float32(data=sp))
+        # Re-latch autonomy at 1 Hz: any real joystick event drops
+        # autonomyMode; this brings the drive back within a second. Also
+        # re-latch immediately when the taper moved joySpeed (axes[4]) --
+        # that's the only channel pathFollower takes speed from.
+        self._tick_count += 1
+        if self._tick_count % 20 == 0 or abs(sp - self._last_latch_speed) > 0.05:
+            self._publish_autonomy_latch(sp)
+
+    def _approach_speed(self, dist):
+        """joySpeed for the drive phase: homing_speed far out, tapering
+        linearly to approach_speed inside slowdown_dis of the goal."""
+        if dist >= self.slowdown_dis:
+            return self.homing_speed
+        return max(self.approach_speed, self.homing_speed * dist / self.slowdown_dis)
+
+    def homing_tick(self):
+        """20 Hz: carrot waypoint + speed while driving; fine-align then
+        rotate in place at the goal; cycle talk-gestures while performing."""
+        if self.performing:
+            now = time.monotonic()
+            if now >= self._next_perform_t:
+                action = self.perform_actions[self._perform_i % len(self.perform_actions)]
+                self._perform_i += 1
+                self._next_perform_t = now + self.perform_period
+                self.get_logger().info(f'Perform: arm action {action}')
+                self._fire_action(action)
+        if not self.homing or not self.cur_pose:
+            return
+        x, y, yaw = self.cur_pose
+
+        if self.homing == 'return':
+            # Same carrot guidance as homing, aimed at the run's start point.
+            sx, sy = self.start_pose
+            dx, dy = sx - x, sy - y
+            dist = math.hypot(dx, dy)
+            if dist < self.goal_tolerance:
+                self.homing = None
+                self._send_vel(0.0, 0.0, 0.0)
+                self.get_logger().warn('Return DONE: back at the run start. Robot stopped.')
+                return
+            if self._route:
+                wx, wy = self._traj_carrot(x, y, sx, sy)
+            elif dist > self.waypoint_step:
+                s = self.waypoint_step / dist
+                wx, wy = x + dx * s, y + dy * s
+            else:
+                wx, wy = sx, sy
+            self._publish_carrot(wx, wy, self._approach_speed(dist))
+            return
+
+        ex, ey, eyaw = self.end_pose
+
+        if self.homing == 'drive':
+            # Carrot guidance: along the taught route if one is loaded,
+            # otherwise along the straight line to the goal (the local
+            # planner only plans nearby either way).
+            dx, dy = ex - x, ey - y
+            dist = math.hypot(dx, dy)
+            if dist < self.goal_tolerance:
+                self.homing = 'fine'
+                self._fine_rounds = 0
+                self._fine_deadline = time.monotonic() + self.fine_timeout
+                self.get_logger().warn('Homing: near goal, fine-aligning position...')
+                return
+            if self._route:
+                wx, wy = self._traj_carrot(x, y, ex, ey)
+            elif dist > self.waypoint_step:
+                s = self.waypoint_step / dist
+                wx, wy = x + dx * s, y + dy * s
+            else:
+                wx, wy = ex, ey
+            self._publish_carrot(wx, wy, self._approach_speed(dist))
+            if self._tick_count % 40 == 0:   # ~2 s heartbeat for diagnosis
+                self.get_logger().info(
+                    f'Homing drive: {dist:.2f} m to goal, route {self._traj_idx}/'
+                    f'{len(self._route)}, carrot ({wx:.2f}, {wy:.2f})')
+            return
+
+        if self.homing == 'fine':
+            # Planner+follower cmd_vel is dropped (cmd_vel_callback): P-servo
+            # the map-frame position error with small omni steps. This is what
+            # turns the ~0.35 m carrot-stop scatter into a few cm on stage.
+            dx, dy = ex - x, ey - y
+            dist = math.hypot(dx, dy)
+            if dist < self.fine_tolerance:
+                self._send_vel(0.0, 0.0, 0.0)
+                self.homing = 'rotate'
+                self.get_logger().warn(
+                    f'Homing: position aligned ({100 * dist:.0f} cm off), aligning yaw...')
+                return
+            if time.monotonic() > self._fine_deadline:
+                self._send_vel(0.0, 0.0, 0.0)
+                self.homing = 'rotate'
+                self.get_logger().warn(
+                    f'Homing: fine-align TIMEOUT at {dist:.2f} m, aligning yaw anyway')
+                return
+            bx = math.cos(yaw) * dx + math.sin(yaw) * dy
+            by = -math.sin(yaw) * dx + math.cos(yaw) * dy
+            vx, vy = 1.2 * bx, 1.2 * by
+            n = math.hypot(vx, vy)
+            if n > self.fine_speed:
+                vx, vy = vx / n * self.fine_speed, vy / n * self.fine_speed
+            elif 0.0 < n < 0.06:
+                # Too-small stick values don't move the gait at all.
+                vx, vy = vx / n * 0.06, vy / n * 0.06
+            self._send_vel(vx, vy, 0.0)
+            return
+
+        # rotate phase: external cmd_vel is dropped in cmd_vel_callback;
+        # we own the velocity stream until aligned.
+        err = math.atan2(math.sin(eyaw - yaw), math.cos(eyaw - yaw))
+        if abs(err) < self.yaw_tolerance:
+            # Rotating a humanoid in place shifts it a little: re-check the
+            # position and do another fine pass if it stepped off the marker.
+            dist = math.hypot(ex - x, ey - y)
+            if dist > 1.5 * self.fine_tolerance and self._fine_rounds < 2:
+                self._fine_rounds += 1
+                self._fine_deadline = time.monotonic() + self.fine_timeout
+                self.homing = 'fine'
+                self.get_logger().warn(
+                    f'Homing: rotation drifted {100 * dist:.0f} cm off, fine pass {self._fine_rounds}')
+                return
+            self._send_vel(0.0, 0.0, 0.0)
+            self.homing = None
+            self.get_logger().warn('Homing DONE: at end pose, aligned. Robot stopped.')
+            # External audio plays now; do natural talk-gestures instead of
+            # standing frozen. Ends when homing/return is pressed.
+            if self.perform_actions:
+                self.performing = True
+                self._perform_i = 0
+                self._next_perform_t = time.monotonic() + 2.0
+                self.get_logger().warn(
+                    f'Perform mode ON: cycling actions {self.perform_actions} '
+                    f'every {self.perform_period:.0f}s until homing/return pressed.')
+            return
+        rate = max(-self.homing_yaw_rate, min(self.homing_yaw_rate, 1.5 * err))
+        self._send_vel(0.0, 0.0, rate)
+
     def cmd_vel_callback(self, msg: TwistStamped):
         """Handle incoming cmd_vel messages."""
         if not self.conn or not self.loop:
             self.get_logger().warn('Connection not ready, ignoring cmd_vel')
             return
 
-        x, y, yaw = msg.twist.linear.x, msg.twist.linear.y, msg.twist.angular.z
+        # Hold still while a wave is in progress so the 50 Hz velocity stream
+        # doesn't fight the arm gesture.
+        if time.monotonic() < self._wave_mute_until:
+            return
 
+        # During the homing fine-align/rotate phases this node owns the
+        # velocity stream; drop pathFollower's cmd_vel.
+        if self.homing in ('fine', 'rotate'):
+            return
+
+        x, y, yaw = msg.twist.linear.x, msg.twist.linear.y, msg.twist.angular.z
+        self._send_vel(x, y, yaw)
+
+    def _send_vel(self, x, y, yaw):
+        """Send a velocity command over the active control mode."""
+        if not self.conn or not self.loop:
+            return
         # Choose control mode based on parameter
         if self.control_mode == 'wireless_controller':
             # WebRTC coordinate mapping for wireless controller:
@@ -177,8 +771,9 @@ class UnitreeControlNode(Node):
         except Exception as e:
             self.get_logger().error(f'Failed to send cmd_vel: {e}')
 
-    def _execute_sport_command(self, command_name: str, api_id: int, parameter: dict = None) -> Trigger.Response:
-        """Execute a sport mode command."""
+    def _execute_sport_command(self, command_name: str, api_id: int, parameter: dict = None,
+                               topic: str = None) -> Trigger.Response:
+        """Execute a sport/arm mode command and log the robot's response."""
         response = Trigger.Response()
 
         if not self.conn or not self.loop:
@@ -192,17 +787,17 @@ class UnitreeControlNode(Node):
                 request_data["parameter"] = parameter
 
             async def async_command():
-                await self.conn.datachannel.pub_sub.publish_request_new(
-                    RTC_TOPIC["SPORT_MOD"],
+                return await self.conn.datachannel.pub_sub.publish_request_new(
+                    topic or RTC_TOPIC["SPORT_MOD"],
                     request_data
                 )
 
             future = asyncio.run_coroutine_threadsafe(async_command(), self.loop)
-            future.result(timeout=5.0)
+            result = future.result(timeout=5.0)
 
             response.success = True
             response.message = f'{command_name} command sent successfully'
-            self.get_logger().info(response.message)
+            self.get_logger().info(f'{response.message}; response: {result}')
 
         except Exception as e:
             response.success = False
@@ -220,8 +815,9 @@ class UnitreeControlNode(Node):
         return self._execute_sport_command('StandDown', SPORT_CMD["StandDown"])
 
     def hello_callback(self, request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
-        """Service callback to make robot wave hello."""
-        return self._execute_sport_command('Hello', SPORT_CMD["Hello"])
+        """Service callback to make robot wave hello (G1: arm EXECUTE_ACTION 26)."""
+        topic, req = self._gesture_request(26)
+        return self._execute_sport_command('Hello', req["api_id"], req.get("parameter"), topic)
 
     def stretch_callback(self, request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
         """Service callback to make robot stretch."""
