@@ -55,9 +55,9 @@ class UnitreeControlNode(Node):
         # 21=right heart, 22=reject, 23=right hand up, 24=x-ray,
         # 25=face wave, 26=high wave, 27=shake hand, 99=release arm (reset).
         # Default: A=face wave, B=shake hand, X=release arm, Y=high wave,
-        #          LB=clap, RB=heart.
+        #          LB=clap. RB is the head-LED color cycle (see color_button).
         self.declare_parameter('gesture_buttons',
-                               '0:25,1:27,2:99,3:26,4:17,5:20')
+                               '0:25,1:27,2:99,3:26,4:17')
         # While a gesture plays, mute cmd_vel forwarding for this many seconds.
         # 0 (default) disables muting -- G1 arm actions are an upper-body
         # overlay, so it can gesture while walking. >0 makes the robot pause.
@@ -121,6 +121,41 @@ class UnitreeControlNode(Node):
         # Enable with e.g. perform_actions:='23,15,26,20'.
         self.declare_parameter('perform_actions', '')
         self.declare_parameter('perform_period', 6.0)      # s between actions
+        # --- head LED color ---
+        # G1's head RGB light is set through the 'voice' service over the same
+        # WebRTC connection the nav stack already owns (topic
+        # rt/api/voice/request, api_id 1010 SET_RGB_LED, parameter
+        # {"R","G","B"} each 0-255) -- verified 2026-07-16, response code 0.
+        # A rising edge on buttons[color_button] steps to the next palette
+        # entry; the same step is exposed as the /cycle_led service (for RViz /
+        # CLI). -1 disables. Default 5 = RB (was the heart gesture).
+        self.declare_parameter('color_button', 5)
+        # Palette to cycle through: "name:R,G,B;name:R,G,B;..." (0-255 each).
+        self.declare_parameter('color_palette',
+                               'red:255,0,0;green:0,255,0;blue:0,0,255;'
+                               'yellow:255,255,0;cyan:0,255,255;'
+                               'purple:160,0,255;white:255,255,255')
+        # Blink mode: while active, step to the next palette color every
+        # blink_period seconds (a festive rainbow flash). Toggled by the
+        # /led_blink_start and /led_blink_stop services (RViz / CLI).
+        self.declare_parameter('blink_period', 0.4)        # s between colors
+        # --- RViz clickable-button panel ---
+        # Publish a column of interactive-marker BUTTONs (add an
+        # "InteractiveMarkers" display in RViz on topic /g1_buttons/update):
+        # left-click fires the same actions as the joystick, so the operator
+        # can drive everything from RViz. The joystick still works in parallel.
+        # Anchored in panel_frame (default 'vehicle' so it follows the robot).
+        self.declare_parameter('rviz_buttons', True)
+        # Button label language. RViz2's built-in 3D font (Liberation Sans) has
+        # NO CJK glyphs, so 'zh' labels may show as boxes on some builds --
+        # switch to 'pinyin' or 'en' with panel_lang:=pinyin if that happens.
+        self.declare_parameter('panel_lang', 'zh')        # 'zh' | 'pinyin' | 'en'
+        self.declare_parameter('panel_frame', 'vehicle')
+        self.declare_parameter('panel_x', 0.0)             # m, in panel_frame
+        self.declare_parameter('panel_y', 1.2)             # m to the robot's left
+        self.declare_parameter('panel_z_top', 1.6)         # m, top button height
+        self.declare_parameter('panel_dz', 0.32)           # m vertical pitch
+        self.declare_parameter('panel_scale', 0.28)        # m button half-size
 
         # Get parameters
         self.robot_ip = self.get_parameter('robot_ip').value
@@ -138,6 +173,14 @@ class UnitreeControlNode(Node):
                 self.gesture_map[int(btn)] = int(act)
         self._prev_buttons = ()           # edge-detect state for gesture buttons
         self._wave_mute_until = 0.0       # monotonic deadline; cmd_vel muted until then
+        # Head-LED color cycle
+        self.color_button = int(self.get_parameter('color_button').value)
+        self.color_palette = self._parse_palette(
+            str(self.get_parameter('color_palette').value))
+        self._color_idx = -1              # -1 -> first press selects palette[0]
+        self.blink_period = max(0.05, float(self.get_parameter('blink_period').value))
+        self.blinking = False             # rainbow-flash mode active
+        self._blink_timer = None
 
         # --- homing state ---
         self.home_button = int(self.get_parameter('home_button').value)
@@ -231,7 +274,7 @@ class UnitreeControlNode(Node):
 
         # Subscribe to /joy so controller buttons can trigger gestures while
         # the nav stack owns the (single) WebRTC connection.
-        if self.gesture_map or self.home_button >= 0:
+        if self.gesture_map or self.home_button >= 0 or self.color_button >= 0:
             self.joy_sub = self.create_subscription(Joy, 'joy', self.joy_callback, 10)
             self.get_logger().info(
                 f'Gestures mapped on /joy: {self.gesture_map}'
@@ -276,6 +319,12 @@ class UnitreeControlNode(Node):
         self.hello_srv = self.create_service(Trigger, 'hello', self.hello_callback)
         self.stretch_srv = self.create_service(Trigger, 'stretch', self.stretch_callback)
         self.recovery_stand_srv = self.create_service(Trigger, 'recovery_stand', self.recovery_stand_callback)
+        self.cycle_led_srv = self.create_service(Trigger, 'cycle_led', self.cycle_led_callback)
+        self.blink_start_srv = self.create_service(Trigger, 'led_blink_start', self.led_blink_start_callback)
+        self.blink_stop_srv = self.create_service(Trigger, 'led_blink_stop', self.led_blink_stop_callback)
+
+        if bool(self.get_parameter('rviz_buttons').value):
+            self._setup_rviz_buttons()
 
         self.get_logger().info('Unitree control node started')
         self.get_logger().info('Subscribed to: cmd_vel')
@@ -350,6 +399,11 @@ class UnitreeControlNode(Node):
                 and msg.buttons[self.return_button] == 1
                 and not (self.return_button < len(prev) and prev[self.return_button] == 1)):
             self._toggle_return()
+        # Color button (RB by default): step to the next head-LED color.
+        if (self.color_palette and 0 <= self.color_button < len(msg.buttons)
+                and msg.buttons[self.color_button] == 1
+                and not (self.color_button < len(prev) and prev[self.color_button] == 1)):
+            self._cycle_led()
         for btn, action_id in self.gesture_map.items():
             if btn >= len(msg.buttons):
                 continue
@@ -373,6 +427,189 @@ class UnitreeControlNode(Node):
             except Exception as e:  # noqa: BLE001
                 self.get_logger().error(f'action {act} failed: {e}')
         fut.add_done_callback(_log_result)
+
+    # ---- head LED color ----
+
+    def _parse_palette(self, spec):
+        """Parse "name:R,G,B;..." into [(name, r, g, b), ...]; [] if empty."""
+        out = []
+        for entry in spec.strip().split(';'):
+            entry = entry.strip()
+            if not entry:
+                continue
+            try:
+                name, _, rgb = entry.partition(':')
+                r, g, b = (int(v) for v in rgb.split(','))
+                out.append((name.strip() or f'{r},{g},{b}', r, g, b))
+            except ValueError:
+                self.get_logger().warn(f'color_palette: bad entry {entry!r}, skipped')
+        return out
+
+    def _fire_led(self, r, g, b):
+        """Fire-and-forget a head-LED color over the WebRTC loop (G1 'voice'
+        service, api_id 1010). Never blocks the ROS executor."""
+        if not self.conn or not self.loop:
+            return
+        request = {"api_id": 1010, "parameter": {"R": int(r), "G": int(g), "B": int(b)}}
+        async def async_led(req=request):
+            return await self.conn.datachannel.pub_sub.publish_request_new(
+                "rt/api/voice/request", req)
+        fut = asyncio.run_coroutine_threadsafe(async_led(), self.loop)
+        def _log_result(f):
+            try:
+                f.result()
+            except Exception as e:  # noqa: BLE001
+                self.get_logger().error(f'LED set failed: {e}')
+        fut.add_done_callback(_log_result)
+
+    def _cycle_led(self):
+        """Advance to the next palette color and send it."""
+        if not self.color_palette:
+            return
+        self._color_idx = (self._color_idx + 1) % len(self.color_palette)
+        name, r, g, b = self.color_palette[self._color_idx]
+        self.get_logger().info(f'Head LED -> {name} ({r},{g},{b})')
+        self._fire_led(r, g, b)
+        return name
+
+    def _blink_tick(self):
+        if self.blinking:
+            self._cycle_led()
+
+    def _start_blink(self):
+        if not self.color_palette:
+            return False
+        if self._blink_timer is None:
+            self._blink_timer = self.create_timer(self.blink_period, self._blink_tick)
+        self.blinking = True
+        self.get_logger().warn(f'Head LED blink ON ({self.blink_period:.2f}s/color)')
+        return True
+
+    def _stop_blink(self):
+        self.blinking = False
+        self.get_logger().warn('Head LED blink OFF')
+
+    # ---- RViz clickable-button panel ----
+
+    def _setup_rviz_buttons(self):
+        """Publish a column of interactive-marker BUTTONs so every joystick
+        action is also one left-click away in RViz. Folded into this node so it
+        can call the action methods directly (no service round-trip) and needs
+        no extra executable / colcon build. Missing viz packages just disable
+        the panel with a warning."""
+        try:
+            from interactive_markers import InteractiveMarkerServer
+            from visualization_msgs.msg import (
+                InteractiveMarker, InteractiveMarkerControl,
+                InteractiveMarkerFeedback, Marker)
+        except Exception as e:  # noqa: BLE001
+            self.get_logger().warn(f'RViz buttons disabled (import failed): {e}')
+            return
+
+        self._IM_BUTTON = InteractiveMarkerControl.BUTTON
+        self._IM_CLICK = InteractiveMarkerFeedback.BUTTON_CLICK
+        self._Marker = Marker
+        self._InteractiveMarker = InteractiveMarker
+        self._InteractiveMarkerControl = InteractiveMarkerControl
+
+        # Label sets. RViz2's 3D font lacks CJK glyphs on some builds, so keep
+        # pinyin / en fallbacks selectable via panel_lang.
+        LABELS = {
+            'zh': {'wave_hi': '大招呼', 'wave_lo': '小招呼', 'clap': '鼓掌',
+                   'reset': '返回默认', 'stage': '去舞台中心', 'back': '回后台',
+                   'blink_on': '颜色开始', 'blink_off': '颜色结束'},
+            'pinyin': {'wave_hi': 'Da Zhao Hu', 'wave_lo': 'Xiao Zhao Hu',
+                       'clap': 'Gu Zhang', 'reset': 'Fan Hui Mo Ren',
+                       'stage': 'Qu Wu Tai Zhong Xin', 'back': 'Hui Hou Tai',
+                       'blink_on': 'Yan Se Kai Shi', 'blink_off': 'Yan Se Jie Shu'},
+            'en': {'wave_hi': 'Big Wave', 'wave_lo': 'Small Wave', 'clap': 'Clap',
+                   'reset': 'Reset Arm', 'stage': 'To Stage', 'back': 'Backstage',
+                   'blink_on': 'Color ON', 'blink_off': 'Color OFF'},
+        }
+        lang = str(self.get_parameter('panel_lang').value)
+        label = LABELS.get(lang, LABELS['zh'])
+
+        # (name, (r,g,b) button color, handler). Home/back only when the homing
+        # infrastructure was created (home_button/return_button >= 0).
+        specs = [
+            ('wave_hi', (0.20, 0.50, 0.90), lambda: self._fire_action(26)),
+            ('wave_lo', (0.20, 0.50, 0.90), lambda: self._fire_action(25)),
+            ('clap',    (0.20, 0.50, 0.90), lambda: self._fire_action(17)),
+            ('reset',   (0.45, 0.45, 0.50), lambda: self._fire_action(99)),
+        ]
+        if hasattr(self, 'waypoint_pub') and self.end_pose:
+            specs.append(('stage', (0.95, 0.55, 0.10), self._toggle_homing))
+        if hasattr(self, 'joy_pub'):
+            specs.append(('back', (0.95, 0.55, 0.10), self._toggle_return))
+        specs += [
+            ('blink_on',  (0.15, 0.75, 0.25), self._start_blink),
+            ('blink_off', (0.85, 0.20, 0.20), self._stop_blink),
+        ]
+        self._button_handlers = {name: fn for name, _, fn in specs}
+
+        frame = str(self.get_parameter('panel_frame').value)
+        px = float(self.get_parameter('panel_x').value)
+        py = float(self.get_parameter('panel_y').value)
+        z_top = float(self.get_parameter('panel_z_top').value)
+        dz = float(self.get_parameter('panel_dz').value)
+        s = float(self.get_parameter('panel_scale').value)
+
+        self.im_server = InteractiveMarkerServer(self, 'g1_buttons')
+        for i, (name, color, _fn) in enumerate(specs):
+            im = self._make_button(frame, name, label[name], color, px, py,
+                                   z_top - i * dz, s)
+            self.im_server.insert(im, feedback_callback=self._im_feedback)
+        self.im_server.applyChanges()
+        self.get_logger().info(
+            f'RViz buttons: {len(specs)} in frame "{frame}" '
+            '(add an InteractiveMarkers display on /g1_buttons/update)')
+
+    def _make_button(self, frame, name, label, color, x, y, z, s):
+        Marker = self._Marker
+        im = self._InteractiveMarker()
+        im.header.frame_id = frame
+        im.name = name
+        im.scale = 2.5 * s
+        im.pose.position.x = x
+        im.pose.position.y = y
+        im.pose.position.z = z
+
+        ctrl = self._InteractiveMarkerControl()
+        ctrl.interaction_mode = self._IM_BUTTON
+        ctrl.always_visible = True
+        ctrl.name = 'btn'
+
+        box = Marker()
+        box.type = Marker.CUBE
+        box.scale.x = 2.4 * s
+        box.scale.y = 0.9 * s
+        box.scale.z = 0.9 * s
+        box.color.r, box.color.g, box.color.b, box.color.a = (*color, 0.9)
+        ctrl.markers.append(box)
+
+        txt = Marker()
+        txt.type = Marker.TEXT_VIEW_FACING
+        txt.text = label
+        txt.scale.z = 0.7 * s
+        txt.color.r = txt.color.g = txt.color.b = txt.color.a = 1.0
+        txt.pose.position.z = 0.55 * s
+        ctrl.markers.append(txt)
+
+        im.controls.append(ctrl)
+        return im
+
+    def _im_feedback(self, feedback):
+        """Fire the mapped action on a button left-click."""
+        if feedback.event_type != self._IM_CLICK:
+            return
+        fn = self._button_handlers.get(feedback.marker_name)
+        if fn is None:
+            return
+        self.get_logger().info(f'RViz button: {feedback.marker_name}')
+        try:
+            fn()
+        except Exception as e:  # noqa: BLE001
+            self.get_logger().error(f'RViz button {feedback.marker_name} failed: {e}')
 
     def _stop_performing(self, release: bool = True):
         if self.performing:
@@ -826,6 +1063,33 @@ class UnitreeControlNode(Node):
     def recovery_stand_callback(self, request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
         """Service callback to recovery stand position."""
         return self._execute_sport_command('RecoveryStand', SPORT_CMD["RecoveryStand"])
+
+    def cycle_led_callback(self, request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
+        """Step the head LED to the next palette color (for RViz / CLI)."""
+        response = Trigger.Response()
+        if not self.color_palette:
+            response.success = False
+            response.message = 'color_palette empty'
+            return response
+        name = self._cycle_led()
+        response.success = True
+        response.message = f'LED -> {name}'
+        return response
+
+    def led_blink_start_callback(self, request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
+        """Start the head-LED rainbow blink (for RViz / CLI)."""
+        response = Trigger.Response()
+        response.success = self._start_blink()
+        response.message = 'blink started' if response.success else 'color_palette empty'
+        return response
+
+    def led_blink_stop_callback(self, request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
+        """Stop the head-LED blink (for RViz / CLI)."""
+        response = Trigger.Response()
+        self._stop_blink()
+        response.success = True
+        response.message = 'blink stopped'
+        return response
 
     def destroy_node(self):
         """Clean up resources before node shutdown."""
