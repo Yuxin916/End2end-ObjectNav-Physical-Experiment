@@ -91,7 +91,7 @@ class UnitreeControlNode(Node):
         # Fine-align: inside goal_tolerance, bypass planner+follower (their
         # cmd_vel is dropped) and P-servo the map-frame position error with
         # small omni steps, then rotate to the recorded yaw.
-        self.declare_parameter('fine_tolerance', 0.08)     # m: accept position
+        self.declare_parameter('fine_tolerance', 0.15)     # m: accept position
         self.declare_parameter('fine_speed', 0.2)          # cap for fine steps
         self.declare_parameter('fine_timeout', 15.0)       # s: give up -> rotate
         # --- taught trajectory (recorded fixed route) ---
