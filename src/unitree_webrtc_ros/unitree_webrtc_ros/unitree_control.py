@@ -91,7 +91,7 @@ class UnitreeControlNode(Node):
         # Fine-align: inside goal_tolerance, bypass planner+follower (their
         # cmd_vel is dropped) and P-servo the map-frame position error with
         # small omni steps, then rotate to the recorded yaw.
-        self.declare_parameter('fine_tolerance', 0.15)     # m: accept position
+        self.declare_parameter('fine_tolerance', 0.10)     # m: accept position
         self.declare_parameter('fine_speed', 0.2)          # cap for fine steps
         self.declare_parameter('fine_timeout', 15.0)       # s: give up -> rotate
         # --- taught trajectory (recorded fixed route) ---
@@ -219,6 +219,7 @@ class UnitreeControlNode(Node):
         self._next_perform_t = 0.0
         self.end_pose = self._load_end_pose(str(self.get_parameter('end_pose_file').value))
         self.homing = None                # None | 'drive' | 'fine' | 'rotate' | 'return'
+        self._estop = False               # emergency stop latched (safetyStop=2)
         self.cur_pose = None              # (x, y, yaw) from /state_estimation
 
         # Map connection method string to enum
@@ -397,6 +398,16 @@ class UnitreeControlNode(Node):
             # current button state on open -- a stale/phantom 'pressed' there
             # must not fire a gesture (robot crossed arms at startup once).
             return
+        # Manual takeover releases a latched e-stop: real stick deflection
+        # (left/right stick translate axes, past a deadzone) clears it so the
+        # operator is never trapped. The 50 Hz idle stream stays near 0.
+        if self._estop and msg.axes:
+            sticks = [msg.axes[i] for i in (0, 1, 3) if i < len(msg.axes)]
+            if any(abs(v) > 0.25 for v in sticks):
+                self._estop = False
+                if hasattr(self, 'stop_pub'):
+                    self.stop_pub.publish(Int8(data=0))
+                self.get_logger().warn('E-STOP released (manual joystick input)')
         # Home button (right stick click by default): toggle go-to-end-pose.
         if (self.end_pose and 0 <= self.home_button < len(msg.buttons)
                 and msg.buttons[self.home_button] == 1
@@ -509,6 +520,7 @@ class UnitreeControlNode(Node):
             'reset':   lambda: self._fire_action(99),   # 返回默认 release arm
             'stage':   self._toggle_homing,             # 去舞台中心
             'back':    self._toggle_return,             # 回后台
+            'stop':    self._emergency_stop,            # 急停：清 waypoint + 停下
             'color':   self._cycle_led,                 # step palette
             'blink_on':  self._start_blink,             # 颜色开始
             'blink_off': self._stop_blink,              # 颜色结束
@@ -819,6 +831,7 @@ class UnitreeControlNode(Node):
             self.get_logger().warn('Homing: no /state_estimation yet, ignored')
             return
         self.homing = 'drive'
+        self._estop = False
         self._start_route(*self.cur_pose[:2], reverse=False)
         # Resume navigation in case a safety stop is latched (RViz 'Resume').
         self.stop_pub.publish(Int8(data=0))
@@ -842,6 +855,7 @@ class UnitreeControlNode(Node):
             self.get_logger().warn('Return: no /state_estimation yet, ignored')
             return
         self.homing = 'return'
+        self._estop = False
         self._start_route(*self.cur_pose[:2], reverse=True)
         self.stop_pub.publish(Int8(data=0))
         self._publish_autonomy_latch()
@@ -850,6 +864,21 @@ class UnitreeControlNode(Node):
             ('Return STARTED (taught route reversed)' if self._route
              else 'Return STARTED (straight-line carrot)')
             + f' -> run start ({sx:.2f}, {sy:.2f}). Press again to cancel.')
+
+    def _emergency_stop(self):
+        """Stop NOW: cancel any homing/return (kills the carrot/way_point stream
+        and the autonomy re-latch), full-halt pathFollower via safetyStop=2, and
+        send zero velocity immediately. Latched: released when the operator moves
+        the joystick (manual takeover) or presses 去舞台中心 / 回后台 again."""
+        self._stop_performing()
+        self.homing = None
+        self._estop = True
+        if hasattr(self, 'stop_pub'):
+            self.stop_pub.publish(Int8(data=2))    # >=2: zero speed AND yaw rate
+        self._send_vel(0.0, 0.0, 0.0)
+        self.get_logger().warn(
+            'E-STOP: homing cancelled, waypoint cleared, robot halted. '
+            'Move the joystick or press 去舞台中心/回后台 to release.')
 
     def _publish_carrot(self, wx, wy, speed=None):
         sp = self.homing_speed if speed is None else speed

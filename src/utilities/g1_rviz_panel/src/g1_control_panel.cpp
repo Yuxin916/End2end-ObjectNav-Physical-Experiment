@@ -21,6 +21,15 @@ G1ControlPanel::G1ControlPanel(QWidget * parent)
   title->setStyleSheet("font-weight:bold; font-size:16px; padding:2px;");
   root->addWidget(title);
 
+  // Emergency stop -- big and at the top: clears the waypoint and halts.
+  auto * stop = makeButton("STOP", "stop", "#cc0000");
+  stop->setMinimumHeight(66);
+  stop->setStyleSheet(
+    "QPushButton{background:#cc0000; color:white; font-size:22px; font-weight:bold;"
+    " border:2px solid white; border-radius:6px; padding:8px;}"
+    "QPushButton:pressed{background:#7a0000;}");
+  root->addWidget(stop);
+
   // One button per row, full width -- dock the panel on the right and widen it.
   root->addWidget(makeButton("Big Wave", "wave_hi", "#3380e6"));
   root->addWidget(makeButton("Small Wave", "wave_lo", "#3380e6"));
