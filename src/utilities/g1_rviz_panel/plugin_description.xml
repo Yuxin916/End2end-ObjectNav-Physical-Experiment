@@ -1,0 +1,10 @@
+<library path="g1_rviz_panel">
+  <class name="g1_rviz_panel/G1ControlPanel"
+         type="g1_rviz_panel::G1ControlPanel"
+         base_class_type="rviz_common::Panel">
+    <description>
+      G1 control buttons: arm gestures, go-to-stage / backstage, head-LED color.
+      Each button publishes a command string on /g1_panel_cmd.
+    </description>
+  </class>
+</library>

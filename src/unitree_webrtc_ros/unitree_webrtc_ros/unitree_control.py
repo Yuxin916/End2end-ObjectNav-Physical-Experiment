@@ -18,7 +18,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from geometry_msgs.msg import TwistStamped, PointStamped
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import Joy
-from std_msgs.msg import Float32, Int8
+from std_msgs.msg import Float32, Int8, String
 from std_srvs.srv import Trigger
 
 from unitree_webrtc_connect.webrtc_driver import UnitreeWebRTCConnection, WebRTCConnectionMethod
@@ -139,13 +139,16 @@ class UnitreeControlNode(Node):
         # blink_period seconds (a festive rainbow flash). Toggled by the
         # /led_blink_start and /led_blink_stop services (RViz / CLI).
         self.declare_parameter('blink_period', 0.4)        # s between colors
-        # --- RViz clickable-button panel ---
-        # Publish a column of interactive-marker BUTTONs (add an
-        # "InteractiveMarkers" display in RViz on topic /g1_buttons/update):
-        # left-click fires the same actions as the joystick, so the operator
-        # can drive everything from RViz. The joystick still works in parallel.
-        # Anchored in panel_frame (default 'vehicle' so it follows the robot).
-        self.declare_parameter('rviz_buttons', True)
+        # --- RViz control surface ---
+        # Primary: the docked g1_rviz_panel plugin publishes a command string
+        # on /g1_panel_cmd; this node dispatches it to the same actions as the
+        # joystick (see _run_panel_cmd). The joystick still works in parallel.
+        self.declare_parameter('panel_cmd_topic', 'g1_panel_cmd')
+        # Optional legacy: a column of interactive-marker BUTTONs floating in
+        # the 3D scene (add an "InteractiveMarkers" display on /g1_buttons/
+        # update). OFF by default -- they need panel_frame TF (only after
+        # localization locks) and are easy to lose. The docked panel is better.
+        self.declare_parameter('rviz_buttons', False)
         # Button label language. RViz2's built-in 3D font (Liberation Sans) has
         # NO CJK glyphs, so 'zh' labels may show as boxes on some builds --
         # switch to 'pinyin' or 'en' with panel_lang:=pinyin if that happens.
@@ -323,6 +326,11 @@ class UnitreeControlNode(Node):
         self.blink_start_srv = self.create_service(Trigger, 'led_blink_start', self.led_blink_start_callback)
         self.blink_stop_srv = self.create_service(Trigger, 'led_blink_stop', self.led_blink_stop_callback)
 
+        # Docked RViz panel (g1_rviz_panel) publishes a command string here.
+        self.panel_cmd_sub = self.create_subscription(
+            String, str(self.get_parameter('panel_cmd_topic').value),
+            self._panel_cmd_cb, 10)
+
         if bool(self.get_parameter('rviz_buttons').value):
             self._setup_rviz_buttons()
 
@@ -488,6 +496,43 @@ class UnitreeControlNode(Node):
     def _stop_blink(self):
         self.blinking = False
         self.get_logger().warn('Head LED blink OFF')
+
+    # ---- RViz control dispatch (docked panel -> action) ----
+
+    def _command_map(self):
+        """cmd string -> action. Shared by the docked panel (/g1_panel_cmd) and
+        the optional interactive-marker buttons."""
+        return {
+            'wave_hi': lambda: self._fire_action(26),   # 大招呼 big wave
+            'wave_lo': lambda: self._fire_action(25),   # 小招呼 small wave
+            'clap':    lambda: self._fire_action(17),   # 鼓掌 clap
+            'reset':   lambda: self._fire_action(99),   # 返回默认 release arm
+            'stage':   self._toggle_homing,             # 去舞台中心
+            'back':    self._toggle_return,             # 回后台
+            'color':   self._cycle_led,                 # step palette
+            'blink_on':  self._start_blink,             # 颜色开始
+            'blink_off': self._stop_blink,              # 颜色结束
+        }
+
+    def _run_panel_cmd(self, cmd):
+        fn = self._command_map().get(cmd)
+        if fn is None:
+            self.get_logger().warn(f'panel cmd unknown: {cmd!r}')
+            return
+        if cmd == 'stage' and not (hasattr(self, 'waypoint_pub') and self.end_pose):
+            self.get_logger().warn('去舞台中心 unavailable (homing not configured)')
+            return
+        if cmd == 'back' and not hasattr(self, 'joy_pub'):
+            self.get_logger().warn('回后台 unavailable (return not configured)')
+            return
+        self.get_logger().info(f'Panel cmd: {cmd}')
+        try:
+            fn()
+        except Exception as e:  # noqa: BLE001
+            self.get_logger().error(f'panel cmd {cmd} failed: {e}')
+
+    def _panel_cmd_cb(self, msg: String):
+        self._run_panel_cmd(msg.data.strip())
 
     # ---- RViz clickable-button panel ----
 

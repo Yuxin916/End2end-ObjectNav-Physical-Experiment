@@ -26,6 +26,8 @@ Panels:
     SyncSource: RegScan
   - Class: teleop_rviz_plugin/TeleopPanel
     Name: TeleopPanel
+  - Class: g1_rviz_panel/G1ControlPanel
+    Name: G1 Controls
 Visualization Manager:
   Class: ""
   Displays:
@@ -554,15 +556,6 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: /vlm_sam2_segmentation_debug
       Value: false
-    - Class: rviz_default_plugins/InteractiveMarkers
-      Enable Transparency: true
-      Enabled: true
-      Interactive Markers Namespace: /g1_buttons
-      Name: G1 Buttons
-      Show Axes: false
-      Show Descriptions: false
-      Show Visual Aids: false
-      Value: true
   Enabled: true
   Global Options:
     Background Color: 0; 0; 0
