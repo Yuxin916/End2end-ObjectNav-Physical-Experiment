@@ -744,22 +744,21 @@ namespace arise_slam {
         //     laserCloud->push_back(point);
         // }
 
-#if 1  
-        pcl::PointCloud<point_os::PointcloudXYZITR>::Ptr undistortedPoints;
-        undistortedPoints = std::make_shared<pcl::PointCloud<point_os::PointcloudXYZITR>>(laserCloudIn);
-        //wrap feature message in one message
-        publishTopic(lidar_start_time, undistortedPoints, edgePoints, plannerPoints, bobPoints, q_w_original_l);
+#if 1
+    // Make a deep-copy cloud with the correct pointer type for publishTopic
+    using CloudT  = pcl::PointCloud<point_os::PointcloudXYZITR>;
+    using CloudPtr = CloudT::Ptr;
 
-        // double roll, pitch, yaw;
-        // tf2::Quaternion orientation_curr(q_w_original_l.x(), q_w_original_l.y(), q_w_original_l.z(), q_w_original_l.w());
-        // tf2::Matrix3x3(orientation_curr).getRPY(roll, pitch, yaw);
-        // RCLCPP_INFO(this->get_logger(), "FE Start roll, pitch, yaw %f, %f, %f", roll, pitch, yaw);
+    CloudPtr undistortedPoints(new CloudT(laserCloudIn));  // deep copy from reference
 
-        // sensor_msgs::msg::PointCloud2 laserCloudOutMsg;
-        // pcl::toROSMsg(*bobPoints, laserCloudOutMsg);
-        // laserCloudOutMsg.header.stamp = rclcpp::Time(lidar_start_time*1e9);
-        // laserCloudOutMsg.header.frame_id = "sensor_init";
-        // pubBobPoints->publish(laserCloudOutMsg);
+    publishTopic(
+        lidar_start_time,
+        undistortedPoints,
+        edgePoints,
+        plannerPoints,
+        bobPoints,
+        q_w_original_l
+    );
 
 #else
 

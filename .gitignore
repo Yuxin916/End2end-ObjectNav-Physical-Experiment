@@ -25,3 +25,14 @@ src/base_autonomy/vehicle_simulator/mesh/unity/*
 src/base_autonomy/vehicle_simulator/log/*
 
 !readme.txt
+
+.idea
+
+src/exploration_planner/tare_planner/or-tools/lib.x86_64.off/
+
+src/utilities/livox_ros_driver2/log/
+
+src/pcl_msgs
+src/perception_pcl/
+src/vision_opencv/
+
