@@ -52,6 +52,7 @@ private:
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr terrain_local_sub_;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr scan_sub_;
     rclcpp::Subscription<geometry_msgs::msg::PointStamped>::SharedPtr waypoint_sub_;
+    rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_pose_sub_;
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr read_command_sub_, save_command_sub_;
 
     rclcpp::Publisher<geometry_msgs::msg::PointStamped>::SharedPtr goal_pub_;
@@ -136,10 +137,10 @@ private:
     void MainLoopCallBack();
 
     void PlanningCallBack();
-    
+
     void PrcocessCloud(const sensor_msgs::msg::PointCloud2::SharedPtr pc, const PointCloudPtr& cloudOut);
 
-    
+
     Point3D ExtendViewpointOnObsCloud(const NavNodePtr& nav_node_ptr, const PointCloudPtr& obsCloudIn, float& free_dist);
 
     Point3D ProjectNavWaypoint(const NavNodePtr& nav_node_ptr, const NavNodePtr& last_point_ptr);
@@ -159,7 +160,7 @@ private:
         if (msg->buttons[4] > 0.5) {
             is_reset_env_ = true;
         }
-    } 
+    }
 
     inline void UpdateCommandCallBack(const std_msgs::msg::Bool::SharedPtr msg) {
         if (is_stop_update_ && msg->data) {
@@ -169,7 +170,7 @@ private:
         if (!is_stop_update_ && !msg->data) {
             if (FARUtil::IsDebug) RCLCPP_WARN(nh_->get_logger(), "FARMaster: Stop visibility graph update.");
             is_stop_update_ = !msg->data;
-        }   
+        }
     }
 
     inline void FakeTerminalInit() {
@@ -206,6 +207,7 @@ private:
 
     void ScanCallBack(const sensor_msgs::msg::PointCloud2::SharedPtr scan_pc);
     void WaypointCallBack(const geometry_msgs::msg::PointStamped& route_goal);
+    void GoalPoseCallBack(const geometry_msgs::msg::PoseStamped& goal_pose);
 
     void ExtractDynamicObsFromScan(const PointCloudPtr& scanCloudIn, 
                                    const PointCloudPtr& obsCloudIn,

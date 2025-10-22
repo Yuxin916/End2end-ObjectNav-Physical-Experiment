@@ -30,7 +30,7 @@ localPlanner:
     # Sensor offset
     sensorOffsetX: 0.2
     sensorOffsetY: 0.0
-  
+
     # Vehicle dimensions
     vehicleLength: 0.6
     vehicleWidth: 0.5

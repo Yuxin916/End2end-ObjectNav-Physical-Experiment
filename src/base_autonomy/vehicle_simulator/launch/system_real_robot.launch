@@ -5,7 +5,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, TimerAction
 from launch.launch_description_sources import PythonLaunchDescriptionSource, FrontendLaunchDescriptionSource
 from launch_ros.actions import Node
-from launch.substitutions import LaunchConfiguration 
+from launch.substitutions import LaunchConfiguration
 
 def generate_launch_description():
   world_name = LaunchConfiguration('world_name')
@@ -23,10 +23,12 @@ def generate_launch_description():
   declare_vehicleX = DeclareLaunchArgument('vehicleX', default_value='0.0', description='')
   declare_vehicleY = DeclareLaunchArgument('vehicleY', default_value='0.0', description='')
   declare_checkTerrainConn = DeclareLaunchArgument('checkTerrainConn', default_value='true', description='')
-  
+
   start_local_planner = IncludeLaunchDescription(
-    FrontendLaunchDescriptionSource(os.path.join(
-      get_package_share_directory('local_planner'), 'launch', 'local_planner.launch')
+<!--     FrontendLaunchDescriptionSource(os.path.join( -->
+<!--       get_package_share_directory('local_planner'), 'launch', 'local_planner.launch') -->
+    PythonLaunchDescriptionSource(os.path.join(
+      get_package_share_directory('local_planner'), 'launch', 'local_planner.launch.py')
     ),
     launch_arguments={
       'realRobot': 'true',
@@ -75,7 +77,7 @@ def generate_launch_description():
   )
 
   start_joy = Node(
-    package='joy', 
+    package='joy',
     executable='joy_node',
     name='ps3_joy',
     output='screen',

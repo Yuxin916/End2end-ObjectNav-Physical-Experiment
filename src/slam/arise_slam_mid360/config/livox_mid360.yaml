@@ -18,20 +18,13 @@ feature_extraction_node:
 
         scan_line: 4 #16 64
         sensor: "livox"
-        mapping_skip_frame: 1
+        mapping_skip_frame: 2
         lidar_flip: false
-        blindFront: 0.1
-        blindBack: -0.2
-        blindLeft: 0.1
-        blindRight: -0.1
-        blindDiskLow: -0.05
-        blindDiskHigh: 0.05
-        blindDiskRadius: 0.5
         use_imu_roll_pitch: false
         use_dynamic_mask: false
         use_up_realsense_points: false
         use_down_realsense_points: false
-        min_range: 0.1    #<!-- remove too closed points -->
+        min_range: 0.15    #<!-- remove too closed points -->
         max_range: 130.
         skip_realsense_points: 3
         provide_imu_laser_extrinsic: true
@@ -75,7 +68,7 @@ laser_mapping_node:
         pos_degeneracy_threshold: 1.0
         ori_degeneracy_threshold: 1.0
 
-        local_mode: false
+        local_mode: true
         read_pose_file: false
         init_x: 0.0
         init_y: 0.0
