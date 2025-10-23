@@ -2,7 +2,7 @@
 <package format="3">
   <name>unitree_cmd_bridge</name>
   <version>0.0.1</version>
-  <description>Bridge /cmd_vel(Twist/Stamped) to Unitree Go2 SportClient::Move</description>
+  <description>Bridge /cmd_vel (Twist/TwistStamped) to Unitree Go2 SportClient::Move</description>
 
   <maintainer email="you@example.com">you</maintainer>
   <license>BSD-3-Clause</license>
