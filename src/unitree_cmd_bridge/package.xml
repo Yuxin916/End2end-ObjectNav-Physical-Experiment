@@ -1,0 +1,11 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>unitree_cmd_bridge</name>
+  <version>0.0.1</version>
+  <description>Bridge /cmd_vel to Unitree SDK2 SportClient</description>
+  <maintainer email="you@example.com">you</maintainer>
+  <license>BSD-3-Clause</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>rclcpp</depend>
+  <depend>geometry_msgs</depend>
+</package>

@@ -48,6 +48,49 @@ ament_target_dependencies(sim_image_repub rclcpp std_msgs sensor_msgs cv_bridge)
 target_link_libraries(vehicleSimulator ${OpenCV_LIBRARIES} ${PCL_LIBRARIES})
 target_link_libraries(sim_image_repub ${OpenCV_LIBRARIES})
 
+add_executable(vel_to_sport_client src/vel_to_sport_client.cpp)
+ament_target_dependencies(vel_to_sport_client rclcpp geometry_msgs)
+
+# --- Where your SDK lives (override with -DUNITREE_SDK2_ROOT=/path/to/sdk if needed)
+set(UNITREE_SDK2_ROOT "$ENV{UNITREE_SDK2_ROOT}" CACHE PATH "Unitree SDK2 root")
+if(NOT UNITREE_SDK2_ROOT)
+  set(UNITREE_SDK2_ROOT "$ENV{HOME}/unitree_sdk2")
+endif()
+
+# aarch64 (Jetson) lib dir
+set(UNITREE_SDK2_LIBDIR "${UNITREE_SDK2_ROOT}/lib/aarch64")
+
+# Includes
+target_include_directories(vel_to_sport_client PRIVATE
+  ${UNITREE_SDK2_ROOT}/include
+)
+
+# Static archive (.a)
+find_library(UNITREE_SDK2_LIB
+  NAMES unitree_sdk2
+  PATHS ${UNITREE_SDK2_LIBDIR}
+  NO_DEFAULT_PATH
+)
+
+if(NOT UNITREE_SDK2_LIB)
+  message(FATAL_ERROR "Could not find libunitree_sdk2.a under ${UNITREE_SDK2_LIBDIR}")
+endif()
+
+# Threads (and likely dl/rt on 20.04 aarch64)
+find_package(Threads REQUIRED)
+
+# PLAIN signature (matches ament_target_dependencies)
+target_link_libraries(vel_to_sport_client ${UNITREE_SDK2_LIB} Threads::Threads dl rt)
+
+# If you see undefined references from the SDK due to static linking,
+# try force-linking all objects in the archive:
+# target_link_options(vel_to_sport_client PRIVATE -Wl,--whole-archive ${UNITREE_SDK2_LIB} -Wl,--no-whole-archive)
+
+install(TARGETS vel_to_sport_client
+  RUNTIME DESTINATION lib/${PROJECT_NAME}
+)
+
+
 install(TARGETS
   vehicleSimulator
   sim_image_repub

@@ -2,7 +2,7 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, TimerAction
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource, FrontendLaunchDescriptionSource
 from launch_ros.actions import Node
 from launch.substitutions import LaunchConfiguration
@@ -91,6 +91,26 @@ def generate_launch_description():
       [get_package_share_directory('livox_ros_driver2'), '/launch_ROS2/msg_MID360_launch.py']),
   )
 
+  start_vel_to_sport = Node(
+    package='unitree_cmd_bridge',
+    executable='vel_to_sport_client',
+    name='vel_to_sport_client',
+    output='screen',
+    parameters=[{
+      'cmd_topic': '/cmd_vel',     # <-- matches your active topic
+      'timeout': 0.3,
+      'publish_hz': 50.0,
+      'max_vx': 0.8,
+      'max_vy': 0.5,
+      'max_wz': 1.5,
+      'elliptical_cap': True,
+      'invert_vx': False,
+      'invert_vy': False,
+      'invert_wz': False,
+      'use_sensor_qos': False
+    }]
+  )
+
   ld = LaunchDescription()
 
   # Add the actions
@@ -110,5 +130,6 @@ def generate_launch_description():
   ld.add_action(start_visualization_tools)
   ld.add_action(start_joy)
   ld.add_action(start_mid360)
+  ld.add_action(start_vel_to_sport)
 
   return ld
