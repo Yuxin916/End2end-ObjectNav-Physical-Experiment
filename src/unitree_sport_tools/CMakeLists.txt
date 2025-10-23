@@ -16,11 +16,24 @@ find_package(unitree_sdk2 REQUIRED)  # Provided by Unitree SDK2
 add_executable(stand_example_go2 src/stand_example_go2.cpp)
 target_link_libraries(stand_example_go2 PRIVATE unitree_sdk2)
 
+add_executable(sports_client src/sports_client.cpp)
+target_link_libraries(sports_client PRIVATE unitree_sdk2)
+
+add_executable(udp_to_sport_client src/udp_to_sport_client.cpp)
+target_link_libraries(udp_to_sport_client PRIVATE unitree_sdk2)
+
 # Optional: if your SDK needs ddscxx headers/libs explicitly, Unitree’s config
 # should already handle that. If not, you could add include/link dirs here.
 
 # Install so `ros2 run` works
 install(TARGETS stand_example_go2
+  RUNTIME DESTINATION lib/${PROJECT_NAME}
+)
+install(TARGETS sports_client
+  RUNTIME DESTINATION lib/${PROJECT_NAME}
+)
+
+install(TARGETS udp_to_sport_client
   RUNTIME DESTINATION lib/${PROJECT_NAME}
 )
 

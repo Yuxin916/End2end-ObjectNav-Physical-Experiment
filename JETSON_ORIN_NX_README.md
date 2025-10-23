@@ -68,10 +68,14 @@ colcon build --packages-select arise_slam_mid360 \
 
 ### Env Variable 
 ```bash
-export ROBOT_CONFIG_PATH="unitree/unitree_g1"
+export ROBOT_CONFIG_PATH="unitree/unitree_go2"
 source install/setup.bash
 ```
 
+## Packages Run
+```bash
+ros2 run unitree_sport_tools stand_example_go2 eth0
+```
 
 ## Ethernet Network Configuration
 
