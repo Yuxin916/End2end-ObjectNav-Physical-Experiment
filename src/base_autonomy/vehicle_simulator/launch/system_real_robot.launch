@@ -1,5 +1,6 @@
 import os
 
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, ExecuteProcess, SetEnvironmentVariable
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
@@ -91,25 +92,55 @@ def generate_launch_description():
       [get_package_share_directory('livox_ros_driver2'), '/launch_ROS2/msg_MID360_launch.py']),
   )
 
-  start_vel_to_sport = Node(
+<!--   start_vel_to_sport = Node( -->
+<!--     package='unitree_cmd_bridge', -->
+<!--     executable='vel_to_sport_client', -->
+<!--     name='vel_to_sport_client', -->
+<!--     output='screen', -->
+<!--     parameters=[{ -->
+<!--       'cmd_topic': '/cmd_vel',     # <-- matches your active topic -->
+<!--       'timeout': 0.3, -->
+<!--       'publish_hz': 50.0, -->
+<!--       'max_vx': 0.8, -->
+<!--       'max_vy': 0.5, -->
+<!--       'max_wz': 1.5, -->
+<!--       'elliptical_cap': True, -->
+<!--       'invert_vx': False, -->
+<!--       'invert_vy': False, -->
+<!--       'invert_wz': False, -->
+<!--       'use_sensor_qos': False -->
+<!--     }] -->
+<!--   ) -->
+
+  # --- Unitree SDK listener (pure binary; started via `ros2 run`) ---
+  # Make sure Unitree libs are visible to the process
+  env_ld = SetEnvironmentVariable(
+    name='LD_LIBRARY_PATH',
+    value='/opt/unitree_robotics/lib/aarch64:/opt/unitree_robotics/thirdparty/lib/aarch64:' +
+          os.environ.get('LD_LIBRARY_PATH', '')
+          )
+
+  start_udp_listener = ExecuteProcess(
+    cmd=['ros2', 'run', 'unitree_sport_tools', 'udp_to_sport_client'],
+    output='screen'
+    )
+
+  # --- ROS bridge: /cmd_vel -> UDP 127.0.0.1:50051 ---
+  start_vel_to_udp = Node(
     package='unitree_cmd_bridge',
-    executable='vel_to_sport_client',
-    name='vel_to_sport_client',
+    executable='vel_to_sport_bridge',
+    name='vel_to_sport_bridge',
     output='screen',
     parameters=[{
-      'cmd_topic': '/cmd_vel',     # <-- matches your active topic
-      'timeout': 0.3,
-      'publish_hz': 50.0,
-      'max_vx': 0.8,
-      'max_vy': 0.5,
-      'max_wz': 1.5,
-      'elliptical_cap': True,
-      'invert_vx': False,
-      'invert_vy': False,
-      'invert_wz': False,
-      'use_sensor_qos': False
-    }]
-  )
+      'cmd_vel_topic': '/cmd_vel',
+      'target_ip': '127.0.0.1',
+      'target_port': 50051,
+            # optional:
+            # 'use_csv': False,
+            # 'qos_depth': 10,
+        }]
+    )
+
 
   ld = LaunchDescription()
 
@@ -130,6 +161,10 @@ def generate_launch_description():
   ld.add_action(start_visualization_tools)
   ld.add_action(start_joy)
   ld.add_action(start_mid360)
-  ld.add_action(start_vel_to_sport)
+<!--   ld.add_action(start_vel_to_sport) -->
+  ld.add_action(env_ld)            # set LD_LIBRARY_PATH first
+  ld.add_action(start_udp_listener)  # start the SDK listener
+  ld.add_action(start_vel_to_udp)    # then the /cmd_vel -> UDP bridge
+
 
   return ld
