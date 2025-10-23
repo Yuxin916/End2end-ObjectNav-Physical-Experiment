@@ -33,6 +33,46 @@ rm -rf build install log
 colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release
 ```
 
+### Find a package 
+```bash
+sudo find /opt ~/ -type f -name "cv_bridgeConfig.cmake" 2>/dev/null | head
+```
+
+### If OOM: c++: fatal error: Killed signal terminated program cc1plus compilation terminated. 
+```bash
+# one compile at a time (both at the package and translation-unit level)
+export CMAKE_BUILD_PARALLEL_LEVEL=1
+export MAKEFLAGS="-j1"
+
+colcon build --packages-select xxxxx \
+  --event-handlers console_cohesion+ \
+  --cmake-args -DCMAKE_BUILD_TYPE=Release
+```
+
+### cv_bridge missing
+```bash
+cd src
+
+git clone -b humble https://github.com/ros-perception/vision_opencv.git
+
+cd ..
+rosdep update
+rosdep install --from-paths src --ignore-src -r -y
+
+colcon build --packages-select cv_bridge image_geometry \
+  --cmake-args -DCMAKE_BUILD_TYPE=Release
+
+colcon build --packages-select arise_slam_mid360 \
+  --cmake-clean-cache --cmake-args -DCMAKE_BUILD_TYPE=Release
+```
+
+### Env Variable 
+```bash
+export ROBOT_CONFIG_PATH="unitree/unitree_g1"
+source install/setup.bash
+```
+
+
 ## Ethernet Network Configuration
 
 ### Built-in Go2 robot computer 
