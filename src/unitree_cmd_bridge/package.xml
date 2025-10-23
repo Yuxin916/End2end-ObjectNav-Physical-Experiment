@@ -2,10 +2,19 @@
 <package format="3">
   <name>unitree_cmd_bridge</name>
   <version>0.0.1</version>
-  <description>Bridge /cmd_vel to Unitree SDK2 SportClient</description>
+  <description>Bridge /cmd_vel(Twist/Stamped) to Unitree Go2 SportClient::Move</description>
+
   <maintainer email="you@example.com">you</maintainer>
   <license>BSD-3-Clause</license>
+
+  <!-- ament build -->
   <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <!-- runtime/build deps -->
   <depend>rclcpp</depend>
   <depend>geometry_msgs</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
 </package>
