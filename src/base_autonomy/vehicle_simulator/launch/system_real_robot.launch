@@ -1,170 +1,163 @@
 import os
 
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, ExecuteProcess, SetEnvironmentVariable
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
-from launch.launch_description_sources import PythonLaunchDescriptionSource, FrontendLaunchDescriptionSource
+from launch.actions import (
+    DeclareLaunchArgument,
+    IncludeLaunchDescription,
+    ExecuteProcess,
+    SetEnvironmentVariable,
+    TimerAction,
+)
+from launch.launch_description_sources import (
+    PythonLaunchDescriptionSource,
+    FrontendLaunchDescriptionSource,
+)
 from launch_ros.actions import Node
 from launch.substitutions import LaunchConfiguration
 
+
 def generate_launch_description():
-  world_name = LaunchConfiguration('world_name')
-  sensorOffsetX = LaunchConfiguration('sensorOffsetX')
-  sensorOffsetY = LaunchConfiguration('sensorOffsetY')
-  cameraOffsetZ = LaunchConfiguration('cameraOffsetZ')
-  vehicleX = LaunchConfiguration('vehicleX')
-  vehicleY = LaunchConfiguration('vehicleY')
-  checkTerrainConn = LaunchConfiguration('checkTerrainConn')
+    # ----- args -----
+    world_name = LaunchConfiguration('world_name')
+    sensorOffsetX = LaunchConfiguration('sensorOffsetX')
+    sensorOffsetY = LaunchConfiguration('sensorOffsetY')
+    cameraOffsetZ = LaunchConfiguration('cameraOffsetZ')
+    vehicleX = LaunchConfiguration('vehicleX')
+    vehicleY = LaunchConfiguration('vehicleY')
+    checkTerrainConn = LaunchConfiguration('checkTerrainConn')
+    nic = LaunchConfiguration('nic')  # NEW: NIC for Unitree SDK, e.g., eth0
 
-  declare_world_name = DeclareLaunchArgument('world_name', default_value='real_world', description='')
-  declare_sensorOffsetX = DeclareLaunchArgument('sensorOffsetX', default_value='0.05', description='')
-  declare_sensorOffsetY = DeclareLaunchArgument('sensorOffsetY', default_value='0.0', description='')
-  declare_cameraOffsetZ = DeclareLaunchArgument('cameraOffsetZ', default_value='0.25', description='')
-  declare_vehicleX = DeclareLaunchArgument('vehicleX', default_value='0.0', description='')
-  declare_vehicleY = DeclareLaunchArgument('vehicleY', default_value='0.0', description='')
-  declare_checkTerrainConn = DeclareLaunchArgument('checkTerrainConn', default_value='true', description='')
+    declare_world_name = DeclareLaunchArgument('world_name', default_value='real_world')
+    declare_sensorOffsetX = DeclareLaunchArgument('sensorOffsetX', default_value='0.05')
+    declare_sensorOffsetY = DeclareLaunchArgument('sensorOffsetY', default_value='0.0')
+    declare_cameraOffsetZ = DeclareLaunchArgument('cameraOffsetZ', default_value='0.25')
+    declare_vehicleX = DeclareLaunchArgument('vehicleX', default_value='0.0')
+    declare_vehicleY = DeclareLaunchArgument('vehicleY', default_value='0.0')
+    declare_checkTerrainConn = DeclareLaunchArgument('checkTerrainConn', default_value='true')
+    declare_nic = DeclareLaunchArgument('nic', default_value='eth0', description='Robot NIC for Unitree SDK (e.g., eth0)')
 
-  start_local_planner = IncludeLaunchDescription(
-    PythonLaunchDescriptionSource(os.path.join(
-      get_package_share_directory('local_planner'), 'launch', 'local_planner.launch.py')
-    ),
-    launch_arguments={
-      'realRobot': 'true',
-      'sensorOffsetX': sensorOffsetX,
-      'sensorOffsetY': sensorOffsetY,
-      'cameraOffsetZ': cameraOffsetZ,
-      'goalX': vehicleX,
-      'goalY': vehicleY,
-    }.items()
-  )
-
-  start_terrain_analysis = IncludeLaunchDescription(
-    FrontendLaunchDescriptionSource(os.path.join(
-      get_package_share_directory('terrain_analysis'), 'launch', 'terrain_analysis.launch')
-    )
-  )
-
-  start_terrain_analysis_ext = IncludeLaunchDescription(
-    FrontendLaunchDescriptionSource(os.path.join(
-      get_package_share_directory('terrain_analysis_ext'), 'launch', 'terrain_analysis_ext.launch')
-    ),
-    launch_arguments={
-      'checkTerrainConn': checkTerrainConn,
-    }.items()
-  )
-
-  start_sensor_scan_generation = IncludeLaunchDescription(
-    FrontendLaunchDescriptionSource(os.path.join(
-      get_package_share_directory('sensor_scan_generation'), 'launch', 'sensor_scan_generation.launch')
-    )
-  )
-
-  start_arise_slam = IncludeLaunchDescription(
-    PythonLaunchDescriptionSource(os.path.join(
-      get_package_share_directory('arise_slam_mid360'), 'launch', 'arize_slam.launch.py')
-    )
-  )
-
-  start_visualization_tools = IncludeLaunchDescription(
-    FrontendLaunchDescriptionSource(os.path.join(
-      get_package_share_directory('visualization_tools'), 'launch', 'visualization_tools.launch')
-    ),
-    launch_arguments={
-      'world_name': world_name,
-    }.items()
-  )
-
-  start_joy = Node(
-    package='joy',
-    executable='joy_node',
-    name='ps3_joy',
-    output='screen',
-    parameters=[{
-                'dev': "/dev/input/js0",
-                'deadzone': 0.12,
-                'autorepeat_rate': 0.0,
-  		}]
-  )
-
-  start_mid360 = IncludeLaunchDescription(
-    PythonLaunchDescriptionSource(
-      [get_package_share_directory('livox_ros_driver2'), '/launch_ROS2/msg_MID360_launch.py']),
-  )
-
-<!--   start_vel_to_sport = Node( -->
-<!--     package='unitree_cmd_bridge', -->
-<!--     executable='vel_to_sport_client', -->
-<!--     name='vel_to_sport_client', -->
-<!--     output='screen', -->
-<!--     parameters=[{ -->
-<!--       'cmd_topic': '/cmd_vel',     # <-- matches your active topic -->
-<!--       'timeout': 0.3, -->
-<!--       'publish_hz': 50.0, -->
-<!--       'max_vx': 0.8, -->
-<!--       'max_vy': 0.5, -->
-<!--       'max_wz': 1.5, -->
-<!--       'elliptical_cap': True, -->
-<!--       'invert_vx': False, -->
-<!--       'invert_vy': False, -->
-<!--       'invert_wz': False, -->
-<!--       'use_sensor_qos': False -->
-<!--     }] -->
-<!--   ) -->
-
-  # --- Unitree SDK listener (pure binary; started via `ros2 run`) ---
-  # Make sure Unitree libs are visible to the process
-  env_ld = SetEnvironmentVariable(
-    name='LD_LIBRARY_PATH',
-    value='/opt/unitree_robotics/lib/aarch64:/opt/unitree_robotics/thirdparty/lib/aarch64:' +
-          os.environ.get('LD_LIBRARY_PATH', '')
-          )
-
-  start_udp_listener = ExecuteProcess(
-    cmd=['ros2', 'run', 'unitree_sport_tools', 'udp_to_sport_client'],
-    output='screen'
+    # ----- your existing blocks -----
+    start_local_planner = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(os.path.join(
+            get_package_share_directory('local_planner'), 'launch', 'local_planner.launch.py')),
+        launch_arguments={
+            'realRobot': 'true',
+            'sensorOffsetX': sensorOffsetX,
+            'sensorOffsetY': sensorOffsetY,
+            'cameraOffsetZ': cameraOffsetZ,
+            'goalX': vehicleX,
+            'goalY': vehicleY,
+        }.items()
     )
 
-  # --- ROS bridge: /cmd_vel -> UDP 127.0.0.1:50051 ---
-  start_vel_to_udp = Node(
-    package='unitree_cmd_bridge',
-    executable='vel_to_sport_bridge',
-    name='vel_to_sport_bridge',
-    output='screen',
-    parameters=[{
-      'cmd_vel_topic': '/cmd_vel',
-      'target_ip': '127.0.0.1',
-      'target_port': 50051,
-            # optional:
+    start_terrain_analysis = IncludeLaunchDescription(
+        FrontendLaunchDescriptionSource(os.path.join(
+            get_package_share_directory('terrain_analysis'), 'launch', 'terrain_analysis.launch'))
+    )
+
+    start_terrain_analysis_ext = IncludeLaunchDescription(
+        FrontendLaunchDescriptionSource(os.path.join(
+            get_package_share_directory('terrain_analysis_ext'), 'launch', 'terrain_analysis_ext.launch')),
+        launch_arguments={'checkTerrainConn': checkTerrainConn}.items()
+    )
+
+    start_sensor_scan_generation = IncludeLaunchDescription(
+        FrontendLaunchDescriptionSource(os.path.join(
+            get_package_share_directory('sensor_scan_generation'), 'launch', 'sensor_scan_generation.launch'))
+    )
+
+    start_arise_slam = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(os.path.join(
+            get_package_share_directory('arise_slam_mid360'), 'launch', 'arize_slam.launch.py'))
+    )
+
+    start_visualization_tools = IncludeLaunchDescription(
+        FrontendLaunchDescriptionSource(os.path.join(
+            get_package_share_directory('visualization_tools'), 'launch', 'visualization_tools.launch')),
+        launch_arguments={'world_name': world_name}.items()
+    )
+
+    start_joy = Node(
+        package='joy',
+        executable='joy_node',
+        name='ps3_joy',
+        output='screen',
+        parameters=[{
+            'dev': "/dev/input/js0",
+            'deadzone': 0.12,
+            'autorepeat_rate': 0.0,
+        }]
+    )
+
+    start_mid360 = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            [get_package_share_directory('livox_ros_driver2'), '/launch_ROS2/msg_MID360_launch.py'])
+    )
+
+    # # Old idea (disabled) — keep as Python comments, NOT XML
+    # start_vel_to_sport = Node(
+    #     package='unitree_cmd_bridge',
+    #     executable='vel_to_sport_client',
+    #     name='vel_to_sport_client',
+    #     output='screen',
+    #     parameters=[{ 'cmd_topic': '/cmd_vel', 'timeout': 0.3 }]
+    # )
+
+    # ----- Unitree SDK listener (pure binary) -----
+    env_ld = SetEnvironmentVariable(
+        name='LD_LIBRARY_PATH',
+        value='/opt/unitree_robotics/lib/aarch64:/opt/unitree_robotics/thirdparty/lib/aarch64:' +
+              os.environ.get('LD_LIBRARY_PATH', '')
+    )
+
+    # Pass NIC as arg (e.g., eth0). This matches udp_to_sport_client <nic> contract.
+    start_udp_listener = ExecuteProcess(
+        cmd=['ros2', 'run', 'unitree_sport_tools', 'udp_to_sport_client', nic],
+        output='screen'
+    )
+
+    # ----- ROS bridge: /cmd_vel -> UDP 127.0.0.1:50051 -----
+    start_vel_to_udp = Node(
+        package='unitree_cmd_bridge',
+        executable='vel_to_sport_bridge',
+        name='vel_to_sport_bridge',
+        output='screen',
+        parameters=[{
+            'cmd_vel_topic': '/cmd_vel',
+            'target_ip': '127.0.0.1',
+            'target_port': 50051,
             # 'use_csv': False,
             # 'qos_depth': 10,
         }]
     )
 
+    # Give the listener ~1s head start so the bridge doesn't send into a not-yet-ready SDK
+    delayed_bridge = TimerAction(period=1.0, actions=[start_vel_to_udp])
 
-  ld = LaunchDescription()
+    # ----- assemble -----
+    ld = LaunchDescription()
+    ld.add_action(declare_world_name)
+    ld.add_action(declare_sensorOffsetX)
+    ld.add_action(declare_sensorOffsetY)
+    ld.add_action(declare_cameraOffsetZ)
+    ld.add_action(declare_vehicleX)
+    ld.add_action(declare_vehicleY)
+    ld.add_action(declare_checkTerrainConn)
+    ld.add_action(declare_nic)
 
-  # Add the actions
-  ld.add_action(declare_world_name)
-  ld.add_action(declare_sensorOffsetX)
-  ld.add_action(declare_sensorOffsetY)
-  ld.add_action(declare_cameraOffsetZ)
-  ld.add_action(declare_vehicleX)
-  ld.add_action(declare_vehicleY)
-  ld.add_action(declare_checkTerrainConn)
+    ld.add_action(start_local_planner)
+    ld.add_action(start_terrain_analysis)
+    ld.add_action(start_terrain_analysis_ext)
+    ld.add_action(start_sensor_scan_generation)
+    ld.add_action(start_arise_slam)
+    ld.add_action(start_visualization_tools)
+    ld.add_action(start_joy)
+    ld.add_action(start_mid360)
+    # ld.add_action(start_vel_to_sport)
 
-  ld.add_action(start_local_planner)
-  ld.add_action(start_terrain_analysis)
-  ld.add_action(start_terrain_analysis_ext)
-  ld.add_action(start_sensor_scan_generation)
-  ld.add_action(start_arise_slam)
-  ld.add_action(start_visualization_tools)
-  ld.add_action(start_joy)
-  ld.add_action(start_mid360)
-<!--   ld.add_action(start_vel_to_sport) -->
-  ld.add_action(env_ld)            # set LD_LIBRARY_PATH first
-  ld.add_action(start_udp_listener)  # start the SDK listener
-  ld.add_action(start_vel_to_udp)    # then the /cmd_vel -> UDP bridge
+    ld.add_action(env_ld)            # set LD_LIBRARY_PATH first
+    ld.add_action(start_udp_listener)  # start the SDK listener
+    ld.add_action(delayed_bridge)      # then start the /cmd_vel -> UDP bridge, after 1s
 
-
-  return ld
+    return ld

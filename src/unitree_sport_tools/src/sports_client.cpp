@@ -28,7 +28,7 @@ enum test_mode
   stop_move = 99
 };
 
-const int TEST_MODE = stand_down;
+const int TEST_MODE = velocity_move;
 
 class Custom
 {

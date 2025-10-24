@@ -8,6 +8,8 @@
 
 #include <cstring>
 #include <string>
+#include <cstdio>   // std::snprintf
+#include <cerrno>   // errno
 #include <atomic>
 #include <chrono>
 
@@ -49,8 +51,8 @@ public:
       throw std::runtime_error("inet_pton");
     }
 
-    RCLCPP_INFO(get_logger(), "Forwarding /cmd_vel -> UDP %s:%d (%s payload)",
-                target_ip_.c_str(), target_port_, use_csv_ ? "CSV" : "binary");
+    RCLCPP_INFO(get_logger(), "Forwarding '%s' -> UDP %s:%d (%s payload)",
+                topic_.c_str(), target_ip_.c_str(), target_port_, use_csv_ ? "CSV" : "binary");
 
     // QoS: use sensor-data profile to keep up with fast publishers
     rclcpp::QoS qos(rclcpp::SensorDataQoS().keep_last(qos_depth_));
