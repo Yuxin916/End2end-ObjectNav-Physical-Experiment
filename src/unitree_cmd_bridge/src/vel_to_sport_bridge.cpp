@@ -7,10 +7,10 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <cerrno>    // errno
+#include <cstdio>    // std::snprintf
 #include <cstring>
 #include <string>
-#include <cstdio>   // std::snprintf
-#include <cerrno>   // errno
 #include <atomic>
 #include <chrono>
 
@@ -43,6 +43,7 @@ public:
       RCLCPP_FATAL(get_logger(), "Failed to create UDP socket: %s", strerror(errno));
       throw std::runtime_error("socket");
     }
+
     std::memset(&dst_addr_, 0, sizeof(dst_addr_));
     dst_addr_.sin_family = AF_INET;
     dst_addr_.sin_port = htons(static_cast<uint16_t>(target_port_));
@@ -55,20 +56,14 @@ public:
     RCLCPP_INFO(get_logger(), "Forwarding '%s' -> UDP %s:%d (%s payload)",
                 topic_.c_str(), target_ip_.c_str(), target_port_, use_csv_ ? "CSV" : "binary");
 
-    // QoS: use sensor-data profile to keep up with fast publishers
+    // QoS: sensor-data keeps up with fast publishers
     rclcpp::QoS qos(rclcpp::SensorDataQoS().keep_last(qos_depth_));
-    sub_ = this->create_subscription<geometry_msgs::msg::Twist>(
-        topic_, qos,
-        std::bind(&VelToSportBridge::onTwist, this, std::placeholders::_1));
+
+    // Subscribe ONLY to TwistStamped to avoid type conflict on the same topic name
     sub_stamped_ = this->create_subscription<geometry_msgs::msg::TwistStamped>(
         topic_, qos,
         [this](geometry_msgs::msg::TwistStamped::SharedPtr msg){
-          // If we’ve already locked to plain Twist, ignore stamped
-          int expected = 0;
-          if (source_mode_.load(std::memory_order_relaxed) == 1) return;
-          // Lock to stamped on first arrival
-          source_mode_.compare_exchange_strong(expected, 2, std::memory_order_relaxed);
-          this->onTwist(std::make_shared<geometry_msgs::msg::Twist>(msg->twist));
+          onTwist(std::make_shared<geometry_msgs::msg::Twist>(msg->twist));
         });
   }
 
@@ -98,8 +93,7 @@ private:
       pkt.version = 1;
       pkt.reserved = 0;
       pkt.flags = 0;
-      // keep seq monotonic even if callback is multi-threaded
-      uint32_t s = seq_.fetch_add(1, std::memory_order_relaxed);
+      uint32_t s = seq_.fetch_add(1, std::memory_order_relaxed); // monotonic seq
       pkt.seq = htonl(s);
       pkt.vx = vx;
       pkt.vy = vy;
@@ -110,7 +104,6 @@ private:
     }
 
     if (sent < 0) {
-      // use throttled warning to avoid spamming logs
       RCLCPP_WARN_THROTTLE(get_logger(), *this->get_clock(), 2000,
                            "sendto() failed: %s", strerror(errno));
     }
@@ -129,9 +122,7 @@ private:
 
   // State
   std::atomic<uint32_t> seq_{0};
-  rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr sub_;
   rclcpp::Subscription<geometry_msgs::msg::TwistStamped>::SharedPtr sub_stamped_;
-  std::atomic<int> source_mode_{0}; // 0 undecided, 1 Twist, 2 TwistStamped
 };
 
 int main(int argc, char** argv) {
