@@ -74,7 +74,11 @@ source install/setup.bash
 
 ## Packages Run
 ```bash
-ros2 run unitree_sport_tools stand_example_go2 eth0
+# one terminal
+./system_real_robot.sh
+
+# another terminal
+ros2 run unitree_sport_tools udp_to_sport_client eth0
 ```
 
 ## Ethernet Network Configuration
