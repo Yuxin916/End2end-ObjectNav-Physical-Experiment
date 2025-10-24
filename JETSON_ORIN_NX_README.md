@@ -49,6 +49,11 @@ colcon build --packages-select xxxxx \
   --cmake-args -DCMAKE_BUILD_TYPE=Release
 ```
 
+### if Compatibility with CMake < 3.5 has been removed from CMake.
+```bash
+cmake .. -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+```
+
 ### cv_bridge missing
 ```bash
 cd src
