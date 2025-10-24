@@ -1,5 +1,6 @@
 #include <rclcpp/rclcpp.hpp>
 #include <geometry_msgs/msg/twist.hpp>
+#include <geometry_msgs/msg/twist_stamped.hpp>
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -59,6 +60,16 @@ public:
     sub_ = this->create_subscription<geometry_msgs::msg::Twist>(
         topic_, qos,
         std::bind(&VelToSportBridge::onTwist, this, std::placeholders::_1));
+    sub_stamped_ = this->create_subscription<geometry_msgs::msg::TwistStamped>(
+        topic_, qos,
+        [this](geometry_msgs::msg::TwistStamped::SharedPtr msg){
+          // If we’ve already locked to plain Twist, ignore stamped
+          int expected = 0;
+          if (source_mode_.load(std::memory_order_relaxed) == 1) return;
+          // Lock to stamped on first arrival
+          source_mode_.compare_exchange_strong(expected, 2, std::memory_order_relaxed);
+          this->onTwist(std::make_shared<geometry_msgs::msg::Twist>(msg->twist));
+        });
   }
 
   ~VelToSportBridge() override {
@@ -119,6 +130,8 @@ private:
   // State
   std::atomic<uint32_t> seq_{0};
   rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr sub_;
+  rclcpp::Subscription<geometry_msgs::msg::TwistStamped>::SharedPtr sub_stamped_;
+  std::atomic<int> source_mode_{0}; // 0 undecided, 1 Twist, 2 TwistStamped
 };
 
 int main(int argc, char** argv) {

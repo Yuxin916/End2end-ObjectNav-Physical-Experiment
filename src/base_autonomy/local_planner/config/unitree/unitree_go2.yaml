@@ -58,13 +58,13 @@ pathFollower:
     # Control parameters
     lookAheadDis: 0.5
     maxAccel: 1.0
-    goalYawGain: 1.0
+    goalYawGain: 2.0
 
     # Slow down threshold
     slowDwnDisThre: 0.875
     omniDirDiffThre: 1.5
-    yawRateGain: 0.75
-    stopYawRateGain: 0.75
-    maxYawRate: 60.0
+    yawRateGain: 1.5
+    stopYawRateGain: 1.5
+    maxYawRate: 80.0
     dirDiffThre: 0.4
     stopDisThre: 0.3
