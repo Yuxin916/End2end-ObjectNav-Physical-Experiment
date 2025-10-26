@@ -81,8 +81,51 @@ source install/setup.bash
 ```bash
 # one terminal
 ./system_real_robot.sh
+```
 
-# another terminal
+## How to test the vel_to_sport_bridge → udp_to_sport_client → Go2 SDK?
+```bash
+# Terminal A
+export DISABLE_SDK=1                 # DRY mode: prints, no motion
+export VEL_DEADMAN_MS=2000
+export VEL_CTRL_HZ=100
+export VEL_LIMITS=0.3,0.0,0.6        # gentle: vx,vy,wz (vy=0 to avoid lateral)
+ros2 run unitree_sport_tools udp_to_sport_client eth0
+
+# You should see:
+[udp_to_sport_client] listening on 0.0.0.0:50051 (binary) [DISABLE_SDK=1] [NIC=eth0]
+
+```
+
+```bash
+# Terminal B
+ros2 run unitree_cmd_bridge vel_to_sport_bridge \
+  --ros-args \
+  -p cmd_vel_topic:=/cmd_vel \
+  -p target_ip:=127.0.0.1 \
+  -p target_port:=50051 \
+  -p use_csv:=false \
+  -p qos_depth:=10
+
+# You should see:
+[vel_to_sport_bridge]: Forwarding '/cmd_vel' -> UDP 127.0.0.1:50051 (binary payload)
+
+```
+
+```bash
+# Terminal C
+ros2 topic pub -r 20 --times 10 /cmd_vel geometry_msgs/msg/TwistStamped "{header: {frame_id: base_link}, twist: {linear: {x: 0.3, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.0}}}"
+
+# You should see Terminal A prints ~2 lines per second (DRY):
+[udp_to_sport_client] (DRY) vx=0.300 vy=0.000 wz=0.000
+and robot does not move.
+```
+
+```
+unset DISABLE_SDK                  # enable motion
+export VEL_DEADMAN_MS=2000
+export VEL_CTRL_HZ=100
+export VEL_LIMITS=0.3,0.0,0.6
 ros2 run unitree_sport_tools udp_to_sport_client eth0
 ```
 
