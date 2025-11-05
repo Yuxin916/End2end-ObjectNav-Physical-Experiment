@@ -21,11 +21,11 @@
     <param name="noDataObstacle" value="false" />
     <param name="noDataBlockSkipNum" value="0" />
     <param name="minBlockPointNum" value="10" />
-    <param name="vehicleHeight" value="1.5" />
+    <param name="vehicleHeight" value="0.6" />
     <param name="voxelPointUpdateThre" value="100" />
     <param name="voxelTimeUpdateThre" value="2.0" />
     <param name="minRelZ" value="-1.5" />
-    <param name="maxRelZ" value="0.3" />
+    <param name="maxRelZ" value="0.1" />
     <param name="disRatioZ" value="0.2" />
   </node>
 
