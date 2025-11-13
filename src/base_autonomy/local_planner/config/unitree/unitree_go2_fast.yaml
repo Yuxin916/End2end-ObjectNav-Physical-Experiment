@@ -69,6 +69,6 @@ pathFollower:
     omniDirDiffThre: 1.5
     yawRateGain: 1.0
     stopYawRateGain: 1.0
-    maxYawRate: 120.0
+    maxYawRate: 90.0
     dirDiffThre: 0.3
     stopDisThre: 0.3
