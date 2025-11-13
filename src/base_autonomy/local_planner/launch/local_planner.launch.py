@@ -12,7 +12,7 @@ def generate_launch_description():
     local_planner_share = get_package_share_directory('local_planner')
 
     # Get robot config from environment variable or use default
-    robot_config_env = os.environ.get('ROBOT_CONFIG_PATH', 'unitree/unitree_g1')
+    robot_config_env = os.environ.get('ROBOT_CONFIG_PATH', 'unitree/unitree_go2_slow')
 
     # Declare launch arguments
     config_arg = DeclareLaunchArgument(

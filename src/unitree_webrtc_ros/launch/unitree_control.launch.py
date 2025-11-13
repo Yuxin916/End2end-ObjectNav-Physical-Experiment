@@ -15,19 +15,19 @@ def generate_launch_description():
     # Declare launch arguments
     robot_ip_arg = DeclareLaunchArgument(
         'robot_ip',
-        default_value='192.168.8.181',
+        default_value='192.168.12.1',
         description='IP address of the Unitree Go2 robot'
     )
 
     connection_method_arg = DeclareLaunchArgument(
         'connection_method',
-        default_value='LocalSTA',
+        default_value='LocalAP',
         description='Connection method: LocalAP, LocalSTA, or Remote'
     )
 
     control_mode_arg = DeclareLaunchArgument(
         'control_mode',
-        default_value='sport_cmd',
+        default_value='wireless_controller',
         description='Control mode: sport_cmd or wireless_controller'
     )
 
