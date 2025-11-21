@@ -1,3 +1,6 @@
+# kill ros processes
+sudo pkill -9 -f '/opt/ros/.*\/lib\/|\/install\/.*\/lib\/|_ros2_daemon|^[[:space:]]*ros2$'
+
 
 # Remember to turn off the collision avoidance 
 
