@@ -3,7 +3,7 @@ sensorMountingOffsets:
   ros__parameters:
     sensorOffsetX: 0.0
     sensorOffsetY: 0.0
-    sensorOffsetZ: -0.4
+    sensorOffsetZ: 0.0
 
 # SLAM sensor configuration
 feature_extraction_node:
@@ -13,9 +13,9 @@ feature_extraction_node:
     blindBack: -0.2
     blindLeft: 0.2
     blindRight: -0.2
-    blindDiskLow: -0.8
-    blindDiskHigh: 0.8
-    blindDiskRadius: 0.3
+    blindDiskLow: -0.05
+    blindDiskHigh: 0.05
+    blindDiskRadius: 0.5
 
 imu_preintegration_node:
   ros__parameters:
@@ -23,18 +23,34 @@ imu_preintegration_node:
 
 localPlanner:
   ros__parameters:
+
+    # obstacle height threshold
+    obstacleHeightThre: 0.1 # 0.1 for flat terrain
+
+    # Sensor offset
+    sensorOffsetX: 0.0
+    sensorOffsetY: 0.0
+  
     # Vehicle dimensions
     vehicleLength: 0.5
     vehicleWidth: 0.5
 
     # Speed limits
-    maxSpeed: 0.5
+    maxSpeed: 0.875
     autonomySpeed: 0.875
+
+    # Path planning
+    pathScale: 0.875
+    minPathScale: 0.675
+    pathScaleStep: 0.1
+    minPathRange: 0.8
+    pathRangeStep: 0.6
+    adjacentRange: 3.5
 
     # Goal tolerances
     goalClearRange: 0.6
     goalBehindRange: 0.8
-    goalReachedThreshold: 0.5
+    goalReachedThreshold: 0.3
     goalYawThreshold: 0.15
 
 pathFollower:
@@ -44,6 +60,14 @@ pathFollower:
     maxAccel: 2.0
     goalYawGain: 2.0
 
+    maxSpeed: 0.875
+    autonomySpeed: 0.875
+
     # Slow down threshold
     slowDwnDisThre: 0.875
     omniDirDiffThre: 1.5
+    yawRateGain: 3.0
+    stopYawRateGain: 3.0
+    maxYawRate: 80.0
+    dirDiffThre: 0.4
+    stopDisThre: 0.3
