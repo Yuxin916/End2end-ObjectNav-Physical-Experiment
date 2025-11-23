@@ -3,7 +3,7 @@
   <node pkg="terrain_analysis" exec="terrainAnalysis" name="terrainAnalysis" output="screen">
     <param name="scanVoxelSize" value="0.05" />
     <param name="decayTime" value="1.0" />
-    <param name="noDecayDis" value="0.0" /> <!-- 1.5 for flat terrain -->
+    <param name="noDecayDis" value="1.75" />
     <param name="clearingDis" value="8.0" />
     <param name="useSorting" value="true" />
     <param name="quantileZ" value="0.25" />
@@ -21,11 +21,11 @@
     <param name="noDataObstacle" value="false" />
     <param name="noDataBlockSkipNum" value="0" />
     <param name="minBlockPointNum" value="10" />
-    <param name="vehicleHeight" value="0.6" />
+    <param name="vehicleHeight" value="1.5" />
     <param name="voxelPointUpdateThre" value="100" />
     <param name="voxelTimeUpdateThre" value="2.0" />
     <param name="minRelZ" value="-1.5" />
-    <param name="maxRelZ" value="0.1" />
+    <param name="maxRelZ" value="0.3" />
     <param name="disRatioZ" value="0.2" />
   </node>
 
