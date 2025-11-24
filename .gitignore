@@ -26,4 +26,5 @@ src/base_autonomy/vehicle_simulator/log/*
 
 !readme.txt
 
+.idea/
 rosbags/
