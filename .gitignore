@@ -25,3 +25,5 @@ src/base_autonomy/vehicle_simulator/mesh/unity/*
 src/base_autonomy/vehicle_simulator/log/*
 
 !readme.txt
+
+rosbags/
