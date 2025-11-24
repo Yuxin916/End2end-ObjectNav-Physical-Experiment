@@ -5,7 +5,6 @@ sudo pkill -9 -f '/opt/ros/.*\/lib\/|\/install\/.*\/lib\/|_ros2_daemon|^[[:space
 # Remember to turn off the collision avoidance 
 
 
-source ~/unitree_venv/bin/activate
 
 source /opt/ros/jazzy/setup.bash
 
