@@ -36,8 +36,8 @@ localPlanner:
     vehicleWidth: 0.5
 
     # Speed limits
-    maxSpeed: 0.875
-    autonomySpeed: 0.875
+    maxSpeed: 0.7
+    autonomySpeed: 0.7
 
     # Path planning
     pathScale: 0.875
@@ -60,8 +60,8 @@ pathFollower:
     maxAccel: 2.0
     goalYawGain: 2.0
 
-    maxSpeed: 0.875
-    autonomySpeed: 0.875
+    maxSpeed: 0.7
+    autonomySpeed: 0.7
 
     # Slow down threshold
     slowDwnDisThre: 0.875
@@ -70,4 +70,4 @@ pathFollower:
     stopYawRateGain: 3.0
     maxYawRate: 80.0
     dirDiffThre: 0.4
-    stopDisThre: 0.3
+    stopDisThre: 0.4
