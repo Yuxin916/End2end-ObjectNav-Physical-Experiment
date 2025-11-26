@@ -271,7 +271,7 @@ Power on the vehicle. In a terminal, go to the repository folder and use the com
 # Go2_fast
 ./system_real_robot.sh robot_ip:=192.168.12.1 connection_method:=LocalAP control_mode:=sport_cmd
 
-# G1
+# G1 (make sure the G1 robot is in low-speed mode and advanced motion control is enabled (arm is included))
 ./system_real_robot.sh robot_ip:=192.168.1.120 connection_method:=LocalSTA control_mode:=wireless_controller
 
 ```
