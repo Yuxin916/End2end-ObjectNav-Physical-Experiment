@@ -71,3 +71,7 @@ pathFollower:
     maxYawRate: 60.0
     dirDiffThre: 0.4
     stopDisThre: 0.3
+terrainAnalysis:
+  ros__parameters:
+    minDyObsVFOV: -30.0
+    maxDyObsVFOV: 35.0

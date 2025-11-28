@@ -60,8 +60,8 @@ def generate_launch_description():
   )
 
   start_terrain_analysis = IncludeLaunchDescription(
-    FrontendLaunchDescriptionSource(os.path.join(
-      get_package_share_directory('terrain_analysis'), 'launch', 'terrain_analysis.launch')
+    PythonLaunchDescriptionSource(os.path.join(
+        get_package_share_directory('terrain_analysis'), 'launch', 'terrain_analysis.launch.py')
     )
   )
 
