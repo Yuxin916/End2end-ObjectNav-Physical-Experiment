@@ -5,16 +5,12 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
-from launch_ros.substitutions import FindPackageShare
 import launch_ros
 
 def get_share_file(package_name, file_name):
     return os.path.join(get_package_share_directory(package_name), file_name)
 
 def generate_launch_description():
-    # Get robot config from environment variable or use default
-    robot_config_env = os.environ.get('ROBOT_CONFIG_PATH', 'mechanum_drive')
-
     config_path = get_share_file(
         package_name="arise_slam_mid360",
         file_name="config/livox_mid360.yaml")
@@ -28,12 +24,6 @@ def generate_launch_description():
         "config_file",
         default_value=config_path,
         description="Path to config file for arise_slam"
-    )
-
-    robot_config_arg = DeclareLaunchArgument(
-        'robot_config',
-        default_value=robot_config_env,
-        description='Robot configuration file name (without .yaml)'
     )
     calib_path_arg = DeclareLaunchArgument(
         "calibration_file",
@@ -67,12 +57,7 @@ def generate_launch_description():
             "stdout": "screen",
             "stderr": "screen",
         },
-        parameters=[
-            LaunchConfiguration("config_file"),
-            PythonExpression([
-                "'", FindPackageShare('local_planner'), "/config/",
-                LaunchConfiguration('robot_config'), ".yaml'"
-            ]),
+        parameters=[LaunchConfiguration("config_file"),
             { "calibration_file": LaunchConfiguration("calibration_file"),
         }],
     )
@@ -100,12 +85,7 @@ def generate_launch_description():
             "stdout": "screen",
             "stderr": "screen",
         },
-        parameters=[
-            LaunchConfiguration("config_file"),
-            PythonExpression([
-                "'", FindPackageShare('local_planner'), "/config/",
-                LaunchConfiguration('robot_config'), ".yaml'"
-            ]),
+        parameters=[LaunchConfiguration("config_file"),
             { "calibration_file": LaunchConfiguration("calibration_file")
         }],
     )
@@ -114,7 +94,6 @@ def generate_launch_description():
     return LaunchDescription([
         launch_ros.actions.SetParameter(name='use_sim_time', value='false'),
         config_path_arg,
-        robot_config_arg,
         calib_path_arg,
         odom_topic_arg,
         world_frame_arg,
