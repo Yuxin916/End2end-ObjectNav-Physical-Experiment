@@ -36,8 +36,8 @@ localPlanner:
     vehicleWidth: 0.5
 
     # Speed limits
-    maxSpeed: 0.7
-    autonomySpeed: 0.7
+    maxSpeed: 0.75
+    autonomySpeed: 0.75
 
     # Path planning
     pathScale: 0.875
@@ -57,18 +57,18 @@ pathFollower:
   ros__parameters:
     # Control parameters
     lookAheadDis: 0.5
-    maxAccel: 2.0
+    maxAccel: 1.5 #slow 1.5, fast 2.0
     goalYawGain: 2.0
 
-    maxSpeed: 0.7
-    autonomySpeed: 0.7
+    maxSpeed: 0.75
+    autonomySpeed: 0.75
 
     # Slow down threshold
     slowDwnDisThre: 0.875
     omniDirDiffThre: 1.5
-    yawRateGain: 3.0
-    stopYawRateGain: 3.0
-    maxYawRate: 80.0
+    yawRateGain: 1.5 #slow 1.5, fast 2.0
+    stopYawRateGain: 1.5 #slow 1.5, fast 2.0
+    maxYawRate: 40.0 #slow 40.0, fast 60.0
     dirDiffThre: 0.4
     stopDisThre: 0.4
 
