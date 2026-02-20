@@ -1,0 +1,55 @@
+vlm_navigator:
+  ros__parameters:
+
+    # --- VLM model ---
+    vln_repo_path: "/home/tsaisplus/projects/VLN_CL_CoTNav"
+    checkpoint: "/home/tsaisplus/projects/VLN_CL_CoTNav/all_log/experiments/mp3d_70k_few_S28_a6000_dualvit_bev-full_ego-lora32_mlp-train-patch-24-acc2_BEVftFOV_FrontierRGB_PosB__FRONTIER_PIXEL_NUMBER_ONLY_STRATEGY2_train/checkpoints"
+    template: "BEVftFOV_FrontierRGB_PosB__FRONTIER_PIXEL_NUMBER_ONLY_STRATEGY2"
+    device: "cuda:0"
+    inference_interval: 5.0
+    max_new_tokens: 64
+    do_sample: false
+
+    # --- BEV mapping ---
+    hfov_deg: 79.0          # horizontal camera FOV to simulate (degrees); set to 360 for full lidar disk
+    map_resolution: 0.05
+    map_size: 67.2
+    vision_range: 200        # 10 m explored radius at 0.05 m/cell
+    obstacle_height_min: 0.1
+    obstacle_height_max: 1.5
+    range_min: 0.5
+    range_max: 10.0
+    map_pred_threshold: 1.0
+    exp_pred_threshold: 1.0
+    crop_radius: 150
+    output_size: 448
+
+    # --- Frontier extraction ---
+    frontier_exp_threshold: 0.1
+    frontier_dilate_wall_ksize: 1
+    frontier_close_explore_ksize: 5
+    frontier_min_area: 4
+    frontier_clear_border_px: 2
+    frontier_min_distance_m: 0.7
+    frontier_top_k: 5
+
+    # --- Navigation ---
+    goal_reached_threshold: 0.5
+    waypoint_frame: "map"
+    camera_topic: "/camera/image"   # Unity sim panoramic topic
+    camera_is_panorama: true
+    camera_project_width: 640
+    camera_project_height: 480
+    camera_project_hfov_deg: 79.0
+    camera_yaw_offset_deg: 0.0      # keep 0 when panorama center is robot forward
+    target_detection_topic: "/target_detection"   # std_msgs/String JSON payload
+    target_confidence_threshold: 0.30
+    target_temporal_buffer_size: 3
+    target_temporal_min_hits: 2
+    target_match_label_mode: "normalized"         # exact | normalized
+    target_require_sam2: true                     # only SAM2 detections can trigger target_found
+    target_state_ttl_sec: 2.0
+    target_lidar_min_range: 0.5
+    target_lidar_max_range: 10.0
+    target_lateral_gate_m: 0.8
+    target_min_assoc_points: 8

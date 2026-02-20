@@ -1,0 +1,1008 @@
+"""
+VLMNavigatorNode
+================
+Main ROS 2 node that bridges the VLN object-navigation model to the autonomy stack.
+
+Subscriptions
+-------------
+  /registered_scan   (sensor_msgs/PointCloud2)   – SLAM-registered lidar scan
+  /state_estimation  (nav_msgs/Odometry)          – robot pose from SLAM
+  /object_goal       (std_msgs/String)            – target object (e.g. 'chair')
+
+Publications
+------------
+  /way_point         (geometry_msgs/PointStamped) – goal for local_planner
+  /vlm_bev_debug     (sensor_msgs/Image)          – BEV visualisation for RVIZ
+  /egocentric_rgb    (sensor_msgs/Image)          – projected camera view (640x480, HFOV 79)
+  /frontier_rgb_debug (sensor_msgs/Image)         – tiled frontier birth RGB images
+  /vlm_sam2_debug    (sensor_msgs/Image)          – SAM2 detection visualization
+  /vlm_target_debug  (sensor_msgs/Image)          – egocentric target detection overlay
+  /vlm_target_marker (geometry_msgs/PointStamped) – associated target position in map frame
+
+Logic
+-----
+A timer fires every `inference_interval` seconds (default 5 s).  On each tick:
+  1. Convert the latest lidar scan + pose into the BEV map.
+  2. Extract frontier candidates from the BEV.
+  3. Run VLM inference to select a frontier.
+  4. Convert the selected frontier pixel → world (x, y).
+  5. Publish the world coordinate to /way_point.
+
+The timer is also triggered early when the robot comes within
+`goal_reached_threshold` metres of the current waypoint.
+"""
+
+import math
+import logging
+import time
+import json
+import re
+from collections import deque
+from typing import Dict, Any, Optional, Tuple
+
+import numpy as np
+
+import rclpy
+from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+
+from sensor_msgs.msg import PointCloud2, Image
+from nav_msgs.msg import Odometry
+from geometry_msgs.msg import PointStamped
+from std_msgs.msg import String
+
+import cv2
+from PIL import Image as PILImage
+
+from .lidar_bev_mapper import LidarBEVMapper, BEVMapperConfig
+from .frontier_detector import FrontierDetector, FrontierConfig
+from .vlm_interface import VLMInterface, VLMConfig
+from .coord_utils import (
+    local_pixel_to_world,
+    world_to_local_pixel,
+    quaternion_to_yaw,
+    yaw_to_bev_degrees,
+)
+
+# Frontier birth RGB: quantise world coords to this grid (metres) for dict key
+_BIRTH_GRID_M = 0.5
+
+logger = logging.getLogger(__name__)
+
+
+class VLMNavigatorNode(Node):
+
+    def __init__(self):
+        super().__init__('vlm_navigator')
+
+        # ------------------------------------------------------------------
+        # Declare & load parameters
+        # ------------------------------------------------------------------
+        self._declare_parameters()
+        self._load_parameters()
+
+        # ------------------------------------------------------------------
+        # Sub-modules
+        # ------------------------------------------------------------------
+        bev_cfg = BEVMapperConfig(
+            resolution=self.map_resolution,
+            map_size=self.map_size,
+            vision_range=self.vision_range,
+            obstacle_height_min=self.obstacle_height_min,
+            obstacle_height_max=self.obstacle_height_max,
+            range_min=self.range_min,
+            range_max=self.range_max,
+            map_pred_threshold=self.map_pred_threshold,
+            exp_pred_threshold=self.exp_pred_threshold,
+            crop_radius=self.crop_radius,
+            output_size=self.output_size,
+            hfov_deg=self.hfov_deg,
+        )
+        self.mapper = LidarBEVMapper(bev_cfg)
+
+        frontier_cfg = FrontierConfig(
+            exp_threshold=self.frontier_exp_threshold,
+            map_pred_threshold=self.map_pred_threshold,
+            dilate_wall_ksize=self.frontier_dilate_wall_ksize,
+            close_explore_ksize=self.frontier_close_explore_ksize,
+            min_frontier_area=self.frontier_min_area,
+            clear_border_px=self.frontier_clear_border_px,
+            min_distance_m=self.frontier_min_distance_m,
+            top_k=self.frontier_top_k,
+            resolution=self.map_resolution,
+            crop_radius=self.crop_radius,
+            output_size=self.output_size,
+        )
+        self.frontier_detector = FrontierDetector(frontier_cfg)
+
+        vlm_cfg = VLMConfig(
+            vln_repo_path=self.vln_repo_path,
+            checkpoint=self.vlm_checkpoint,
+            template=self.vlm_template,
+            device=self.vlm_device,
+            max_new_tokens=self.vlm_max_new_tokens,
+            do_sample=self.vlm_do_sample,
+        )
+        self.vlm = VLMInterface(vlm_cfg)
+
+        # ------------------------------------------------------------------
+        # State
+        # ------------------------------------------------------------------
+        self.latest_scan: np.ndarray = None         # (N, 3) float32 in map frame
+        self.latest_pose_x: float = None
+        self.latest_pose_y: float = None
+        self.latest_pose_z: float = None
+        self.latest_yaw: float = None
+
+        self.object_goal: str = ''
+
+        self.current_wp_x: float = None
+        self.current_wp_y: float = None
+
+        self._pose_received = False
+        self._scan_received = False
+
+        # Frontier birth RGB (dual-ViT templates)
+        self.latest_rgb_pil: PILImage.Image = None
+        self.frontier_birth_rgb: dict = {}    # (ix, iy) → PIL.Image
+        self.target_birth_rgb: Optional[PILImage.Image] = None
+
+        # External detector + temporal target state
+        self.latest_detection_msg_time: float = 0.0
+        self.latest_detection: Optional[Dict[str, Any]] = None
+        self.target_detection_buffer = deque(maxlen=max(1, int(self.target_temporal_buffer_size)))
+        self.target_found: bool = False
+        self.target_world_xyz: Optional[Tuple[float, float, float]] = None
+        self.target_pixel_local: Optional[Tuple[float, float]] = None
+        self.target_semantic: Optional[str] = None
+        self.target_confidence: float = 0.0
+
+        # ------------------------------------------------------------------
+        # QoS
+        # ------------------------------------------------------------------
+        # Use ROS 2 default (RELIABLE) to match vehicleSimulator and SLAM publishers
+        default_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=10,
+        )
+        # ------------------------------------------------------------------
+        # Subscriptions
+        # ------------------------------------------------------------------
+        self.create_subscription(
+            PointCloud2, '/registered_scan',
+            self._scan_callback, default_qos
+        )
+        self.create_subscription(
+            Odometry, '/state_estimation',
+            self._pose_callback, default_qos
+        )
+        self.create_subscription(
+            String, '/object_goal',
+            self._goal_callback, default_qos
+        )
+        self.create_subscription(
+            String, self.target_detection_topic,
+            self._target_detection_callback, default_qos
+        )
+        # Camera image for frontier birth RGB (dual-ViT templates)
+        self.create_subscription(
+            Image, self.camera_topic,
+            self._camera_callback, default_qos
+        )
+
+        # ------------------------------------------------------------------
+        # Publications
+        # ------------------------------------------------------------------
+        self.way_point_pub = self.create_publisher(
+            PointStamped, '/way_point', default_qos
+        )
+        self.bev_debug_pub = self.create_publisher(
+            Image, '/vlm_bev_debug', default_qos
+        )
+        self.egocentric_rgb_pub = self.create_publisher(
+            Image, '/egocentric_rgb', default_qos
+        )
+        self.frontier_rgb_debug_pub = self.create_publisher(
+            Image, '/frontier_rgb_debug', default_qos
+        )
+        self.sam2_debug_pub = self.create_publisher(
+            Image, '/vlm_sam2_debug', default_qos
+        )
+        self.target_debug_pub = self.create_publisher(
+            Image, '/vlm_target_debug', default_qos
+        )
+        self.target_marker_pub = self.create_publisher(
+            PointStamped, '/vlm_target_marker', default_qos
+        )
+
+        # ------------------------------------------------------------------
+        # VLM inference timer
+        # ------------------------------------------------------------------
+        self.vlm_timer = self.create_timer(
+            self.inference_interval, self._vlm_timer_callback
+        )
+
+        # ------------------------------------------------------------------
+        # Deferred model loading (load after node is spinning)
+        # ------------------------------------------------------------------
+        self._model_loaded = False
+        self._loading = False
+        # One-shot timer: fires once 2 s after startup to load the model
+        self._load_timer = self.create_timer(2.0, self._load_model_once)
+
+        self.get_logger().info(
+            f'VLMNavigatorNode started.  '
+            f'Waiting for /state_estimation and /object_goal …'
+        )
+
+    # ------------------------------------------------------------------
+    # Parameter helpers
+    # ------------------------------------------------------------------
+
+    def _declare_parameters(self):
+        self.declare_parameter('vln_repo_path',
+                               '/home/tsaisplus/projects/VLN_CL_CoTNav')
+        self.declare_parameter('checkpoint', '')
+        self.declare_parameter('template',
+                               'BEVftFOV_Sem_Pos__FRONTIER_PIXEL_NUMBER_ONLY_STRATEGY2')
+        self.declare_parameter('device', 'cuda:0')
+        self.declare_parameter('inference_interval', 5.0)
+        self.declare_parameter('max_new_tokens', 64)
+        self.declare_parameter('do_sample', False)
+
+        self.declare_parameter('hfov_deg', 79.0)
+        self.declare_parameter('map_resolution', 0.05)
+        self.declare_parameter('map_size', 67.2)
+        self.declare_parameter('vision_range', 100)
+        self.declare_parameter('obstacle_height_min', 0.1)
+        self.declare_parameter('obstacle_height_max', 1.5)
+        self.declare_parameter('range_min', 0.5)
+        self.declare_parameter('range_max', 5.0)
+        self.declare_parameter('map_pred_threshold', 1.0)
+        self.declare_parameter('exp_pred_threshold', 1.0)
+        self.declare_parameter('crop_radius', 150)
+        self.declare_parameter('output_size', 448)
+
+        self.declare_parameter('frontier_exp_threshold', 0.1)
+        self.declare_parameter('frontier_dilate_wall_ksize', 1)
+        self.declare_parameter('frontier_close_explore_ksize', 5)
+        self.declare_parameter('frontier_min_area', 4)
+        self.declare_parameter('frontier_clear_border_px', 2)
+        self.declare_parameter('frontier_min_distance_m', 0.7)
+        self.declare_parameter('frontier_top_k', 5)
+
+        self.declare_parameter('goal_reached_threshold', 0.5)
+        self.declare_parameter('waypoint_frame', 'map')
+        self.declare_parameter('camera_topic', '/camera/image')
+        self.declare_parameter('camera_is_panorama', True)
+        self.declare_parameter('camera_project_width', 640)
+        self.declare_parameter('camera_project_height', 480)
+        self.declare_parameter('camera_project_hfov_deg', 79.0)
+        self.declare_parameter('camera_yaw_offset_deg', 0.0)
+        self.declare_parameter('target_detection_topic', '/target_detection')
+        self.declare_parameter('target_confidence_threshold', 0.30)
+        self.declare_parameter('target_temporal_buffer_size', 3)
+        self.declare_parameter('target_temporal_min_hits', 2)
+        self.declare_parameter('target_match_label_mode', 'normalized')
+        self.declare_parameter('target_require_sam2', True)
+        self.declare_parameter('target_state_ttl_sec', 2.0)
+        self.declare_parameter('target_lidar_min_range', 0.5)
+        self.declare_parameter('target_lidar_max_range', 10.0)
+        self.declare_parameter('target_lateral_gate_m', 0.8)
+        self.declare_parameter('target_min_assoc_points', 8)
+
+    def _load_parameters(self):
+        g = self.get_parameter
+        self.vln_repo_path = g('vln_repo_path').value
+        self.vlm_checkpoint = g('checkpoint').value
+        self.vlm_template = g('template').value
+        self.vlm_device = g('device').value
+        self.inference_interval = g('inference_interval').value
+        self.vlm_max_new_tokens = g('max_new_tokens').value
+        self.vlm_do_sample = g('do_sample').value
+
+        self.hfov_deg = g('hfov_deg').value
+        self.map_resolution = g('map_resolution').value
+        self.map_size = g('map_size').value
+        self.vision_range = g('vision_range').value
+        self.obstacle_height_min = g('obstacle_height_min').value
+        self.obstacle_height_max = g('obstacle_height_max').value
+        self.range_min = g('range_min').value
+        self.range_max = g('range_max').value
+        self.map_pred_threshold = g('map_pred_threshold').value
+        self.exp_pred_threshold = g('exp_pred_threshold').value
+        self.crop_radius = g('crop_radius').value
+        self.output_size = g('output_size').value
+
+        self.frontier_exp_threshold = g('frontier_exp_threshold').value
+        self.frontier_dilate_wall_ksize = g('frontier_dilate_wall_ksize').value
+        self.frontier_close_explore_ksize = g('frontier_close_explore_ksize').value
+        self.frontier_min_area = g('frontier_min_area').value
+        self.frontier_clear_border_px = g('frontier_clear_border_px').value
+        self.frontier_min_distance_m = g('frontier_min_distance_m').value
+        self.frontier_top_k = g('frontier_top_k').value
+
+        self.goal_reached_threshold = g('goal_reached_threshold').value
+        self.waypoint_frame = g('waypoint_frame').value
+        self.camera_topic = g('camera_topic').value
+        self.camera_is_panorama = g('camera_is_panorama').value
+        self.camera_project_width = g('camera_project_width').value
+        self.camera_project_height = g('camera_project_height').value
+        self.camera_project_hfov_deg = g('camera_project_hfov_deg').value
+        self.camera_yaw_offset_deg = g('camera_yaw_offset_deg').value
+        self.target_detection_topic = g('target_detection_topic').value
+        self.target_confidence_threshold = g('target_confidence_threshold').value
+        self.target_temporal_buffer_size = g('target_temporal_buffer_size').value
+        self.target_temporal_min_hits = g('target_temporal_min_hits').value
+        self.target_match_label_mode = g('target_match_label_mode').value
+        self.target_require_sam2 = g('target_require_sam2').value
+        self.target_state_ttl_sec = g('target_state_ttl_sec').value
+        self.target_lidar_min_range = g('target_lidar_min_range').value
+        self.target_lidar_max_range = g('target_lidar_max_range').value
+        self.target_lateral_gate_m = g('target_lateral_gate_m').value
+        self.target_min_assoc_points = g('target_min_assoc_points').value
+
+    # ------------------------------------------------------------------
+    # Deferred model loading
+    # ------------------------------------------------------------------
+
+    def _load_model_once(self):
+        """Called by a one-shot timer to load the VLM without blocking __init__."""
+        # Cancel this timer so it never fires again
+        self._load_timer.cancel()
+
+        if self._model_loaded or self._loading:
+            return
+        self._loading = True
+        self.get_logger().info('Loading VLM model (this may take ~60 s) …')
+        try:
+            self.vlm.load()
+            self._model_loaded = True
+            self.get_logger().info('VLM model ready.')
+        except Exception as e:
+            self.get_logger().error(f'VLM load failed: {e}')
+
+    # ------------------------------------------------------------------
+    # Callbacks
+    # ------------------------------------------------------------------
+
+    def _pose_callback(self, msg: Odometry):
+        p = msg.pose.pose.position
+        q = msg.pose.pose.orientation
+        self.latest_pose_x = p.x
+        self.latest_pose_y = p.y
+        self.latest_pose_z = p.z
+        self.latest_yaw = quaternion_to_yaw(q.x, q.y, q.z, q.w)
+        self._pose_received = True
+
+        # Initialise mapper on first pose
+        if not self.mapper.is_initialised:
+            self.mapper.reset(p.x, p.y, p.z)
+            self.get_logger().info(
+                f'Map initialised at ({p.x:.2f}, {p.y:.2f})'
+            )
+
+        # Check if current waypoint reached → early retrigger
+        if self.current_wp_x is not None:
+            dist = math.sqrt(
+                (p.x - self.current_wp_x) ** 2 +
+                (p.y - self.current_wp_y) ** 2
+            )
+            if dist < self.goal_reached_threshold:
+                self.get_logger().info(
+                    f'Waypoint reached (dist={dist:.2f} m). Re-triggering VLM.'
+                )
+                self.current_wp_x = None
+                self.current_wp_y = None
+                self._run_vlm_step()
+
+    def _scan_callback(self, msg: PointCloud2):
+        """Parse PointCloud2 → (N, 3) float32 array and update BEV map."""
+        pts = self._parse_pointcloud2(msg)
+        if pts is None or len(pts) == 0:
+            return
+        self.latest_scan = pts
+        self._scan_received = True
+
+        if self._pose_received:
+            self.mapper.update(
+                pts,
+                self.latest_pose_x,
+                self.latest_pose_y,
+                self.latest_pose_z,
+                self.latest_yaw,
+            )
+
+    def _camera_callback(self, msg: Image):
+        """Decode incoming sensor_msgs/Image and keep projected RGB for frontier birth."""
+        try:
+            n = msg.width * msg.height
+            if n == 0:
+                return
+            raw = bytes(msg.data)
+            if msg.encoding == 'rgb8':
+                arr = np.frombuffer(raw, dtype=np.uint8).reshape(msg.height, msg.width, 3)
+            elif msg.encoding in ('bgr8', 'bgr8; jpeg compressed bgr8'):
+                arr = np.frombuffer(raw, dtype=np.uint8).reshape(msg.height, msg.width, 3)
+                arr = arr[:, :, ::-1].copy()   # BGR → RGB
+            elif msg.encoding == 'mono8':
+                arr = np.frombuffer(raw, dtype=np.uint8).reshape(msg.height, msg.width)
+                arr = np.stack([arr, arr, arr], axis=-1)
+            else:
+                return
+            if self.camera_is_panorama:
+                arr = self._project_panorama_to_pinhole(arr)
+            self.latest_rgb_pil = PILImage.fromarray(arr)
+            self._publish_rgb_image(self.egocentric_rgb_pub, arr, frame_id='camera')
+        except Exception as e:
+            self.get_logger().warn(f'Camera callback error: {e}')
+
+    def _target_detection_callback(self, msg: String):
+        """
+        External detector adapter (JSON over std_msgs/String).
+        Supported payloads:
+          {"label":"chair","confidence":0.9,"bbox":[x1,y1,x2,y2]}
+          {"detections":[{"label":"chair","confidence":0.9,"bbox":[...]}]}
+        """
+        now_s = self.get_clock().now().nanoseconds / 1e9
+        self.latest_detection_msg_time = now_s
+        self.latest_detection = None
+
+        try:
+            data = json.loads(msg.data)
+        except Exception as e:
+            self.get_logger().warn(f'Invalid target_detection JSON: {e}')
+            self.target_detection_buffer.append(False)
+            return
+
+        detections = data.get('detections', data if isinstance(data, list) else [data])
+        self._publish_sam2_debug_overlay(detections)
+        best = None
+        best_conf = -1.0
+        for det in detections:
+            if not isinstance(det, dict):
+                continue
+            if self.target_require_sam2 and not self._is_sam2_detection(det):
+                continue
+            label = str(det.get('label', det.get('class_name', det.get('name', '')))).strip()
+            conf = float(det.get('confidence', det.get('score', 0.0)))
+            bbox = det.get('bbox', det.get('bbox_xyxy', None))
+            if not label or bbox is None or len(bbox) != 4:
+                continue
+            if conf < float(self.target_confidence_threshold):
+                continue
+            if self.object_goal and not self._label_matches_goal(label, self.object_goal):
+                continue
+            if conf > best_conf:
+                best_conf = conf
+                best = {
+                    'label': label,
+                    'confidence': conf,
+                    'bbox': [float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])],
+                }
+
+        self.latest_detection = best
+        self.target_detection_buffer.append(best is not None)
+        if best is not None:
+            self.target_confidence = float(best['confidence'])
+
+    def _project_panorama_to_pinhole(self, pano_rgb: np.ndarray) -> np.ndarray:
+        """
+        Project an equirectangular panorama to a pinhole view.
+
+        Assumptions:
+          - Input panorama center column is robot forward at zero yaw.
+          - Output view is yaw-aligned to current robot heading.
+        """
+        h_in, w_in = pano_rgb.shape[:2]
+        out_w = int(self.camera_project_width)
+        out_h = int(self.camera_project_height)
+        hfov = math.radians(float(self.camera_project_hfov_deg))
+        yaw = float(self.latest_yaw if self.latest_yaw is not None else 0.0)
+        yaw += math.radians(float(self.camera_yaw_offset_deg))
+
+        cx = (out_w - 1.0) * 0.5
+        cy = (out_h - 1.0) * 0.5
+        fx = cx / max(math.tan(hfov * 0.5), 1e-6)
+        vfov = 2.0 * math.atan(math.tan(hfov * 0.5) * (out_h / max(float(out_w), 1.0)))
+        fy = cy / max(math.tan(vfov * 0.5), 1e-6)
+
+        uu, vv = np.meshgrid(np.arange(out_w, dtype=np.float32),
+                             np.arange(out_h, dtype=np.float32))
+        x = np.ones_like(uu, dtype=np.float32)  # forward
+        y = (uu - cx) / fx                      # right
+        z = -(vv - cy) / fy                     # up
+
+        lon_rel = np.arctan2(y, x)  # [-pi, pi]
+        lat = np.arctan2(z, np.sqrt(x * x + y * y))  # [-pi/2, pi/2]
+        lon = lon_rel + yaw
+        lon = (lon + np.pi) % (2.0 * np.pi) - np.pi
+
+        map_x = ((lon / (2.0 * np.pi)) + 0.5) * (w_in - 1.0)
+        map_y = (0.5 - (lat / np.pi)) * (h_in - 1.0)
+
+        projected = cv2.remap(
+            pano_rgb, map_x.astype(np.float32), map_y.astype(np.float32),
+            interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_WRAP
+        )
+        return projected
+
+    def _goal_callback(self, msg: String):
+        new_goal = msg.data.strip()
+        if new_goal != self.object_goal:
+            self.get_logger().info(f'Object goal changed: "{new_goal}"')
+            self.object_goal = new_goal
+            # Reset map and birth RGBs when goal changes so we start fresh
+            if self._pose_received:
+                self.mapper.reset(
+                    self.latest_pose_x,
+                    self.latest_pose_y,
+                    self.latest_pose_z,
+                )
+            self.frontier_birth_rgb.clear()
+            self.target_birth_rgb = None
+            self.latest_detection = None
+            self.target_detection_buffer.clear()
+            self.target_found = False
+            self.target_world_xyz = None
+            self.target_pixel_local = None
+            self.target_semantic = None
+            self.target_confidence = 0.0
+            self.current_wp_x = None
+            self.current_wp_y = None
+
+    # ------------------------------------------------------------------
+    # VLM timer callback
+    # ------------------------------------------------------------------
+
+    def _vlm_timer_callback(self):
+        if not self._pose_received:
+            return
+        if not self.object_goal:
+            return
+        if not self._model_loaded:
+            return
+        self._run_vlm_step()
+
+    def _run_vlm_step(self):
+        """Core step: BEV → frontiers → VLM → waypoint."""
+        if self.mapper.local_map is None:
+            return
+
+        local_map = self.mapper.local_map
+        local_r, local_c = self.mapper.get_local_robot_pixel()
+        yaw_deg = self.mapper.get_robot_yaw_deg()
+        self._update_target_state()
+        target_pixel = self.target_pixel_local
+
+        # ---- Extract frontiers ------------------------------------------
+        frontiers = self.frontier_detector.extract(
+            local_map, local_r, local_c
+        )
+
+        # ---- Render BEV image -------------------------------------------
+        bev_rgb = self.mapper.render_local_bev(
+            frontier_centers_2d=frontiers if len(frontiers) > 0 else None,
+            target_position=target_pixel,
+        )
+        self._publish_bev_debug(bev_rgb)
+
+        if len(frontiers) == 0 and target_pixel is None:
+            self.get_logger().warn('No frontiers found — skipping VLM query.')
+            return
+
+        # ---- Track frontier birth RGBs (dual-ViT templates) -------------
+        frontier_rgb_images = []
+        if self.vlm.is_dual_vit and self.latest_rgb_pil is None:
+            self.get_logger().warn(
+                'Dual-ViT template requires camera RGB, but no projected frame is available yet.'
+            )
+            return
+
+        if self.vlm.is_dual_vit:
+            fallback_rgb = self.latest_rgb_pil
+            for fr, fc in frontiers:
+                wx, wy = local_pixel_to_world(
+                    pixel_row=float(fr),
+                    pixel_col=float(fc),
+                    robot_x=self.latest_pose_x,
+                    robot_y=self.latest_pose_y,
+                    crop_radius=self.crop_radius,
+                    output_size=self.output_size,
+                    resolution=self.map_resolution,
+                )
+                key = (round(wx / _BIRTH_GRID_M), round(wy / _BIRTH_GRID_M))
+                if key not in self.frontier_birth_rgb:
+                    self.frontier_birth_rgb[key] = fallback_rgb
+                frontier_rgb_images.append(self.frontier_birth_rgb.get(key, fallback_rgb))
+            if target_pixel is not None:
+                target_rgb = self.target_birth_rgb if self.target_birth_rgb is not None else fallback_rgb
+                frontier_rgb_images.append(target_rgb)
+            frontier_rgb_mosaic = self._build_frontier_rgb_mosaic(
+                frontier_rgb_images,
+                target_last=(target_pixel is not None),
+            )
+            if frontier_rgb_mosaic is not None:
+                self._publish_rgb_image(
+                    self.frontier_rgb_debug_pub,
+                    frontier_rgb_mosaic,
+                    frame_id='map',
+                )
+
+        # ---- VLM inference ----------------------------------------------
+        t0 = time.time()
+        idx = self.vlm.get_frontier_index(
+            bev_rgb_array=bev_rgb,
+            object_goal=self.object_goal,
+            frontier_pixels=frontiers.tolist(),
+            robot_pixel_row=local_r,
+            robot_pixel_col=local_c,
+            robot_yaw_deg=yaw_deg,
+            output_size=self.output_size,
+            semantic_labels=[],
+            target_pixel=target_pixel,
+            target_semantic=self.target_semantic,
+            frontier_rgb_images=frontier_rgb_images if self.vlm.is_dual_vit else None,
+        )
+        dt = time.time() - t0
+        self.get_logger().info(
+            f'VLM selected frontier {idx}/{len(frontiers)} '
+            f'in {dt:.2f} s  (goal="{self.object_goal}")'
+        )
+
+        if idx is None:
+            return
+
+        # ---- Convert pixel → world coordinate ---------------------------
+        if target_pixel is not None and idx == len(frontiers):
+            if self.target_world_xyz is not None:
+                wx, wy = float(self.target_world_xyz[0]), float(self.target_world_xyz[1])
+            else:
+                wx, wy = local_pixel_to_world(
+                    pixel_row=float(target_pixel[0]),
+                    pixel_col=float(target_pixel[1]),
+                    robot_x=self.latest_pose_x,
+                    robot_y=self.latest_pose_y,
+                    crop_radius=self.crop_radius,
+                    output_size=self.output_size,
+                    resolution=self.map_resolution,
+                )
+            sel_row, sel_col = int(target_pixel[0]), int(target_pixel[1])
+            self.get_logger().info(
+                f'VLM selected TARGET candidate (idx={idx}, conf={self.target_confidence:.2f}).'
+            )
+        elif idx >= len(frontiers):
+            self.get_logger().error(
+                f'VLM index {idx} out of range for {len(frontiers)} frontiers'
+            )
+            return
+        else:
+            sel_row, sel_col = frontiers[idx]
+            wx, wy = local_pixel_to_world(
+                pixel_row=float(sel_row),
+                pixel_col=float(sel_col),
+                robot_x=self.latest_pose_x,
+                robot_y=self.latest_pose_y,
+                crop_radius=self.crop_radius,
+                output_size=self.output_size,
+                resolution=self.map_resolution,
+            )
+
+        self.get_logger().info(
+            f'Publishing waypoint: ({wx:.2f}, {wy:.2f}) m  '
+            f'[from frontier pixel ({sel_row}, {sel_col})]'
+        )
+
+        # ---- Publish waypoint -------------------------------------------
+        wp_msg = PointStamped()
+        wp_msg.header.stamp = self.get_clock().now().to_msg()
+        wp_msg.header.frame_id = self.waypoint_frame
+        wp_msg.point.x = wx
+        wp_msg.point.y = wy
+        wp_msg.point.z = 0.0
+        self.way_point_pub.publish(wp_msg)
+
+        self.current_wp_x = wx
+        self.current_wp_y = wy
+
+        # Re-render BEV with selected frontier highlighted
+        bev_rgb_sel = self.mapper.render_local_bev(
+            frontier_centers_2d=frontiers,
+            selected_frontier_index=idx if idx < len(frontiers) else None,
+            target_position=target_pixel,
+        )
+        self._publish_bev_debug(bev_rgb_sel)
+        self.get_logger().info(
+            f'Target status: found={self.target_found}, in_local={target_pixel is not None}, '
+            f'target_pixel={target_pixel}, selected_idx={idx}, '
+            f'selected_is_target={target_pixel is not None and idx == len(frontiers)}'
+        )
+
+    # ------------------------------------------------------------------
+    # PointCloud2 parser
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _parse_pointcloud2(msg: PointCloud2) -> np.ndarray:
+        """
+        Parse a sensor_msgs/PointCloud2 message to an (N, 3) float32 array.
+        Expects x, y, z fields (standard PCL PointXYZI format from SLAM).
+        """
+        field_map = {f.name: f for f in msg.fields}
+        if not all(k in field_map for k in ('x', 'y', 'z')):
+            return None
+
+        n_points = msg.width * msg.height
+        if n_points == 0:
+            return None
+
+        point_step = msg.point_step
+        x_off = field_map['x'].offset
+        y_off = field_map['y'].offset
+        z_off = field_map['z'].offset
+        endian = '<' if not msg.is_bigendian else '>'
+        dt = np.dtype(f'{endian}f4')
+
+        # Read raw bytes as a structured array over the point buffer
+        raw = np.frombuffer(bytes(msg.data), dtype=np.uint8)
+        raw = raw.reshape(n_points, point_step)
+
+        # Extract each field by slicing the byte columns, then reinterpret
+        x_f = np.frombuffer(np.ascontiguousarray(raw[:, x_off:x_off + 4]).tobytes(), dtype=dt)
+        y_f = np.frombuffer(np.ascontiguousarray(raw[:, y_off:y_off + 4]).tobytes(), dtype=dt)
+        z_f = np.frombuffer(np.ascontiguousarray(raw[:, z_off:z_off + 4]).tobytes(), dtype=dt)
+
+        pts = np.stack([x_f, y_f, z_f], axis=1).astype(np.float32)
+        valid = np.isfinite(pts).all(axis=1)
+        return pts[valid]
+
+    # ------------------------------------------------------------------
+    # Debug BEV publisher
+    # ------------------------------------------------------------------
+
+    def _publish_rgb_image(self, publisher, rgb_image: np.ndarray, frame_id: str = 'map'):
+        """Publish an RGB numpy image as sensor_msgs/Image."""
+        if rgb_image is None:
+            return
+        msg = Image()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = frame_id
+        msg.height, msg.width = rgb_image.shape[:2]
+        msg.encoding = 'rgb8'
+        msg.is_bigendian = False
+        msg.step = msg.width * 3
+        msg.data = rgb_image.astype(np.uint8).flatten().tolist()
+        publisher.publish(msg)
+
+    def _publish_bev_debug(self, bev_rgb: np.ndarray):
+        """Publish the BEV image as sensor_msgs/Image for RVIZ."""
+        self._publish_rgb_image(self.bev_debug_pub, bev_rgb, frame_id='map')
+
+    @staticmethod
+    def _build_frontier_rgb_mosaic(frontier_rgb_images, tile_w: int = 320, tile_h: int = 240, target_last: bool = False):
+        """Build a labeled frontier RGB tile image for debug visualisation."""
+        if not frontier_rgb_images:
+            return None
+
+        tiles = []
+        for idx, pil_img in enumerate(frontier_rgb_images):
+            tile = np.array(pil_img.convert('RGB'))
+            tile = cv2.resize(tile, (tile_w, tile_h), interpolation=cv2.INTER_AREA)
+            cv2.rectangle(tile, (0, 0), (tile_w - 1, 24), (0, 0, 0), -1)
+            is_target_tile = target_last and idx == (len(frontier_rgb_images) - 1)
+            tile_label = f'target {idx}' if is_target_tile else f'frontier {idx}'
+            cv2.putText(
+                tile,
+                tile_label,
+                (8, 17),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                (255, 255, 255),
+                1,
+                cv2.LINE_AA,
+            )
+            tiles.append(tile)
+
+        cols = min(3, len(tiles))
+        rows = int(math.ceil(len(tiles) / float(cols)))
+        mosaic = np.zeros((rows * tile_h, cols * tile_w, 3), dtype=np.uint8)
+        for i, tile in enumerate(tiles):
+            r = i // cols
+            c = i % cols
+            mosaic[r * tile_h:(r + 1) * tile_h, c * tile_w:(c + 1) * tile_w] = tile
+        return mosaic
+
+    def _normalize_label(self, text: str) -> str:
+        return re.sub(r'[^a-z0-9]+', '', text.lower().strip())
+
+    def _label_matches_goal(self, label: str, goal: str) -> bool:
+        if not goal:
+            return True
+        mode = str(self.target_match_label_mode).lower().strip()
+        if mode == 'exact':
+            return label.strip().lower() == goal.strip().lower()
+        return self._normalize_label(label) == self._normalize_label(goal)
+
+    def _is_sam2_detection(self, det: Dict[str, Any]) -> bool:
+        src = str(det.get('source', det.get('model', det.get('detector', '')))).lower()
+        return 'sam2' in src
+
+    def _update_target_state(self):
+        """Update target_found and target BEV position from external detections + lidar."""
+        now_s = self.get_clock().now().nanoseconds / 1e9
+        self.target_found = False
+        self.target_pixel_local = None
+        self.target_world_xyz = None
+        self.target_semantic = None
+
+        if self.latest_detection is None:
+            return
+        if now_s - self.latest_detection_msg_time > float(self.target_state_ttl_sec):
+            return
+        if len(self.target_detection_buffer) < int(self.target_temporal_min_hits):
+            return
+        if sum(self.target_detection_buffer) < int(self.target_temporal_min_hits):
+            return
+        if self.latest_scan is None or self.latest_pose_x is None or self.latest_yaw is None:
+            return
+
+        assoc_world = self._associate_target_world_from_lidar(self.latest_detection)
+        if assoc_world is None:
+            return
+
+        wx, wy, wz = assoc_world
+        pr, pc = world_to_local_pixel(
+            world_x=wx,
+            world_y=wy,
+            robot_x=self.latest_pose_x,
+            robot_y=self.latest_pose_y,
+            crop_radius=self.crop_radius,
+            output_size=self.output_size,
+            resolution=self.map_resolution,
+        )
+        in_local = (0.0 <= pr < float(self.output_size)) and (0.0 <= pc < float(self.output_size))
+        if not in_local:
+            return
+
+        self.target_found = True
+        self.target_world_xyz = (float(wx), float(wy), float(wz))
+        self.target_pixel_local = (float(pr), float(pc))
+        self.target_semantic = str(self.latest_detection.get('label', self.object_goal))
+        if self.target_birth_rgb is None and self.latest_rgb_pil is not None:
+            self.target_birth_rgb = self.latest_rgb_pil
+        self._publish_target_marker(wx, wy)
+        self._publish_target_debug_overlay()
+
+    def _associate_target_world_from_lidar(self, detection: Dict[str, Any]) -> Optional[Tuple[float, float, float]]:
+        """Associate a 2D detection with lidar points and estimate target world position."""
+        bbox = detection.get('bbox', None)
+        if bbox is None or len(bbox) != 4:
+            return None
+        x1, y1, x2, y2 = [float(v) for v in bbox]
+        cx_img = (float(self.camera_project_width) - 1.0) * 0.5
+        hfov = math.radians(float(self.camera_project_hfov_deg))
+        fx = cx_img / max(math.tan(hfov * 0.5), 1e-6)
+
+        u = 0.5 * (x1 + x2)
+        bw = max(1.0, abs(x2 - x1))
+        theta = math.atan((u - cx_img) / fx)
+        half_theta = max(math.atan((0.5 * bw) / fx), math.radians(1.0))
+
+        pts = self.latest_scan
+        dx = pts[:, 0] - self.latest_pose_x
+        dy = pts[:, 1] - self.latest_pose_y
+
+        cy = math.cos(self.latest_yaw)
+        sy = math.sin(self.latest_yaw)
+        forward = cy * dx + sy * dy
+        right = -sy * dx + cy * dy
+        dist2d = np.sqrt(dx * dx + dy * dy)
+
+        min_r = float(self.target_lidar_min_range)
+        max_r = float(self.target_lidar_max_range)
+        expected_right = np.tan(theta) * np.maximum(forward, 1e-3)
+        lateral_gate = float(self.target_lateral_gate_m) + np.abs(forward) * np.tan(half_theta)
+        lateral_err = np.abs(right - expected_right)
+        z_ok = (pts[:, 2] > self.latest_pose_z - 0.3) & (pts[:, 2] < self.latest_pose_z + 2.0)
+
+        mask = (
+            (forward > 0.0) &
+            (dist2d >= min_r) & (dist2d <= max_r) &
+            (lateral_err <= lateral_gate) &
+            z_ok
+        )
+        selected = pts[mask]
+        if selected.shape[0] < int(self.target_min_assoc_points):
+            return None
+
+        med = np.median(selected, axis=0)
+        return float(med[0]), float(med[1]), float(med[2])
+
+    def _publish_target_marker(self, wx: float, wy: float):
+        msg = PointStamped()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = self.waypoint_frame
+        msg.point.x = float(wx)
+        msg.point.y = float(wy)
+        msg.point.z = 0.0
+        self.target_marker_pub.publish(msg)
+
+    def _publish_target_debug_overlay(self):
+        if self.latest_rgb_pil is None:
+            return
+        arr = np.array(self.latest_rgb_pil.convert('RGB'))
+        if self.latest_detection is not None:
+            x1, y1, x2, y2 = [int(v) for v in self.latest_detection.get('bbox', [0, 0, 0, 0])]
+            cv2.rectangle(arr, (x1, y1), (x2, y2), (255, 128, 0), 2)
+            label = self.latest_detection.get('label', '')
+            conf = float(self.latest_detection.get('confidence', 0.0))
+            cv2.putText(
+                arr,
+                f'{label} {conf:.2f}',
+                (x1, max(14, y1 - 6)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (255, 128, 0),
+                1,
+                cv2.LINE_AA,
+            )
+        self._publish_rgb_image(self.target_debug_pub, arr, frame_id='camera')
+
+    def _publish_sam2_debug_overlay(self, detections):
+        """Publish raw SAM2 detection overlays for RVIZ inspection."""
+        if self.latest_rgb_pil is None:
+            return
+        arr = np.array(self.latest_rgb_pil.convert('RGB'))
+        for det in detections:
+            if not isinstance(det, dict):
+                continue
+            bbox = det.get('bbox', det.get('bbox_xyxy', None))
+            if bbox is None or len(bbox) != 4:
+                continue
+            x1, y1, x2, y2 = [int(v) for v in bbox]
+            label = str(det.get('label', det.get('class_name', det.get('name', ''))))
+            conf = float(det.get('confidence', det.get('score', 0.0)))
+            is_sam2 = self._is_sam2_detection(det)
+            color = (0, 255, 255) if is_sam2 else (160, 160, 160)
+            cv2.rectangle(arr, (x1, y1), (x2, y2), color, 2)
+            cv2.putText(
+                arr,
+                f'{label} {conf:.2f} {"SAM2" if is_sam2 else "NON-SAM2"}',
+                (x1, max(14, y1 - 6)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.45,
+                color,
+                1,
+                cv2.LINE_AA,
+            )
+
+            # Optional polygon mask visualization if provided by detector
+            poly = det.get('mask_polygon', None)
+            if isinstance(poly, list) and len(poly) >= 3:
+                pts = np.array(poly, dtype=np.int32).reshape(-1, 1, 2)
+                overlay = arr.copy()
+                cv2.fillPoly(overlay, [pts], color)
+                arr = cv2.addWeighted(overlay, 0.25, arr, 0.75, 0)
+
+        self._publish_rgb_image(self.sam2_debug_pub, arr, frame_id='camera')
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = VLMNavigatorNode()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
