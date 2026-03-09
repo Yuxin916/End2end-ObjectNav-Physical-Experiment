@@ -111,25 +111,26 @@ class VLMInterface:
                 f'Check vln_repo_path: {self.cfg.vln_repo_path}\nError: {e}'
             )
 
-        # Minimal args namespace matching what mp3d_traj_sam.py passes
+        # Mirror mp3d_traj_sam.py exactly: set _pos_placeholders via args BEFORE
+        # load so load_model_and_tokenizer resizes the embedding before loading weights.
+        # All Pos templates use the same 4 base placeholders (NOT the old 8-token list).
+        # PosD additionally sets _pos_candidate_id_tokens.
         args = types.SimpleNamespace(
             checkpoint=self.cfg.checkpoint,
             auto=False,
             load_in_8bit=False,
             load_in_4bit=False,
         )
-        # Pos templates need placeholder tokens added before weights are loaded
         if 'Pos' in self.cfg.template:
-            args._pos_placeholders = [
-                '<state>', '<frontier>', '<target>',
-                '<s>', '<f>', '<t>',
-                '<candidates>', '<cand>',
-            ]
+            args._pos_placeholders = ['<s>', '<cand>', '<e_s>', '<e_cand>']
+        if 'PosD' in self.cfg.template:
+            args._pos_candidate_id_tokens = [f'<id_{i}>' for i in range(32)]
+            logger.info('PosD candidate id tokens enabled: %d', 32)
 
         self._model, self._tokenizer = load_model_and_tokenizer(args)
         self._model = self._model.to(self.cfg.device)
 
-        # ---- Post-load setup (mirrors mp3d_traj_sam.py lines 1746-1762) -
+        # ---- Post-load setup (mirrors mp3d_traj_sam.py exactly) -----------
         if getattr(self._tokenizer, 'pad_token_id', None) is None:
             self._tokenizer.pad_token_id = self._tokenizer.eos_token_id
         self._model.config.pad_token_id = self._tokenizer.pad_token_id
@@ -140,7 +141,7 @@ class VLMInterface:
         if 'Pos' in self.cfg.template:
             self._model.tokenizer = self._tokenizer
             self._model.position_placeholder_ids = {}
-            for ph in ['<s>', '<f>', '<t>', '<cand>']:
+            for ph in ['<s>', '<f>', '<t>', '<cand>', '<e_s>', '<e_cand>']:
                 ids = self._tokenizer.encode(ph, add_special_tokens=False)
                 self._model.position_placeholder_ids[ph] = ids if ids else None
             self._model.use_position_embeddings = getattr(
@@ -157,6 +158,14 @@ class VLMInterface:
                 'When the target object is detected (<target> marker), navigate directly to it. '
                 'Otherwise, explore frontiers strategically to find the goal object.'
             )
+            logger.info('Pos template: position embeddings and placeholder tokens configured.')
+
+        if 'PosD' in self.cfg.template:
+            if not bool(getattr(self._model.config, 'use_candidate_id_special_tokens', False)):
+                raise ValueError(
+                    'PosD requires use_candidate_id_special_tokens=true in model config. '
+                    'Current checkpoint/config does not enable candidate-id special tokens.'
+                )
 
         # ---- Image transform (matches InternVL preprocessing) -----------
         img_size = (
