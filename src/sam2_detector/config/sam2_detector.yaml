@@ -1,0 +1,22 @@
+sam2_detector:
+  ros__parameters:
+
+    # --- Model paths (relative to grounded_sam2_root) ---
+    grounded_sam2_root: "/home/tsaisplus/projects/VLN_CL_CoTNav/Grounded-SAM-2"
+    sam2_checkpoint:    "checkpoints/sam2.1_hiera_large.pt"
+    sam2_model_config:  "sam2/configs/sam2.1/sam2.1_hiera_l.yaml"
+    gdino_config:       "grounding_dino/groundingdino/config/GroundingDINO_SwinT_OGC.py"
+    gdino_checkpoint:   "gdino_checkpoints/groundingdino_swint_ogc.pth"
+
+    # --- Detection thresholds ---
+    box_threshold:  0.35
+    text_threshold: 0.25
+
+    # --- Runtime ---
+    inference_hz: 2.0         # max detections per second
+    device: "cuda:0"
+    camera_topic: "/egocentric_rgb"   # projected pinhole view from vlm_nav_bridge
+
+    # use_full_prompt: true  → detect all 21 indoor categories every frame
+    #                  false → detect only the current /object_goal label
+    use_full_prompt: false

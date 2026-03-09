@@ -49,10 +49,10 @@ def generate_launch_description():
     args = [
         DeclareLaunchArgument(
             'checkpoint',
-            default_value='/home/tsaisplus/projects/VLN_CL_CoTNav/all_log/experiments/mp3d_70k_few_S28_a6000_dualvit_bev-full_ego-lora32_mlp-train-patch-24-acc2_BEVftFOV_FrontierRGB_PosB__FRONTIER_PIXEL_NUMBER_ONLY_STRATEGY2_train/checkpoints',
+            default_value='/home/tsaisplus/projects/VLN_CL_CoTNav/all_log/experiments/prompt_revision/a100_dualvit_llm-64_mlp-train-patch-32768-acc1_BEVftFOV_FrontierRGB_PosD__FRONTIER_PIXEL_NUMBER_ONLY/checkpoints',
                               description='Absolute path to InternVL checkpoint directory'),
         DeclareLaunchArgument('template',
-                              default_value='BEVftFOV_FrontierRGB_PosB__FRONTIER_PIXEL_NUMBER_ONLY_STRATEGY2',
+                              default_value='BEVftFOV_FrontierRGB_PosD__FRONTIER_PIXEL_NUMBER_ONLY_STRATEGY2',
                               description='VLM template name'),
         DeclareLaunchArgument('device', default_value='cuda:0',
                               description='Torch device for VLM inference'),

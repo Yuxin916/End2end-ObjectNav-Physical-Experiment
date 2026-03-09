@@ -3,8 +3,8 @@ vlm_navigator:
 
     # --- VLM model ---
     vln_repo_path: "/home/tsaisplus/projects/VLN_CL_CoTNav"
-    checkpoint: "/home/tsaisplus/projects/VLN_CL_CoTNav/all_log/experiments/mp3d_70k_few_S28_a6000_dualvit_bev-full_ego-lora32_mlp-train-patch-24-acc2_BEVftFOV_FrontierRGB_PosB__FRONTIER_PIXEL_NUMBER_ONLY_STRATEGY2_train/checkpoints"
-    template: "BEVftFOV_FrontierRGB_PosB__FRONTIER_PIXEL_NUMBER_ONLY_STRATEGY2"
+    checkpoint: "/home/tsaisplus/projects/VLN_CL_CoTNav/all_log/experiments/prompt_revision/a100_dualvit_llm-64_mlp-train-patch-32768-acc1_BEVftFOV_FrontierRGB_PosD__FRONTIER_PIXEL_NUMBER_ONLY/checkpoints"
+    template: "BEVftFOV_FrontierRGB_PosD__FRONTIER_PIXEL_NUMBER_ONLY_STRATEGY2"
     device: "cuda:0"
     inference_interval: 5.0
     max_new_tokens: 64

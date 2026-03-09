@@ -39,6 +39,7 @@ _DUAL_VIT_TEMPLATES = {
     'BEVftFOV_FrontierRGB_PosA__FRONTIER_PIXEL_NUMBER_ONLY_STRATEGY2',
     'BEVftFOV_FrontierRGB_PosB__FRONTIER_PIXEL_NUMBER_ONLY_STRATEGY2',
     'BEVftFOV_FrontierRGB_PosC__FRONTIER_PIXEL_NUMBER_ONLY_STRATEGY2',
+    'BEVftFOV_FrontierRGB_PosD__FRONTIER_PIXEL_NUMBER_ONLY_STRATEGY2',
 }
 
 
@@ -196,6 +197,20 @@ class VLMInterface:
         except ImportError:
             _posc_fn = BEVftFOV_FrontierRGB_PosB__FRONTIER_PIXEL_NUMBER_ONLY
 
+        # PosD has its own prompt function in prompt_refined.py (uses <id_k> output tokens)
+        _posd_fn = None
+        try:
+            from prompt_refined import BEVftFOV_FrontierRGB_PosD__FRONTIER_PIXEL_NUMBER_ONLY
+            _posd_fn = BEVftFOV_FrontierRGB_PosD__FRONTIER_PIXEL_NUMBER_ONLY
+        except ImportError:
+            pass
+        if _posd_fn is None:
+            try:
+                from prompts import BEVftFOV_FrontierRGB_PosD__FRONTIER_PIXEL_NUMBER_ONLY
+                _posd_fn = BEVftFOV_FrontierRGB_PosD__FRONTIER_PIXEL_NUMBER_ONLY
+            except ImportError:
+                _posd_fn = _posc_fn  # graceful fallback: same prompt structure as PosC
+
         _registry = {
             # Single-ViT templates
             'BEVftFOV_Sem_Pos__FRONTIER_PIXEL_NUMBER_ONLY_STRATEGY2':
@@ -213,6 +228,8 @@ class VLMInterface:
                 BEVftFOV_FrontierRGB_PosB__FRONTIER_PIXEL_NUMBER_ONLY,
             'BEVftFOV_FrontierRGB_PosC__FRONTIER_PIXEL_NUMBER_ONLY_STRATEGY2':
                 _posc_fn,
+            'BEVftFOV_FrontierRGB_PosD__FRONTIER_PIXEL_NUMBER_ONLY_STRATEGY2':
+                _posd_fn,
         }
         if self.cfg.template not in _registry:
             raise ValueError(
