@@ -369,7 +369,7 @@ class VLMNavigatorNode(Node):
         self.create_timer(0.25, self._goal_rebroadcast_timer_callback)
         # Always-on visual debug publisher (independent from VLM decision timing).
         self.live_debug_timer = self.create_timer(
-            0.05, self._live_debug_timer_callback
+            0.5, self._live_debug_timer_callback
         )
         # High-rate stop timer (20 Hz): publishes cmd_vel=0 after goal success to
         # override local_planner regardless of joySpeed/speedHandler state.
@@ -849,9 +849,9 @@ class VLMNavigatorNode(Node):
                 # Pinhole camera path: no panorama crop heading term.
                 self._last_projected_crop_heading = 0.0
             self.latest_rgb_pil = PILImage.fromarray(arr)
-            if self.write_visualize:
-                self._publish_rgb_image(self.panoramic_pub, panoramic_rgb, frame_id='camera')
-                self._publish_rgb_image(self.rgb_pub, arr, frame_id='camera')
+            # if self.write_visualize:
+            #     self._publish_rgb_image(self.panoramic_pub, panoramic_rgb, frame_id='camera')
+            #     self._publish_rgb_image(self.rgb_pub, arr, frame_id='camera')
             # Publish clean image to /egocentric_rgb (SAM2 detector input).
             self._publish_rgb_image(self.egocentric_rgb_pub, arr, frame_id='camera')
             # Annotated overlay goes to a separate debug-only topic.
@@ -1221,7 +1221,7 @@ class VLMNavigatorNode(Node):
                 self.latest_pose_z,
                 self.latest_yaw if self.latest_yaw is not None else 0.0,
             )
-        self._publish_live_bev_debug()
+        # self._publish_live_bev_debug()
         # Republish frozen VLM inference input at 5 Hz to keep /vlm_bev_debug alive in RVIZ.
         if self._last_vlm_bev_snapshot is not None:
             self._publish_bev_debug(self._last_vlm_bev_snapshot)

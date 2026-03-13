@@ -3,9 +3,10 @@ import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, TimerAction
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource, FrontendLaunchDescriptionSource
 from launch_ros.actions import Node
-from launch.substitutions import LaunchConfiguration 
+from launch.substitutions import LaunchConfiguration
 
 def generate_launch_description():
   world_name = LaunchConfiguration('world_name')
@@ -19,6 +20,7 @@ def generate_launch_description():
   robot_ip = LaunchConfiguration('robot_ip')
   connection_method = LaunchConfiguration('connection_method')
   control_mode = LaunchConfiguration('control_mode')
+  launch_unitree_webrtc = LaunchConfiguration('launch_unitree_webrtc')
 
   declare_world_name = DeclareLaunchArgument('world_name', default_value='real_world', description='')
   declare_sensorOffsetX = DeclareLaunchArgument('sensorOffsetX', default_value='0.05', description='')
@@ -44,6 +46,12 @@ def generate_launch_description():
     'control_mode',
     default_value='wireless_controller',
     description='Unitree control mode'
+  )
+
+  declare_launch_unitree_webrtc = DeclareLaunchArgument(
+    'launch_unitree_webrtc',
+    default_value='true',
+    description='Launch Unitree WebRTC control node (set false for non-Unitree robots like mechanum_drive)'
   )
   start_local_planner = IncludeLaunchDescription(
     PythonLaunchDescriptionSource(os.path.join(
@@ -105,7 +113,7 @@ def generate_launch_description():
   )
 
   start_joy = Node(
-    package='joy', 
+    package='joy',
     executable='joy_node',
     name='ps3_joy',
     output='screen',
@@ -131,7 +139,8 @@ def generate_launch_description():
       'robot_ip': robot_ip,
       'connection_method': connection_method,
       'control_mode': control_mode,
-    }.items()
+    }.items(),
+    condition=IfCondition(launch_unitree_webrtc)
   )
 
 
@@ -149,6 +158,7 @@ def generate_launch_description():
   ld.add_action(declare_robot_ip)
   ld.add_action(declare_connection_method)
   ld.add_action(declare_control_mode)
+  ld.add_action(declare_launch_unitree_webrtc)
 
   # Add actions
   ld.add_action(start_local_planner)

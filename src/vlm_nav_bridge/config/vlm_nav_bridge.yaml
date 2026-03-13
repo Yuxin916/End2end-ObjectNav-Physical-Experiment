@@ -64,12 +64,12 @@ vlm_navigator:
     # If true, publish intermediate debug images to training-aligned topic names
     # (/rgb, /panoramic, /full_occupancy_explore, /local_occupancy_explore, etc.)
     # for offline analysis. Set false to reduce bandwidth in deployment.
-    write_visualize: true
+    write_visualize: false
 
     # If true, skip VLM model loading — only BEV map and frontier visualization run.
-    # Useful for debugging the occupancy map without occupying GPU memory.
+    # Useful for debugging the occupancy map w-----------ithout occupying GPU memory.
     # Override at launch: ros2 launch vlm_nav_bridge vlm_nav_bridge.launch.py bev_only:=true
-    bev_only: false
+    bev_only: true
 
 
     # ==========================================================================
