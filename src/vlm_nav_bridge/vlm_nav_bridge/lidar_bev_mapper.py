@@ -461,7 +461,9 @@ class LidarBEVMapper:
         img[self.full_map[2] > 0] = [255, 0, 0]
 
         # Flip Y so row=0 is north/top to match local BEV orientation.
-        img = np.flipud(img)
+        # np.flipud creates a negative-stride view, which OpenCV drawing
+        # functions (circle/arrowedLine/fillPoly) reject; force contiguous.
+        img = np.ascontiguousarray(np.flipud(img))
 
         def to_vis_row(row_idx: int) -> int:
             return (n - 1) - int(row_idx)
@@ -505,6 +507,8 @@ class LidarBEVMapper:
 
     def _draw_agent_arrow_at(self, img: np.ndarray, row: int, col: int) -> np.ndarray:
         """Draw a red arrow at a specified pixel location using BEV yaw convention."""
+        # OpenCV drawing APIs require a cv::Mat-compatible contiguous buffer.
+        img = np.ascontiguousarray(img)
         # Image-frame convention:
         #   col increases to the right (+X), row increases downward (-Y).
         # For ROS yaw (0=east, +90=north), projected image angle is -yaw.
