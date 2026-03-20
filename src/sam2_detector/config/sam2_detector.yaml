@@ -1,8 +1,9 @@
 sam2_detector:
   ros__parameters:
+    detector_backend: "dino_sam_mp3d"   # dino_sam_mp3d | sam2
+    vln_repo_path: "/home/tsaisplus/projects/VLN_CL_CoTNav"
 
     # --- Model paths (relative to grounded_sam2_root) ---
-    grounded_sam2_root: "/home/tsaisplus/projects/VLN_CL_CoTNav/Grounded-SAM-2"
     sam2_checkpoint:    "checkpoints/sam2.1_hiera_large.pt"
     sam2_model_config:  "sam2/configs/sam2.1/sam2.1_hiera_l.yaml"
     gdino_config:       "grounding_dino/groundingdino/config/GroundingDINO_SwinT_OGC.py"

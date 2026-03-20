@@ -52,6 +52,8 @@ class VLMConfig:
     max_new_tokens: int = 64
     do_sample: bool = False
     image_size: int = 0  # 0 = read from model config
+    pad2square: bool = True
+    normalize_type: str = "imagenet"
 
 
 class VLMInterface:
@@ -105,9 +107,10 @@ class VLMInterface:
         # ---- Use load_model_and_tokenizer (mirrors mp3d_traj_sam.py) -----
         try:
             from internvl_cleaned.model import load_model_and_tokenizer
+            from internvl_cleaned.dataset.dataset import build_transform
         except ImportError as e:
             raise ImportError(
-                f'Cannot import load_model_and_tokenizer. '
+                f'Cannot import VLM model/transform utilities. '
                 f'Check vln_repo_path: {self.cfg.vln_repo_path}\nError: {e}'
             )
 
@@ -167,13 +170,18 @@ class VLMInterface:
                     'Current checkpoint/config does not enable candidate-id special tokens.'
                 )
 
-        # ---- Image transform (matches InternVL preprocessing) -----------
+        # ---- Image transform (match mp3d_traj_sam.py defaults) ----------
         img_size = (
             self.cfg.image_size or
             getattr(self._model.config, 'force_image_size', None) or
             self._model.config.vision_config.image_size
         )
-        self._transform = self._build_transform(img_size)
+        self._transform = build_transform(
+            is_train=False,
+            input_size=img_size,
+            pad2square=bool(self.cfg.pad2square),
+            normalize_type=self.cfg.normalize_type,
+        )
 
         # ---- Generation config ------------------------------------------
         # InternVL chat() mutates generation_config via dict-style assignment.
@@ -186,7 +194,7 @@ class VLMInterface:
 
         # ---- Prompt template --------------------------------------------
         try:
-            from prompts import (
+            from prompt_refined import (
                 BEVftFOV_Sem_Pos__FRONTIER_PIXEL_NUMBER_ONLY,
                 BEVftFOV_Sem_Pos_ActionHistory__FRONTIER_PIXEL_NUMBER_ONLY,
                 BEVftFOV_RGB_Seg_Sem__FRONTIER_PIXEL_NUMBER_ONLY,
@@ -199,26 +207,20 @@ class VLMInterface:
                 f'Check vln_repo_path/scripts/: {e}'
             )
 
-        # PosC delegates to PosB for prompt generation
+        # Optional prompt functions for PosC/PosD; fall back conservatively.
+        _posc_fn = BEVftFOV_FrontierRGB_PosB__FRONTIER_PIXEL_NUMBER_ONLY
+        _posd_fn = BEVftFOV_FrontierRGB_PosB__FRONTIER_PIXEL_NUMBER_ONLY
         try:
-            from prompts import BEVftFOV_FrontierRGB_PosC__FRONTIER_PIXEL_NUMBER_ONLY
+            from prompt_refined import BEVftFOV_FrontierRGB_PosC__FRONTIER_PIXEL_NUMBER_ONLY
             _posc_fn = BEVftFOV_FrontierRGB_PosC__FRONTIER_PIXEL_NUMBER_ONLY
         except ImportError:
-            _posc_fn = BEVftFOV_FrontierRGB_PosB__FRONTIER_PIXEL_NUMBER_ONLY
-
-        # PosD has its own prompt function in prompt_refined.py (uses <id_k> output tokens)
-        _posd_fn = None
+            logger.warning('PosC prompt function unavailable; falling back to PosB prompt.')
         try:
             from prompt_refined import BEVftFOV_FrontierRGB_PosD__FRONTIER_PIXEL_NUMBER_ONLY
             _posd_fn = BEVftFOV_FrontierRGB_PosD__FRONTIER_PIXEL_NUMBER_ONLY
         except ImportError:
-            pass
-        if _posd_fn is None:
-            try:
-                from prompts import BEVftFOV_FrontierRGB_PosD__FRONTIER_PIXEL_NUMBER_ONLY
-                _posd_fn = BEVftFOV_FrontierRGB_PosD__FRONTIER_PIXEL_NUMBER_ONLY
-            except ImportError:
-                _posd_fn = _posc_fn  # graceful fallback: same prompt structure as PosC
+            _posd_fn = _posc_fn
+            logger.warning('PosD prompt function unavailable; falling back to PosC/PosB prompt.')
 
         _registry = {
             # Single-ViT templates
@@ -251,26 +253,6 @@ class VLMInterface:
         self._loaded = True
         logger.info('VLM model ready. Image size: %d  dual_vit: %s',
                     img_size, self._is_dual_vit)
-
-    # ------------------------------------------------------------------
-    # Image transform (reimplemented from VLN build_transform)
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _build_transform(image_size: int):
-        import torchvision.transforms as T
-        from torchvision.transforms.functional import InterpolationMode
-
-        IMAGENET_MEAN = (0.485, 0.456, 0.406)
-        IMAGENET_STD = (0.229, 0.224, 0.225)
-
-        return T.Compose([
-            T.Lambda(lambda img: img.convert('RGB') if img.mode != 'RGB' else img),
-            T.Resize((image_size, image_size),
-                     interpolation=InterpolationMode.BICUBIC),
-            T.ToTensor(),
-            T.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
-        ])
 
     # ------------------------------------------------------------------
     # Inference
@@ -395,18 +377,27 @@ class VLMInterface:
 
         logger.debug('VLM raw output: %s', raw_output)
 
-        # ---- Parse integer from output ----------------------------------
-        match = re.search(r'(\d+)', raw_output.strip())
-        if not match:
-            logger.warning('VLM output has no integer: %r', raw_output)
+        idx = self._extract_candidate_index(raw_output)
+        if idx is None:
             return None
-
-        idx = int(match.group(1))
         n = len(all_frontiers)
         if 0 <= idx < n:
             return idx
         logger.warning('VLM index %d out of range (n=%d); using 0.', idx, n)
         return 0
+
+    def _extract_candidate_index(self, raw_output: str) -> Optional[int]:
+        """Parse model output index with PosD-aware parsing."""
+        text = (raw_output or '').strip()
+        if 'PosD' in self.cfg.template:
+            match = re.search(r'<id_(\d+)>', text)
+            if match:   
+                return int(match.group(1))
+        match = re.search(r'(\d+)', text)
+        if not match:
+            logger.warning('VLM output has no parseable candidate index: %r', raw_output)
+            return None
+        return int(match.group(1))
 
     @property
     def is_loaded(self) -> bool:

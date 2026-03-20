@@ -31,3 +31,4 @@ rosbags/
 src/unitree_webrtc_ros/launch/G1_control.launch.py
 src/unitree_webrtc_ros/unitree_webrtc_ros/g1_control_node.py
 src/unitree_go2_sbus/
+.venv/

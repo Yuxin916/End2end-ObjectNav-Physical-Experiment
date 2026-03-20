@@ -354,7 +354,8 @@ class LidarBEVMapper:
     def render_local_bev(self,
                           frontier_centers_2d: Optional[np.ndarray] = None,
                           selected_frontier_index: Optional[int] = None,
-                          target_position: Optional[Tuple] = None) -> np.ndarray:
+                          target_position: Optional[Tuple] = None,
+                          draw_fov: bool = True) -> np.ndarray:
         """
         Render the local BEV map as a 448×448 RGB image (matching VLN's
         write_map_with_fov() output format).
@@ -377,32 +378,26 @@ class LidarBEVMapper:
         occ = self.local_map[0]
         exp = self.local_map[1]
 
-        # ---- Base grayscale layer ----------------------------------------
-        gray = np.full((out, out), self.cfg.gray_unknown, dtype=np.uint8)
+        # ---- Base occupancy/explore layer (match visualization_refined.py) ---
+        # Colors are applied in BGR order to mirror the reference OpenCV writer.
+        img = np.full((out, out, 3), self.cfg.gray_unknown, dtype=np.uint8)
         explored_mask = exp >= self.cfg.exp_pred_threshold
         obstacle_mask = occ >= self.cfg.map_pred_threshold
+        img[explored_mask] = [255, 255, 255]
+        img[obstacle_mask] = [0, 0, 0]
 
-        gray[explored_mask] = self.cfg.gray_free
-        gray[obstacle_mask] = self.cfg.gray_occupied
-
-        # Convert to BGR for OpenCV drawing
-        img = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
-
-        # ---- Trajectory trail -------------------------------------------
-        traj = self.local_map[3]
-        traj_mask = (traj > 0).astype(np.uint8)
+        # ---- Trajectory + current position (direct paint, no blending) ----
+        traj_mask = self.local_map[3] > 0
         if traj_mask.any():
-            k = self.cfg.trail_erode_ksize
-            if k > 1:
-                traj_mask = cv2.erode(traj_mask,
-                                      np.ones((k, k), np.uint8))
-            overlay = img.copy()
-            overlay[traj_mask > 0] = self.cfg.trail_color
-            cv2.addWeighted(overlay, self.cfg.trail_alpha,
-                            img, 1.0 - self.cfg.trail_alpha, 0, img)
+            # Keep trajectory style identical to training/eval visualizer.
+            img[traj_mask] = [0, 0, 255]
+        agent_mask = self.local_map[2] > 0
+        if agent_mask.any():
+            img[agent_mask] = [255, 0, 0]
 
         # ---- FOV triangle overlay ----------------------------------------
-        img = self._draw_fov(img)
+        if draw_fov:
+            img = self._draw_fov(img)
 
         # ---- Target dot (if detected) -----------------------------------
         if target_position is not None:
@@ -447,33 +442,89 @@ class LidarBEVMapper:
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         return img_rgb
 
+    def render_full_bev(self,
+                        frontier_cells_2d: Optional[np.ndarray] = None,
+                        selected_frontier_index: Optional[int] = None,
+                        target_cell: Optional[Tuple[int, int]] = None) -> np.ndarray:
+        """Render the global BEV map in the same visual style as local BEV."""
+        if self.full_map is None:
+            return np.full((self.global_cells, self.global_cells, 3),
+                           self.cfg.gray_unknown, dtype=np.uint8)
+
+        n = self.global_cells
+        occ = self.full_map[0]
+        exp = self.full_map[1]
+        img = np.full((n, n, 3), self.cfg.gray_unknown, dtype=np.uint8)
+        img[exp >= self.cfg.exp_pred_threshold] = [255, 255, 255]
+        img[occ >= self.cfg.map_pred_threshold] = [0, 0, 0]
+        img[self.full_map[3] > 0] = [0, 0, 255]
+        img[self.full_map[2] > 0] = [255, 0, 0]
+
+        # Flip Y so row=0 is north/top to match local BEV orientation.
+        img = np.flipud(img)
+
+        def to_vis_row(row_idx: int) -> int:
+            return (n - 1) - int(row_idx)
+
+        if target_cell is not None:
+            tr, tc = int(target_cell[0]), int(target_cell[1])
+            if 0 <= tr < n and 0 <= tc < n:
+                cv2.circle(img, (tc, to_vis_row(tr)), self.cfg.frontier_dot_radius + 2, (0, 111, 255), -1)
+
+        if frontier_cells_2d is not None and len(frontier_cells_2d) > 0:
+            for idx, (fr, fc) in enumerate(frontier_cells_2d):
+                fr, fc = int(fr), int(fc)
+                if not (0 <= fr < n and 0 <= fc < n):
+                    continue
+                rr = to_vis_row(fr)
+                color_bgr = (
+                    self.cfg.frontier_color[2],
+                    self.cfg.frontier_color[1],
+                    self.cfg.frontier_color[0],
+                )
+                if idx == selected_frontier_index:
+                    color_bgr = (
+                        self.cfg.selected_frontier_color[2],
+                        self.cfg.selected_frontier_color[1],
+                        self.cfg.selected_frontier_color[0],
+                    )
+                cv2.circle(img, (fc, rr), self.cfg.frontier_dot_radius, color_bgr, -1)
+                cv2.circle(img, (fc, rr), self.cfg.frontier_dot_radius, (255, 255, 255), self.cfg.frontier_width)
+
+        robot_row_vis = to_vis_row(self.robot_g_row)
+        robot_col_vis = int(self.robot_g_col)
+        img = self._draw_agent_arrow_at(img, robot_row_vis, robot_col_vis)
+        return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
     def _draw_agent_arrow(self, img: np.ndarray) -> np.ndarray:
         """Draw a red arrow at the robot's pixel position pointing in heading direction."""
         out = self.cfg.output_size
-        cr = int(out / 2)     # robot is always at centre
+        cr = int(out / 2)
         cc = int(out / 2)
+        return self._draw_agent_arrow_at(img, cr, cc)
 
-        yaw = self.robot_yaw  # radians, CCW from +X
-        # In image: col increases east (+X), row increases south (-Y)
-        # So heading direction in image: (sin(yaw), -cos(yaw)) is wrong
-        # +X = east = col↑, +Y = north = row↓ (since BEV row goes south)
-        tip_col = int(cc + self.cfg.arrow_len_px * math.cos(yaw))
-        tip_row = int(cr - self.cfg.arrow_len_px * math.sin(yaw))  # minus: north=up=row↓
+    def _draw_agent_arrow_at(self, img: np.ndarray, row: int, col: int) -> np.ndarray:
+        """Draw a red arrow at a specified pixel location using BEV yaw convention."""
+        # Image-frame convention:
+        #   col increases to the right (+X), row increases downward (-Y).
+        # For ROS yaw (0=east, +90=north), projected image angle is -yaw.
+        yaw_rad = -float(self.robot_yaw)
+        tip_col = int(col + self.cfg.arrow_len_px * math.cos(yaw_rad))
+        tip_row = int(row + self.cfg.arrow_len_px * math.sin(yaw_rad))
 
         cv2.arrowedLine(img,
-                        (cc, cr),
+                        (int(col), int(row)),
                         (tip_col, tip_row),
                         self.cfg.arrow_color,
                         self.cfg.arrow_width,
                         tipLength=self.cfg.arrow_head_length / max(self.cfg.arrow_len_px, 1))
-        cv2.circle(img, (cc, cr), self.cfg.mark_radius, self.cfg.arrow_color, -1)
+        cv2.circle(img, (int(col), int(row)), self.cfg.mark_radius, self.cfg.arrow_color, -1)
         return img
 
     def _draw_fov(self, img: np.ndarray) -> np.ndarray:
         """Draw a semi-transparent FOV triangle in front of the robot."""
         out = self.cfg.output_size
         cr, cc = out // 2, out // 2
-        yaw = self.robot_yaw
         cfg = self.cfg
 
         # Scale max_depth to pixels
@@ -481,16 +532,18 @@ class LidarBEVMapper:
                            (cfg.output_size / (2.0 * cfg.crop_radius)))
 
         half_a = math.radians(cfg.hfov_deg / 2.0)
+        # Keep identical yaw convention as arrow and explored-wedge map update.
+        yaw_rad = -float(self.robot_yaw)
 
         def tip(angle):
             c = int(cc + max_depth_px * math.cos(angle))
-            r = int(cr - max_depth_px * math.sin(angle))
+            r = int(cr + max_depth_px * math.sin(angle))
             return (c, r)
 
         pts = np.array([
             [cc, cr],
-            list(tip(yaw + half_a)),
-            list(tip(yaw - half_a)),
+            list(tip(yaw_rad + half_a)),
+            list(tip(yaw_rad - half_a)),
         ], dtype=np.int32)
 
         overlay = img.copy()
