@@ -4,7 +4,7 @@ SAM2DetectorNode
 ROS 2 node that runs an external detector on incoming camera frames and
 publishes detections as JSON over std_msgs/String to /target_detection.
 
-This is the external detector expected by VLMNavigatorNode.  The JSON
+This is the external detector expected by VLMNavigatorNode. The JSON
 payload format matches what _target_detection_callback() parses:
 
   {
@@ -13,7 +13,7 @@ payload format matches what _target_detection_callback() parses:
         "label":        "chair",
         "confidence":   0.87,
         "bbox":         [x1, y1, x2, y2],     # pixels, projected image
-        "source":       "dino_sam" | "sam2",
+        "source":       "dino_sam",
         "mask_polygon": [[x, y], ...]          # optional contour points
       },
       ...
@@ -34,16 +34,15 @@ Publications
 Usage
 -----
   ros2 launch sam2_detector sam2_detector.launch.py
-  # default backend is detector_backend:=dino_sam_mp3d
+  # single backend: GroundingDINO + SAM (mp3d-style parity)
 """
 
-import os
 import sys
 import json
-import math
 import time
 import logging
 from typing import List, Optional
+from pathlib import Path
 
 import numpy as np
 import cv2
@@ -58,35 +57,64 @@ from std_msgs.msg import String
 logger = logging.getLogger(__name__)
 
 
-def _translate_objnav_mp3d(object_goal: str):
+def _translate_objnav(object_goal: str, scene_mode: str = "unity"):
     goal = object_goal.lower().strip()
-    if goal == "chest_of_drawers":
-        target = "dresser"
-    elif goal == "plant":
-        target = "potted_plant"
-    elif goal == "seating":
-        target = "bench"
-    elif goal == "sofa":
-        target = "couch"
-    elif goal == "gym_equipment":
-        target = "gym_machine"
-    elif goal == "table":
-        target = "desk"
-    else:
-        target = goal
+    mode = scene_mode.lower().strip()
 
-    if target in ("bathtub", "shower"):
-        target_list = ["bathtub", "shower"]
-    else:
-        target_list = [target]
+    # Unity mode: keep strict mp3d_traj_sam-style translation.
+    if mode == "unity":
+        if goal == "chest_of_drawers":
+            target = "dresser"
+        elif goal == "plant":
+            target = "potted_plant"
+        elif goal == "seating":
+            target = "bench"
+        elif goal == "sofa":
+            target = "couch"
+        elif goal == "gym_equipment":
+            target = "gym_machine"
+        elif goal == "table":
+            target = "desk"
+        else:
+            target = goal
 
-    if target in ["chair", "bench", "stool", "desk", "couch"]:
-        confusing_target_list = ["chair", "bench", "stool", "desk", "couch"]
-    elif target in ["dresser", "cabinet", "counter"]:
-        confusing_target_list = ["dresser", "cabinet", "counter"]
-    else:
-        confusing_target_list = target_list
-    return target, target_list, confusing_target_list
+        if target in ("bathtub", "shower"):
+            target_list = ["bathtub", "shower"]
+        else:
+            target_list = [target]
+
+        if target in ["chair", "bench", "stool", "desk", "couch"]:
+            confusing_target_list = ["chair", "bench", "stool", "desk", "couch"]
+        elif target in ["dresser", "cabinet", "counter"]:
+            confusing_target_list = ["dresser", "cabinet", "counter"]
+        else:
+            confusing_target_list = target_list
+        return target, target_list, confusing_target_list
+
+    # Real-world mode: conservative mapping to avoid over-aggressive relabeling.
+    if mode == "real_world":
+        if goal == "sofa":
+            target = "couch"
+        elif goal == "plant":
+            target = "potted_plant"
+        else:
+            target = goal
+
+        if target in ("bathtub", "shower"):
+            target_list = ["bathtub", "shower"]
+        else:
+            target_list = [target]
+
+        if target in ["chair", "bench", "stool", "desk", "couch"]:
+            confusing_target_list = ["chair", "bench", "stool", "desk", "couch"]
+        elif target in ["dresser", "cabinet", "counter"]:
+            confusing_target_list = ["dresser", "cabinet", "counter"]
+        else:
+            confusing_target_list = target_list
+        return target, target_list, confusing_target_list
+
+    # Fallback to unity semantics for unknown mode names.
+    return _translate_objnav(object_goal, scene_mode="unity")
 
 
 class SAM2DetectorNode(Node):
@@ -97,15 +125,10 @@ class SAM2DetectorNode(Node):
         self._declare_parameters()
         self._load_parameters()
 
-        # Build PYTHONPATH so Grounded-SAM-2 packages are importable
-        self._patch_pythonpath()
-
         self.object_goal: str = ''
         self.latest_rgb: Optional[np.ndarray] = None   # (H, W, 3) uint8 RGB
 
         self._model_loaded = False
-        self._sam2_predictor = None
-        self._grounding_model = None
         self._dino_sam_perceiver = None
         self._dino_goal_ctx = ("", [], [])
         self._last_goal_for_init = ""
@@ -136,6 +159,10 @@ class SAM2DetectorNode(Node):
             f'inference_hz={self.inference_hz:.1f}  '
             f'box_threshold={self.box_threshold}  '
             f'text_threshold={self.text_threshold}  '
+            f'temporal_buffer_size={self.temporal_buffer_size}  '
+            f'temporal_min_hits={self.temporal_min_hits}  '
+            f'use_temporal_filter={self.use_temporal_filter}  '
+            f'nms_threshold={self.nms_threshold}  '
             f'python={sys.executable}'
         )
 
@@ -144,57 +171,42 @@ class SAM2DetectorNode(Node):
     # ------------------------------------------------------------------
 
     def _declare_parameters(self):
-        self.declare_parameter('grounded_sam2_root',
-                               '/home/tsaisplus/projects/VLN_CL_CoTNav/Grounded-SAM-2')
-        self.declare_parameter('sam2_checkpoint',
-                               'checkpoints/sam2.1_hiera_large.pt')
-        self.declare_parameter('sam2_model_config',
-                               'sam2/configs/sam2.1/sam2.1_hiera_l.yaml')
-        self.declare_parameter('gdino_config',
-                               'grounding_dino/groundingdino/config/GroundingDINO_SwinT_OGC.py')
-        self.declare_parameter('gdino_checkpoint',
-                               'gdino_checkpoints/groundingdino_swint_ogc.pth')
-        self.declare_parameter('box_threshold', 0.35)
-        self.declare_parameter('text_threshold', 0.25)
         self.declare_parameter('inference_hz', 2.0)
         self.declare_parameter('device', 'cuda:0')
         self.declare_parameter('camera_topic', '/egocentric_rgb')
-        self.declare_parameter('detector_backend', 'sam2')  # sam2 | dino_sam_mp3d
         self.declare_parameter('vln_repo_path', '/home/tsaisplus/projects/VLN_CL_CoTNav')
-        # When True, run detection on all 21 indoor categories and let
-        # VLMNavigatorNode filter; when False, only query the current object_goal.
-        self.declare_parameter('use_full_prompt', False)
+        self.declare_parameter('scene_mode', 'unity')  # unity | real_world
+
+        self.declare_parameter('box_threshold', 0.3)
+        self.declare_parameter('text_threshold', 0.3)
+        self.declare_parameter('temporal_buffer_size', 5)
+        self.declare_parameter('temporal_min_hits', 3)
+        self.declare_parameter('use_temporal_filter', True)
+        self.declare_parameter('nms_threshold', 0.5)
 
     def _load_parameters(self):
         g = self.get_parameter
-        self.sam2_root = g('grounded_sam2_root').value
-        self.sam2_checkpoint = g('sam2_checkpoint').value
-        self.sam2_model_config = g('sam2_model_config').value
-        self.gdino_config = g('gdino_config').value
-        self.gdino_checkpoint = g('gdino_checkpoint').value
         self.box_threshold = float(g('box_threshold').value)
         self.text_threshold = float(g('text_threshold').value)
+        self.temporal_buffer_size = int(g('temporal_buffer_size').value)
+        self.temporal_min_hits = int(g('temporal_min_hits').value)
+        self.use_temporal_filter = g('use_temporal_filter').value
+        self.nms_threshold = float(g('nms_threshold').value)
         self.inference_hz = float(g('inference_hz').value)
         self.device = g('device').value
         self.camera_topic = g('camera_topic').value
-        self.detector_backend = str(g('detector_backend').value).strip().lower()
         self.vln_repo_path = g('vln_repo_path').value
-        self.use_full_prompt = bool(g('use_full_prompt').value)
+        self.scene_mode = str(g('scene_mode').value).strip().lower()
 
-    # ------------------------------------------------------------------
-    # PYTHONPATH injection
-    # ------------------------------------------------------------------
-
-    def _patch_pythonpath(self):
-        """Add Grounded-SAM-2 packages to sys.path."""
-        extra = [
-            self.sam2_root,
-            os.path.join(self.sam2_root, 'grounding_dino'),
-            self.vln_repo_path,
-            os.path.join(self.vln_repo_path, 'scripts'),
-        ]
-        for p in reversed(extra):
-            if os.path.isdir(p) and p not in sys.path:
+    def _ensure_vln_imports(self):
+        """
+        Ensure the VLN repository modules are importable in this process.
+        Need `scripts.cv_utils.*` resolvable for the mp3d DINO+SAM backend.
+        """
+        repo = Path(str(self.vln_repo_path)).expanduser().resolve()
+        candidates = [str(repo), str(repo / 'scripts')]
+        for p in reversed(candidates):
+            if p not in sys.path:
                 sys.path.insert(0, p)
 
     # ------------------------------------------------------------------
@@ -206,52 +218,30 @@ class SAM2DetectorNode(Node):
         if self._model_loaded:
             return
 
-        self.get_logger().info(
-            f'Loading detector backend={self.detector_backend} (may take ~30 s) …'
-        )
+        self.get_logger().info('Loading GroundingDINO + SAM (mp3d style, may take ~30 s) …')
         try:
-            if self.detector_backend == 'dino_sam_mp3d':
-                from scripts.cv_utils.constants import categories
-                from scripts.cv_utils.image_perceiver import MMDINOSAM_Perceiver
-                classes = [obj['name'] for obj in categories]
-                self._dino_sam_perceiver = MMDINOSAM_Perceiver(
-                    classes=classes,
-                    no_gpt_seg=True,
-                    device=self.device,
-                    box_threshold=self.box_threshold,
-                    text_threshold=self.text_threshold,
-                    temporal_buffer_size=5,
-                    temporal_min_hits=3,
-                    use_temporal_filter=True,
-                    nms_threshold=0.5,
-                )
-                self._dino_sam_perceiver.classes_to_id = {obj['name']: obj['id'] for obj in categories}
-                self.get_logger().info('GroundingDINO + SAM (mp3d style) ready.')
-            else:
-                import torch
-                from sam2.build_sam import build_sam2
-                from sam2.sam2_image_predictor import SAM2ImagePredictor
-                from grounding_dino.groundingdino.util.inference import load_model
-
-                sam2_ckpt = os.path.join(self.sam2_root, self.sam2_checkpoint)
-                sam2_cfg = os.path.join(self.sam2_root, self.sam2_model_config)
-                gdino_cfg = os.path.join(self.sam2_root, self.gdino_config)
-                gdino_ckpt = os.path.join(self.sam2_root, self.gdino_checkpoint)
-
-                sam2_model = build_sam2(sam2_cfg, sam2_ckpt, device=self.device)
-                self._sam2_predictor = SAM2ImagePredictor(sam2_model)
-                self._grounding_model = load_model(gdino_cfg, gdino_ckpt, device=self.device)
-
-                if torch.cuda.is_available() and torch.cuda.get_device_properties(0).major >= 8:
-                    torch.backends.cuda.matmul.allow_tf32 = True
-                    torch.backends.cudnn.allow_tf32 = True
-                self.get_logger().info('SAM2 + GroundingDINO ready.')
+            self._ensure_vln_imports()
+            from scripts.cv_utils.constants import categories
+            from scripts.cv_utils.image_perceiver import MMDINOSAM_Perceiver
+            classes = [obj['name'] for obj in categories]
+            self._dino_sam_perceiver = MMDINOSAM_Perceiver(
+                classes=classes,
+                no_gpt_seg=True,
+                device=self.device,
+                box_threshold=self.box_threshold,
+                text_threshold=self.text_threshold,
+                temporal_buffer_size=self.temporal_buffer_size,
+                temporal_min_hits=self.temporal_min_hits,
+                use_temporal_filter=self.use_temporal_filter,
+                nms_threshold=self.nms_threshold,
+            )
+            self._dino_sam_perceiver.classes_to_id = {obj['name']: obj['id'] for obj in categories}
+            self.get_logger().info('GroundingDINO + SAM (mp3d style) ready.')
             self._model_loaded = True
         except ModuleNotFoundError as e:
             self.get_logger().error(
                 f'Model loading failed: missing module "{e.name}" on python={sys.executable}. '
-                f'Install dependencies in this interpreter and rebuild the package '
-                f'(current backend={self.detector_backend}).'
+                'Install dependencies in this interpreter and rebuild the package.'
             )
         except Exception as e:
             self.get_logger().error(f'Model loading failed: {e}')
@@ -262,10 +252,9 @@ class SAM2DetectorNode(Node):
 
     def _goal_callback(self, msg: String):
         self.object_goal = msg.data.strip()
-        if self.detector_backend == 'dino_sam_mp3d':
-            target, target_list, confusing = _translate_objnav_mp3d(self.object_goal)
-            self._dino_goal_ctx = (target, target_list, confusing)
-            self._last_goal_for_init = ""
+        target, target_list, confusing = _translate_objnav(self.object_goal, self.scene_mode)
+        self._dino_goal_ctx = (target, target_list, confusing)
+        self._last_goal_for_init = ""
 
     def _camera_callback(self, msg: Image):
         try:
@@ -293,7 +282,7 @@ class SAM2DetectorNode(Node):
             return
         if self.latest_rgb is None:
             return
-        if not self.object_goal and not self.use_full_prompt:
+        if not self.object_goal:
             return
 
         now = time.time()
@@ -303,11 +292,7 @@ class SAM2DetectorNode(Node):
         self._last_inference_time = now
 
         rgb = self.latest_rgb.copy()
-        if self.detector_backend == 'dino_sam_mp3d':
-            detections = self._run_detection_dino_sam_mp3d(rgb)
-        else:
-            text_prompt = self._build_text_prompt()
-            detections = self._run_detection(rgb, text_prompt)
+        detections = self._run_detection_dino_sam_mp3d(rgb)
 
         # Keep raw mask arrays for local debug rendering, but publish JSON-safe payload.
         json_detections = []
@@ -334,106 +319,6 @@ class SAM2DetectorNode(Node):
 
         self._publish_debug(rgb, detections)
 
-    def _build_text_prompt(self) -> str:
-        if self.use_full_prompt:
-            # Full 21-class indoor object vocabulary (matches VLN training)
-            return (
-                "chair. table. picture. cushion. sofa. fireplace. cabinet. seating. stool. "
-                "shower. tv monitor. towel. gym equipment. sink. clothes. bathtub. "
-                "counter. chest of drawers. bed. toilet. plant. "
-                "pillow. wardrobe. nightstand. dresser. painting. lamp. curtain. "
-                "refrigerator. oven. stove. closet."
-            )
-        # Goal-only: normalise underscores to spaces (e.g. "chest_of_drawers" → "chest of drawers")
-        label = self.object_goal.replace('_', ' ').strip()
-        return f'{label}.'
-
-    def _run_detection(self, rgb: np.ndarray, text_prompt: str) -> List[dict]:
-        """Run GroundingDINO + SAM2 and return list of detection dicts."""
-        import torch
-        from torchvision.ops import box_convert
-        from grounding_dino.groundingdino.util.inference import predict
-
-        h, w = rgb.shape[:2]
-
-        # GroundingDINO expects PIL-style normalised image + transformed tensor
-        # load_image() reads from disk, so we pass the raw array via the
-        # transform directly (matches groundingsam2.py).
-        try:
-            from grounding_dino.groundingdino.util.inference import load_image
-            import tempfile, os
-            import cv2 as _cv2
-            with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tf:
-                tmp_path = tf.name
-            _cv2.imwrite(tmp_path, rgb[:, :, ::-1])   # RGB → BGR for cv2.imwrite
-            image_source, image = load_image(tmp_path)
-            os.unlink(tmp_path)
-        except Exception as e:
-            self.get_logger().error(f'GroundingDINO image load error: {e}')
-            return []
-
-        try:
-            with torch.autocast(device_type='cuda', dtype=torch.float16):
-                boxes, confidences, labels = predict(
-                    model=self._grounding_model,
-                    image=image,
-                    caption=text_prompt,
-                    box_threshold=self.box_threshold,
-                    text_threshold=self.text_threshold,
-                )
-        except Exception as e:
-            self.get_logger().error(f'GroundingDINO predict error: {e}')
-            return []
-
-        if boxes is None or len(boxes) == 0:
-            return []
-
-        # Convert normalised cxcywh → pixel xyxy
-        boxes_px = boxes * torch.tensor([w, h, w, h], dtype=torch.float32)
-        boxes_xyxy = box_convert(boxes_px, in_fmt='cxcywh', out_fmt='xyxy').numpy()
-        confidences_list = confidences.numpy().tolist()
-
-        # Run SAM2 for segmentation masks (used for polygon output)
-        self._sam2_predictor.set_image(image_source)
-        try:
-            with torch.autocast(device_type='cuda', dtype=torch.float16):
-                masks, scores, _ = self._sam2_predictor.predict(
-                    point_coords=None,
-                    point_labels=None,
-                    box=boxes_xyxy,
-                    multimask_output=False,
-                )
-            if masks.ndim == 4:
-                masks = masks.squeeze(1)   # (N, H, W)
-            masks = masks.astype(bool)
-        except Exception as e:
-            self.get_logger().warn(f'SAM2 predict error (skipping masks): {e}')
-            masks = np.zeros((len(boxes_xyxy), h, w), dtype=bool)
-
-        detections = []
-        for i, (box, conf, label) in enumerate(zip(boxes_xyxy, confidences_list, labels)):
-            x1, y1, x2, y2 = [float(v) for v in box]
-            poly = []
-            if i < len(masks):
-                contours, _ = cv2.findContours(
-                    masks[i].astype(np.uint8),
-                    cv2.RETR_EXTERNAL,
-                    cv2.CHAIN_APPROX_SIMPLE,
-                )
-                if contours:
-                    largest = max(contours, key=cv2.contourArea)
-                    poly = largest.reshape(-1, 2).tolist()
-
-            detections.append({
-                'label': str(label),
-                'confidence': float(conf),
-                'bbox': [x1, y1, x2, y2],
-                'source': 'sam2',
-                'mask_polygon': poly,
-            })
-
-        return detections
-
     def _run_detection_dino_sam_mp3d(self, rgb: np.ndarray) -> List[dict]:
         if self._dino_sam_perceiver is None:
             return []
@@ -442,7 +327,7 @@ class SAM2DetectorNode(Node):
 
         target, target_list, confusing = self._dino_goal_ctx
         if not target_list:
-            target, target_list, confusing = _translate_objnav_mp3d(self.object_goal)
+            target, target_list, confusing = _translate_objnav(self.object_goal, self.scene_mode)
             self._dino_goal_ctx = (target, target_list, confusing)
 
         if self._last_goal_for_init != self.object_goal:

@@ -1,23 +1,35 @@
 sam2_detector:
   ros__parameters:
-    detector_backend: "dino_sam_mp3d"   # dino_sam_mp3d | sam2
+    # Single detector pipeline: GroundingDINO + SAM (mp3d_traj_sam parity).
     vln_repo_path: "/home/tsaisplus/projects/VLN_CL_CoTNav"
+    scene_mode: "unity"   # unity | real_world (controls goal translation rule set)
 
-    # --- Model paths (relative to grounded_sam2_root) ---
-    sam2_checkpoint:    "checkpoints/sam2.1_hiera_large.pt"
-    sam2_model_config:  "sam2/configs/sam2.1/sam2.1_hiera_l.yaml"
-    gdino_config:       "grounding_dino/groundingdino/config/GroundingDINO_SwinT_OGC.py"
-    gdino_checkpoint:   "gdino_checkpoints/groundingdino_swint_ogc.pth"
 
-    # --- Detection thresholds ---
-    box_threshold:  0.35
-    text_threshold: 0.25
+    # params to MMDINOSAM_Perceiver constructor
+    # Minimum GroundingDINO box confidence to keep a detection.
+    box_threshold:  0.3
+    # Minimum GroundingDINO token (phrase) confidence threshold.
+    text_threshold: 0.3
+    temporal_buffer_size: 5
+    temporal_min_hits: 3
+    use_temporal_filter: True
+    nms_threshold: 0.5
 
-    # --- Runtime ---
-    inference_hz: 2.0         # max detections per second
+
+    # ==========================================================================
+    # Runtime
+    # ==========================================================================
+
+    # Maximum detection frequency (Hz). Caps GPU load; does not affect the
+    # VLM bridge directly since it reads the latest /target_detection message.
+    # 2.0 Hz is sufficient for 5-second VLM inference cycles.
+    # maximum 2 detections per second
+    inference_hz: 2.0
+
+    # GPU device for SAM / GroundingDINO inference.
+    # Can be different from vlm_nav_bridge device if multi-GPU available.
     device: "cuda:0"
-    camera_topic: "/egocentric_rgb"   # projected pinhole view from vlm_nav_bridge
 
-    # use_full_prompt: true  → detect all 21 indoor categories every frame
-    #                  false → detect only the current /object_goal label
-    use_full_prompt: false
+    # ROS topic supplying the egocentric RGB image for detection.
+    # This is the projected pinhole view published by vlm_nav_bridge (/egocentric_rgb).
+    camera_topic: "/egocentric_rgb"
