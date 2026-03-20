@@ -127,6 +127,9 @@ class SAM2DetectorNode(Node):
 
         self.object_goal: str = ''
         self.latest_rgb: Optional[np.ndarray] = None   # (H, W, 3) uint8 RGB
+        self.latest_rgb_stamp_sec: int = 0
+        self.latest_rgb_stamp_nanosec: int = 0
+        self.latest_rgb_frame_id: str = 'camera'
 
         self._model_loaded = False
         self._dino_sam_perceiver = None
@@ -270,6 +273,9 @@ class SAM2DetectorNode(Node):
             else:
                 return
             self.latest_rgb = arr
+            self.latest_rgb_stamp_sec = int(msg.header.stamp.sec)
+            self.latest_rgb_stamp_nanosec = int(msg.header.stamp.nanosec)
+            self.latest_rgb_frame_id = str(msg.header.frame_id) if msg.header.frame_id else 'camera'
         except Exception as e:
             self.get_logger().warn(f'Camera decode error: {e}')
 
@@ -309,7 +315,18 @@ class SAM2DetectorNode(Node):
                     clean[k] = v
             json_detections.append(clean)
 
-        payload = json.dumps({'detections': json_detections})
+        now_msg = self.get_clock().now().to_msg()
+        payload = json.dumps({
+            'goal': self.object_goal,
+            'source': 'dino_sam',
+            'frame_id': self.latest_rgb_frame_id,
+            'stamp_sec': int(now_msg.sec),
+            'stamp_nanosec': int(now_msg.nanosec),
+            'image_stamp_sec': int(self.latest_rgb_stamp_sec),
+            'image_stamp_nanosec': int(self.latest_rgb_stamp_nanosec),
+            'image_frame_id': self.latest_rgb_frame_id,
+            'detections': json_detections,
+        })
         self.detection_pub.publish(String(data=payload))
 
         if detections:
