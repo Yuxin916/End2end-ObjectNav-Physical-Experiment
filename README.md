@@ -31,7 +31,7 @@ cd autonomy_stack_mecanum_wheel_platform
 git checkout jazzy
 colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release --packages-skip arise_slam_mid360 arise_slam_mid360_msgs livox_ros_driver2
 ```
-Download a [Unity environment model for the Mecanum wheel platform](https://drive.google.com/drive/folders/1G1JYkccvoSlxyySuTlPfvmrWoJUO8oSs?usp=sharing) and unzip the files to the 'src/base_autonomy/vehicle_simulator/mesh/unity' folder. The environment model files should look like below. For computers without a powerful GPU, please try the 'without_360_camera' version for a higher rendering rate.
+Download a [Unity environment model for the Mecanum wheel platform](https://drive.google.com/drive/folders/1GNz386h6wiiFuQQdaY2_HbNRyd7nKA1N?usp=sharing) and unzip the files to the 'src/base_autonomy/vehicle_simulator/mesh/unity' folder. The environment model files should look like below. For computers without a powerful GPU, please try the 'without_360_camera' version for a higher rendering rate.
 
 mesh/<br>
 &nbsp;&nbsp;&nbsp;&nbsp;unity/<br>
@@ -302,7 +302,7 @@ source install/setup.bash
 ros2 bag play 'bagfolder_path/bagfile_name.mcap (or bagfile_name.db3)'
 ```
 
-[A few example bagfiles are provided here](https://drive.google.com/drive/folders/1G1JYkccvoSlxyySuTlPfvmrWoJUO8oSs?usp=sharing). Users can use the bagfiles to test the system offline without accessing the real-robot setup. Note that for bagfile processing, please follow the System Setup section above to compile the repository fully.
+[A few example bagfiles are provided here](https://drive.google.com/drive/folders/1GNz386h6wiiFuQQdaY2_HbNRyd7nKA1N?usp=sharing). Users can use the bagfiles to test the system offline without accessing the real-robot setup. Note that for bagfile processing, please follow the System Setup section above to compile the repository fully.
 
 ## AI Extensions
 
@@ -357,7 +357,9 @@ Users can set up AI models on the base station computer to process the transmitt
 
 - The sensor configuration leaves 1.2m of blind area in front of the vehicle at ground level. If something low jumps into the area, the system would not know.
 
-- Occasionally, we observe SLAM drift which can cause issues with the terrain map and collision avoidance. Symptoms are vehicle getting stuck or moving in strange directions and not following waypoints. Users can press the 'clear-terrain-map button' on the joystick controller to reset the terrain map. At the system start up, if the SLAM module gives a warning saying the lidar and IMU data are out of synchronization, please restart the system.
+- Occasionally, we observe SLAM drift which can cause issues with the terrain map and collision avoidance. Symptoms are vehicle getting stuck or moving in strange directions and not following waypoints. Users can press the 'clear-terrain-map button' on the joystick controller to reset the terrain map. 
+
+- At the system startup, if the SLAM module gives a warning saying the lidar and IMU data are out of synchronization or the vehicle pose jumps around, please kill all the ROS nodes on the computer using `sudo pkill -9 -f '/opt/ros/.*\/lib\/|\/install\/.*\/lib\/|_ros2_daemon|^[[:space:]]*ros2$'` and restart the system.
 
 - If changing between Mecanum wheels and standard wheels, go to the 'src/base_autonomy/local_planner/launch/local_planner.launch' file and change 'config' between 'omniDir' and 'standard' accordingly. When installing the Mecanum wheels, please make sure to install them in the same configuration as in the pictures.
 
