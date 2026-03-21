@@ -13,6 +13,8 @@
 #include <std_msgs/msg/float32.hpp>
 #include <geometry_msgs/msg/polygon_stamped.h>
 #include <geometry_msgs/msg/point_stamped.h>
+#include <geometry_msgs/msg/pose2_d.hpp>
+#include <visualization_msgs/msg/marker.hpp>
 
 #include "tf2/transform_datatypes.h"
 #include "tf2_ros/transform_broadcaster.h"
@@ -37,6 +39,8 @@ const double PI = 3.1415926;
 
 string metricFile;
 string trajFile;
+string waypointFile;
+string markerFile;
 string pcdFile;
 string mapFile;
 double overallMapVoxelSize = 0.5;
@@ -50,6 +54,8 @@ int exploredAreaDisplayInterval = 1;
 int exploredAreaDisplayCount = 0;
 bool saveMetric = false; 
 bool saveTraj = false;
+bool saveWaypoint = false; 
+bool saveMarker = false;
 bool savePcd = false;
 
 pcl::PointCloud<pcl::PointXYZI>::Ptr laserCloud(new pcl::PointCloud<pcl::PointXYZI>());
@@ -90,6 +96,8 @@ shared_ptr<rclcpp::Publisher<std_msgs::msg::Float32>> pubTimeDurationPtr;
 
 FILE *metricFilePtr = NULL;
 FILE *trajFilePtr = NULL;
+FILE *waypointFilePtr = NULL;
+FILE *markerFilePtr = NULL;
 FILE *pcdFilePtr = NULL;
 
 void odometryHandler(const nav_msgs::msg::Odometry::ConstSharedPtr odom)
@@ -232,6 +240,27 @@ void laserCloudHandler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr laser
   pubTravelingDisPtr->publish(travelingDisMsg);
 }
 
+void waypointHandler(const geometry_msgs::msg::Pose2D::ConstSharedPtr waypoint)
+{
+  if (saveWaypoint) {
+    int result = fprintf(waypointFilePtr, "%f %f %f %f\n", waypoint->x, waypoint->y, waypoint->theta, timeDuration);
+    fflush(waypointFilePtr);
+  }
+}
+
+void markerHandler(const visualization_msgs::msg::Marker::ConstSharedPtr marker)
+{
+  if (saveMarker) {
+    double roll, pitch, yaw;
+    geometry_msgs::msg::Quaternion geoQuat = marker->pose.orientation;
+    tf2::Matrix3x3(tf2::Quaternion(geoQuat.x, geoQuat.y, geoQuat.z, geoQuat.w)).getRPY(roll, pitch, yaw);
+
+    fprintf(markerFilePtr, "%f %f %f %f %f %f %f %f\n", marker->pose.position.x, marker->pose.position.y, marker->pose.position.z, 
+                                                        marker->scale.x, marker->scale.y, marker->scale.z, yaw, timeDuration);
+    fflush(markerFilePtr);
+  }
+}
+
 void runtimeHandler(const std_msgs::msg::Float32::ConstSharedPtr runtimeIn)
 {
   runtime = runtimeIn->data;
@@ -244,6 +273,8 @@ int main(int argc, char** argv)
 
   nh->declare_parameter<std::string>("metricFile", metricFile);
   nh->declare_parameter<std::string>("trajFile", trajFile);
+  nh->declare_parameter<std::string>("waypointFile", waypointFile);
+  nh->declare_parameter<std::string>("markerFile", markerFile);
   nh->declare_parameter<std::string>("pcdFile", pcdFile);
   nh->declare_parameter<std::string>("mapFile", mapFile);
   nh->declare_parameter<double>("overallMapVoxelSize", overallMapVoxelSize);
@@ -255,10 +286,14 @@ int main(int argc, char** argv)
   nh->declare_parameter<int>("exploredAreaDisplayInterval", exploredAreaDisplayInterval);
   nh->declare_parameter<bool>("saveMetric", saveMetric);
   nh->declare_parameter<bool>("saveTraj", saveTraj);
+  nh->declare_parameter<bool>("saveWaypoint", saveWaypoint);
+  nh->declare_parameter<bool>("saveMarker", saveMarker);
   nh->declare_parameter<bool>("savePcd", savePcd);
 
   nh->get_parameter("metricFile", metricFile);
   nh->get_parameter("trajFile", trajFile);
+  nh->get_parameter("waypointFile", waypointFile);
+  nh->get_parameter("markerFile", markerFile);
   nh->get_parameter("pcdFile", pcdFile);
   nh->get_parameter("mapFile", mapFile);
   nh->get_parameter("overallMapVoxelSize", overallMapVoxelSize);
@@ -270,17 +305,25 @@ int main(int argc, char** argv)
   nh->get_parameter("exploredAreaDisplayInterval", exploredAreaDisplayInterval);
   nh->get_parameter("saveMetric", saveMetric);
   nh->get_parameter("saveTraj", saveTraj);
+  nh->get_parameter("saveWaypoint", saveWaypoint);
+  nh->get_parameter("saveMarker", saveMarker);
   nh->get_parameter("savePcd", savePcd);
 
   // No direct replacement present for $(find pkg) in ROS2. Edit file path.
   mapFile.replace(mapFile.find("/install/"), 8, "/src/base_autonomy");
   metricFile.replace(metricFile.find("/install/"), 8, "/src/base_autonomy");
   trajFile.replace(trajFile.find("/install/"), 8, "/src/base_autonomy");
+  waypointFile.replace(waypointFile.find("/install/"), 8, "/src/base_autonomy");
+  markerFile.replace(markerFile.find("/install/"), 8, "/src/base_autonomy");
   pcdFile.replace(pcdFile.find("/install/"), 8, "/src/base_autonomy");
 
   auto subOdometry = nh->create_subscription<nav_msgs::msg::Odometry>("/state_estimation", 5, odometryHandler);
 
   auto subLaserCloud = nh->create_subscription<sensor_msgs::msg::PointCloud2>("/registered_scan", 5, laserCloudHandler);
+
+  auto subWaypoint = nh->create_subscription<geometry_msgs::msg::Pose2D>("/way_point_with_heading", 5, waypointHandler);
+
+  auto subMarker = nh->create_subscription<visualization_msgs::msg::Marker>("selected_object_marker", 5, markerHandler);
 
   auto subRuntime = nh->create_subscription<std_msgs::msg::Float32>("/runtime", 5, runtimeHandler);
 
@@ -320,9 +363,13 @@ int main(int argc, char** argv)
 
   metricFile += "_" + timeString + ".txt";
   trajFile += "_" + timeString + ".txt";
+  waypointFile += "_" + timeString + ".txt";
+  markerFile += "_" + timeString + ".txt";
   pcdFile += "_" + timeString + ".txt";
   if (saveMetric) metricFilePtr = fopen(metricFile.c_str(), "w");
   if (saveTraj) trajFilePtr = fopen(trajFile.c_str(), "w");
+  if (saveWaypoint) waypointFilePtr = fopen(waypointFile.c_str(), "w");
+  if (saveMarker) markerFilePtr = fopen(markerFile.c_str(), "w");
   if (savePcd) pcdFilePtr = fopen(pcdFile.c_str(), "w");
 
   rclcpp::Rate rate(100);
@@ -346,6 +393,8 @@ int main(int argc, char** argv)
 
   if (saveMetric) fclose(metricFilePtr);
   if (saveTraj) fclose(trajFilePtr);
+  if (saveWaypoint) fclose(waypointFilePtr);
+  if (saveMarker) fclose(markerFilePtr);
   if (savePcd) fclose(pcdFilePtr);
 
   RCLCPP_INFO(nh->get_logger(), "Exploration metrics and vehicle trajectory are saved in 'src/vehicle_simulator/log'.");

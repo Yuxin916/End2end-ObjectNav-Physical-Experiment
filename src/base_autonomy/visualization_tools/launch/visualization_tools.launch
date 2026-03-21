@@ -6,6 +6,8 @@
     <param name="metricFile" value="$(find-pkg-prefix vehicle_simulator)/log/metrics" />
     <param name="trajFile" value="$(find-pkg-prefix vehicle_simulator)/log/trajectory" />
     <param name="pcdFile" value="$(find-pkg-prefix vehicle_simulator)/log/pointcloud" />
+    <param name="waypointFile" value="$(find-pkg-prefix vehicle_simulator)/log/waypoint" />
+    <param name="markerFile" value="$(find-pkg-prefix vehicle_simulator)/log/marker" />
     <param name="mapFile" value="$(find-pkg-prefix vehicle_simulator)/mesh/$(var world_name)/map.ply" />
     <param name="overallMapVoxelSize" value="0.1" />
     <param name="exploredAreaVoxelSize" value="0.2" />
@@ -15,7 +17,9 @@
     <param name="overallMapDisplayInterval" value="2" />
     <param name="exploredAreaDisplayInterval" value="1" />
     <param name="saveMetric" value="false" />
-    <param name="saveTraj" value="false" />
+    <param name="saveTraj" value="true" />
+    <param name="saveWaypoint" value="true" />
+    <param name="saveMarker" value="true" />
     <param name="savePcd" value="false" />
   </node>
 

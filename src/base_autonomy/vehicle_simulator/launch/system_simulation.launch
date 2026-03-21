@@ -98,6 +98,12 @@ def generate_launch_description():
     )
   )
 
+  start_waypoint_converter = IncludeLaunchDescription(
+    FrontendLaunchDescriptionSource(os.path.join(
+      get_package_share_directory('waypoint_converter'), 'launch', 'waypoint_converter.launch')
+    )
+  )
+
   start_visualization_tools = IncludeLaunchDescription(
     FrontendLaunchDescriptionSource(os.path.join(
       get_package_share_directory('visualization_tools'), 'launch', 'visualization_tools.launch')
@@ -138,6 +144,7 @@ def generate_launch_description():
   ld.add_action(start_sim_image_repub)
   ld.add_action(start_vehicle_simulator)
   ld.add_action(start_sensor_scan_generation)
+  ld.add_action(start_waypoint_converter)
   ld.add_action(start_visualization_tools)
   ld.add_action(start_joy)
 

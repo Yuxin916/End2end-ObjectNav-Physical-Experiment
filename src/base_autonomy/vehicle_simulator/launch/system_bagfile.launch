@@ -59,6 +59,12 @@ def generate_launch_description():
     )
   )
 
+  start_waypoint_converter = IncludeLaunchDescription(
+    FrontendLaunchDescriptionSource(os.path.join(
+      get_package_share_directory('waypoint_converter'), 'launch', 'waypoint_converter.launch')
+    )
+  )
+
   start_arise_slam = IncludeLaunchDescription(
     PythonLaunchDescriptionSource(os.path.join(
       get_package_share_directory('arise_slam_mid360'), 'launch', 'arize_slam.launch.py')
@@ -101,6 +107,7 @@ def generate_launch_description():
   ld.add_action(start_terrain_analysis)
   ld.add_action(start_terrain_analysis_ext)
   ld.add_action(start_sensor_scan_generation)
+  ld.add_action(start_waypoint_converter)
   ld.add_action(start_arise_slam)
   ld.add_action(start_visualization_tools)
   ld.add_action(start_joy)
