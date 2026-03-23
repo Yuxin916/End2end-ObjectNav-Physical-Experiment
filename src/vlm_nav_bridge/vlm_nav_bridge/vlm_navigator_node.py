@@ -98,9 +98,11 @@ class VLMNavigatorNode(Node):
             exp_pred_threshold=self.exp_pred_threshold,
             explored_use_raycast=self.explored_use_raycast,
             explored_max_rays_per_scan=self.explored_max_rays_per_scan,
+            explored_clip_wall_dilate_ksize=self.explored_clip_wall_dilate_ksize,
             crop_radius=self.crop_radius,
             output_size=self.output_size,
             hfov_deg=self.hfov_deg,
+            obstacle_render_dilate_ksize=self.obstacle_render_dilate_ksize,
         )
         self.mapper = LidarBEVMapper(bev_cfg)
 
@@ -341,13 +343,15 @@ class VLMNavigatorNode(Node):
         self.declare_parameter('range_max', 5.0)
         self.declare_parameter('map_pred_threshold', 1.0)
         self.declare_parameter('exp_pred_threshold', 1.0)
-        self.declare_parameter('explored_use_raycast', True)
+        self.declare_parameter('explored_use_raycast', False)
         self.declare_parameter('explored_max_rays_per_scan', 512)
+        self.declare_parameter('explored_clip_wall_dilate_ksize', 3)
+        self.declare_parameter('obstacle_render_dilate_ksize', 1)
         self.declare_parameter('crop_radius', 150)
         self.declare_parameter('output_size', 448)
 
         self.declare_parameter('frontier_exp_threshold', 0.1)
-        self.declare_parameter('frontier_dilate_wall_ksize', 1)
+        self.declare_parameter('frontier_dilate_wall_ksize', 20)
         self.declare_parameter('frontier_close_explore_ksize', 5)
         self.declare_parameter('frontier_min_area', 4)
         self.declare_parameter('frontier_clear_border_px', 2)
@@ -411,6 +415,8 @@ class VLMNavigatorNode(Node):
         self.exp_pred_threshold = g('exp_pred_threshold').value
         self.explored_use_raycast = g('explored_use_raycast').value
         self.explored_max_rays_per_scan = g('explored_max_rays_per_scan').value
+        self.explored_clip_wall_dilate_ksize = g('explored_clip_wall_dilate_ksize').value
+        self.obstacle_render_dilate_ksize = g('obstacle_render_dilate_ksize').value
         self.crop_radius = g('crop_radius').value
         self.output_size = g('output_size').value
 
@@ -486,8 +492,11 @@ class VLMNavigatorNode(Node):
         # Initialise mapper on first pose
         if not self.mapper.is_initialised:
             self.mapper.reset(p.x, p.y, p.z)
+            # Panoramic camera already sees 360° at start — mark full disk explored
+            # (mirrors the 12-step panoramic rotation in mp3d_traj_sam.py).
+            self.mapper.mark_initial_panoramic_explored()
             self.get_logger().info(
-                f'Map initialised at ({p.x:.2f}, {p.y:.2f})'
+                f'Map initialised at ({p.x:.2f}, {p.y:.2f}), 360° panoramic explored.'
             )
         else:
             # Keep local crop/agent marker moving with odometry even between lidar scans.
@@ -706,6 +715,7 @@ class VLMNavigatorNode(Node):
                     self.latest_pose_y,
                     self.latest_pose_z,
                 )
+                self.mapper.mark_initial_panoramic_explored()
             self.frontier_birth_rgb.clear()
             self.target_birth_rgb = None
             self.latest_detection = None
@@ -1013,6 +1023,18 @@ class VLMNavigatorNode(Node):
         done_msg = Bool()
         done_msg.data = True
         self.target_reached_pub.publish(done_msg)
+
+        # Stop the robot: publish current position as waypoint so local_planner
+        # has no distance left to cover → robot halts.
+        if self.latest_pose_x is not None:
+            stop_msg = PointStamped()
+            stop_msg.header.stamp = self.get_clock().now().to_msg()
+            stop_msg.header.frame_id = self.waypoint_frame
+            stop_msg.point.x = self.latest_pose_x
+            stop_msg.point.y = self.latest_pose_y
+            stop_msg.point.z = 0.0
+            self.way_point_pub.publish(stop_msg)
+            self.get_logger().info('Published stop waypoint at current robot position.')
 
         completed_goal = self.object_goal
         self.object_goal = ''

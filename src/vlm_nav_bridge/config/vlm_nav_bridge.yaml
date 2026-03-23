@@ -127,11 +127,21 @@ vlm_navigator:
 
     # If true, explored map is updated by ray-casting from robot cell to lidar endpoint cells.
     # This reduces optimistic "see-through-wall" explored fill from wedge painting.
-    explored_use_raycast: true
+    explored_use_raycast: false
 
     # Upper bound on unique endpoint rays traced per scan (performance guard).
     # Increase for denser point clouds if explored map looks too sparse.
     explored_max_rays_per_scan: 512
+
+    # Dilation kernel size used only when clipping explored cells by wall reachability.
+    # Increase (e.g. 5) if panoramic step-0 explored still leaks through thin wall gaps.
+    explored_clip_wall_dilate_ksize: 3
+
+    # Visual dilation of obstacle pixels in the rendered BEV image (render only,
+    # does NOT affect map data or frontier detection).
+    # Thickens sparse LiDAR wall returns to look like solid walls.
+    # 1 = no dilation. Tune to match training data appearance (try 3–5).
+    obstacle_render_dilate_ksize: 3
 
     # Half-width of the local BEV crop around the robot, in cells.
     # crop = robot_cell ± 150 → 300×300 cells → resized to output_size.
@@ -156,9 +166,9 @@ vlm_navigator:
 
     # Dilation kernel size applied to obstacle cells before subtracting from frontier
     # boundary.  1 = no dilation (frontiers may appear right against walls).
-    # Increase to 3 or 5 to push frontiers further from walls — reduces wall-hugging.
-    # Tip: if robot repeatedly navigates into walls, increase this.
-    frontier_dilate_wall_ksize: 1
+    # LiDAR walls are sparse 1-cell lines; dilation thickens them and prevents
+    # frontiers from appearing inside/behind walls (replaces Habitat navmesh filter).
+    frontier_dilate_wall_ksize: 20
 
     # Morphological closing kernel size applied to the explored mask.
     # Fills small holes in the explored region that would otherwise generate
@@ -184,9 +194,8 @@ vlm_navigator:
 
     # Maximum number of frontier candidates passed to the VLM.
     # Sorted by distance (nearest first), top-K kept.
-    # Matches training data generation (top 5 nearest frontiers per step).
-    # The VLM's angular soft-CE loss was trained with up to 5 candidates.
-    frontier_top_k: 5
+    # Training used up to 32 candidates. Set to a large number to return all frontiers.
+    frontier_top_k: 32
 
     # Maximum number of candidate points sampled from one connected frontier component.
     # >1 helps when the boundary forms one large arc/ring; gives VLM richer choices.
@@ -207,13 +216,13 @@ vlm_navigator:
 
     # Distance threshold (metres) to declare the current waypoint "reached".
     # When robot_distance < threshold, the VLM inference timer re-triggers early.
-    goal_reached_threshold: 3
+    goal_reached_threshold: 0.5
 
     # Distance threshold (metres) to declare a TARGET waypoint reached.
     # When reached, vlm_navigator marks current goal success, publishes /vlm_target_reached=true,
     # clears internal object_goal, and waits for the next /object_goal command.
     # Set <= 0 to reuse goal_reached_threshold.
-    target_reached_threshold: 3
+    target_reached_threshold: 0.5
 
     # If true, changing /object_goal resets mapper occupancy state and frontier memory,
     # matching single-episode MP3D semantics. Set false for multi-goal continuous runs.

@@ -22,7 +22,7 @@ from typing import Optional, List, Tuple
 class FrontierConfig:
     exp_threshold: float = 0.1       # explored channel threshold
     map_pred_threshold: float = 1.0  # occupancy threshold
-    dilate_wall_ksize: int = 1       # obstacle dilation (1 = none)
+    dilate_wall_ksize: int = 20      # obstacle dilation (1 = none)
     close_explore_ksize: int = 5     # morphological closing for explored
     min_frontier_area: int = 4       # min cluster area (pixels)
     clear_border_px: int = 2         # ignore frontiers near image border
@@ -72,6 +72,54 @@ class FrontierDetector:
             d2 = np.minimum(d2, cand_d2)
 
         return points_rc[selected].astype(np.float32)
+
+    @staticmethod
+    def _bresenham_cells(r0: int, c0: int, r1: int, c1: int):
+        """Yield integer grid cells along a line from (r0, c0) to (r1, c1)."""
+        dr = abs(r1 - r0)
+        dc = abs(c1 - c0)
+        sr = 1 if r0 < r1 else -1
+        sc = 1 if c0 < c1 else -1
+        rr, cc = r0, c0
+
+        if dc > dr:
+            err = dc // 2
+            while cc != c1:
+                yield rr, cc
+                err -= dr
+                if err < 0:
+                    rr += sr
+                    err += dc
+                cc += sc
+            yield rr, cc
+        else:
+            err = dr // 2
+            while rr != r1:
+                yield rr, cc
+                err -= dc
+                if err < 0:
+                    cc += sc
+                    err += dr
+                rr += sr
+            yield rr, cc
+
+    def _has_clear_los(self,
+                       occ_dilated: np.ndarray,
+                       robot_r: int, robot_c: int,
+                       cand_r: int, cand_c: int) -> bool:
+        """Check if robot->candidate line crosses any occupied cell."""
+        h, w = occ_dilated.shape
+        if not (0 <= robot_r < h and 0 <= robot_c < w):
+            return False
+        if not (0 <= cand_r < h and 0 <= cand_c < w):
+            return False
+
+        for step_idx, (rr, cc) in enumerate(self._bresenham_cells(robot_r, robot_c, cand_r, cand_c)):
+            if step_idx == 0:
+                continue
+            if occ_dilated[rr, cc] != 0:
+                return False
+        return True
 
     def extract(self,
                 local_map: np.ndarray,
@@ -149,6 +197,8 @@ class FrontierDetector:
         robot_c = robot_pixel_col
 
         valid_centers = []  # list[(row, col, dist_px)]
+        robot_r_int = int(round(robot_r))
+        robot_c_int = int(round(robot_c))
         for label in range(1, num_labels):   # skip background (label 0)
             area = stats[label, cv2.CC_STAT_AREA]
             if area < cfg.min_frontier_area:
@@ -186,6 +236,10 @@ class FrontierDetector:
             for cr, ccv in sample_points:
                 dist_px = math.sqrt((float(cr) - robot_r) ** 2 + (float(ccv) - robot_c) ** 2)
                 if dist_px < self._min_dist_px:
+                    continue
+                cand_r = int(round(float(cr)))
+                cand_c = int(round(float(ccv)))
+                if not self._has_clear_los(occ_dilated, robot_r_int, robot_c_int, cand_r, cand_c):
                     continue
                 valid_centers.append((float(cr), float(ccv), dist_px))
 

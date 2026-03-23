@@ -63,8 +63,15 @@ class BEVMapperConfig:
     # Map update thresholds
     map_pred_threshold: float = 1.0  # hits to mark as occupied
     exp_pred_threshold: float = 1.0  # sweeps to mark as explored
-    explored_use_raycast: bool = True
+    explored_use_raycast: bool = False
     explored_max_rays_per_scan: int = 512
+    # Dilation for wall mask used only by explored clipping flood-fill.
+    # Helps prevent leakage through thin/gappy wall returns.
+    explored_clip_wall_dilate_ksize: int = 3
+    # Visual obstacle dilation for rendering only (does not affect map data).
+    # Thickens sparse LiDAR wall returns to look like solid walls in the BEV image.
+    # 1 = no dilation. Tune to match training data appearance.
+    obstacle_render_dilate_ksize: int = 1
 
     # Local crop / output
     crop_radius: int = 150           # cells
@@ -134,6 +141,10 @@ class LidarBEVMapper:
         self.local_pixel_col: float = cfg.output_size / 2.0
 
         self._initialised = False
+        # True after the first real lidar scan (panoramic step done).
+        # Before this flag is set, all 360° points are used for obstacle detection.
+        # After, only hfov_deg-filtered points are used (matches training convention).
+        self._panoramic_done = False
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -163,6 +174,18 @@ class LidarBEVMapper:
         self.local_map = None
 
         self._initialised = True
+        self._panoramic_done = False
+
+    def mark_initial_panoramic_explored(self):
+        """Prepare for panoramic initialisation at step 0.
+
+        The blind disk pre-fill is intentionally removed: it would mark cells
+        THROUGH walls as explored, producing frontiers outside the room.
+        Instead, the first real LiDAR scan (when _panoramic_done=False) uses
+        full 360° raycast to mark explored cells — this naturally stops AT walls
+        and replicates the 12-step panoramic rotation from mp3d_traj_sam.py.
+        """
+        self._panoramic_done = False  # ensure first scan is treated as panoramic
 
     # ------------------------------------------------------------------
     # Main update — called on each lidar scan callback
@@ -204,7 +227,7 @@ class LidarBEVMapper:
 
         pts = points_xyz.astype(np.float32)
 
-        # ---- 1. 2-D range filter ----------------------------------------
+        # ---- 1. 2-D range filter (all points) ---------------------------
         dx = pts[:, 0] - robot_x
         dy = pts[:, 1] - robot_y
         dist2d = np.sqrt(dx * dx + dy * dy)
@@ -215,12 +238,15 @@ class LidarBEVMapper:
             self._extract_local_map()
             return
 
-        # ---- 1b. Angular FOV filter: keep only the forward camera cone --
-        if self.cfg.hfov_deg < 360.0:
+        # ---- 1b. Angular FOV filter (explored + post-panoramic obstacle) -
+        # Step 0 (panoramic): use all 360° points for obstacle detection to
+        # capture the full room seen during the initial panoramic rotation.
+        # Step 1+ (forward camera): apply hfov_deg filter to match training.
+        if self.cfg.hfov_deg < 360.0 and self._panoramic_done:
             half_a = math.radians(self.cfg.hfov_deg / 2.0)
-            dx = pts[:, 0] - robot_x
-            dy = pts[:, 1] - robot_y
-            pt_angle = np.arctan2(dy, dx)       # angle in world frame (0=east, π/2=north)
+            dx2 = pts[:, 0] - robot_x
+            dy2 = pts[:, 1] - robot_y
+            pt_angle = np.arctan2(dy2, dx2)
             angle_diff = np.abs((pt_angle - robot_yaw + np.pi) % (2 * np.pi) - np.pi)
             pts = pts[angle_diff <= half_a]
             if len(pts) == 0:
@@ -228,7 +254,7 @@ class LidarBEVMapper:
                 self._extract_local_map()
                 return
 
-        # ---- 2. Map all in-range points to grid cells --------------------
+        # ---- 2. Map filtered points to grid cells ------------------------
         g_cols = ((pts[:, 0] - self.map_origin_x) / self.cfg.resolution).astype(int)
         g_rows = ((pts[:, 1] - self.map_origin_y) / self.cfg.resolution).astype(int)
 
@@ -248,11 +274,24 @@ class LidarBEVMapper:
         if obs_mask.any():
             np.add.at(self.full_map[0], (g_rows[obs_mask], g_cols[obs_mask]), 1.0)
 
-        # ---- 4. Explored channel (ch 1): scan-driven ray traversal ----
-        if bool(self.cfg.explored_use_raycast):
+        # ---- 4. Explored channel (ch 1) ----------------------------------
+        # First scan (panoramic step): smooth 360° wedge/disk fill.
+        # Then clip to reachable cells so explored does not leak through walls.
+        # Subsequent scans: use configured mode (wedge or raycast).
+        if not self._panoramic_done:
+            saved_hfov = self.cfg.hfov_deg
+            self.cfg.hfov_deg = 360.0
+            self._mark_explored_wedge()
+            self.cfg.hfov_deg = saved_hfov
+            self._clip_explored_at_walls()
+            self._panoramic_done = True
+        elif bool(self.cfg.explored_use_raycast):
             self._mark_explored_raycast(g_rows, g_cols)
         else:
             self._mark_explored_wedge()
+            # Wedge mode is optimistic by construction; clip unreachable spill
+            # so explored cells do not remain behind occupied barriers.
+            self._clip_explored_at_walls()
 
         # ---- 5. Agent position & trajectory channels ---------------------
         self._update_agent_channels()
@@ -263,6 +302,44 @@ class LidarBEVMapper:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _clip_explored_at_walls(self):
+        """Remove explored cells not reachable from the robot without crossing walls.
+
+        Operates on a local bounding box (vision_range around robot) so it is
+        fast enough to call after every wedge fill (~200×200 cells, not 1344×1344).
+        """
+        rc, cc = int(self.robot_g_row), int(self.robot_g_col)
+        n = self.global_cells
+        vr = int(self.cfg.vision_range)
+
+        # Local bounding box
+        r0 = max(0, rc - vr);  r1 = min(n, rc + vr + 1)
+        c0 = max(0, cc - vr);  c1 = min(n, cc + vr + 1)
+
+        occ_local = (self.full_map[0, r0:r1, c0:c1] >= self.cfg.map_pred_threshold).astype(np.uint8)
+        if int(self.cfg.explored_clip_wall_dilate_ksize) > 1:
+            k = int(self.cfg.explored_clip_wall_dilate_ksize)
+            occ_local = cv2.dilate(occ_local, np.ones((k, k), np.uint8))
+        exp_local = (self.full_map[1, r0:r1, c0:c1] >= self.cfg.exp_pred_threshold).astype(np.uint8)
+        passable = (exp_local & ~occ_local).astype(np.uint8)
+
+        # cv2.floodFill requires a border of zeros and mask 2px larger.
+        pad = 1
+        h, w = passable.shape
+        canvas = np.zeros((h + 2 * pad, w + 2 * pad), dtype=np.uint8)
+        canvas[pad:pad + h, pad:pad + w] = passable
+
+        mask = np.zeros((h + 2 * pad + 2, w + 2 * pad + 2), dtype=np.uint8)
+        seed_r = (rc - r0) + pad
+        seed_c = (cc - c0) + pad
+        cv2.floodFill(canvas, mask, (seed_c, seed_r), 255)
+
+        reachable = canvas[pad:pad + h, pad:pad + w] == 255
+
+        # Zero out explored cells in this region that are NOT reachable
+        unreachable = exp_local.astype(bool) & ~reachable
+        self.full_map[1, r0:r1, c0:c1][unreachable] = 0.0
 
     def _mark_explored_wedge(self):
         """
@@ -364,8 +441,13 @@ class LidarBEVMapper:
             endpoints = endpoints[keep_idx]
 
         local_mask = np.zeros((row_hi - row_lo + 1, col_hi - col_lo + 1), dtype=bool)
+        occ = self.full_map[0]
+        occ_threshold = float(self.cfg.map_pred_threshold)
         for er, ec in endpoints:
-            for rr, cc2 in self._bresenham_cells(rc, cc, int(er), int(ec)):
+            for step_idx, (rr, cc2) in enumerate(self._bresenham_cells(rc, cc, int(er), int(ec))):
+                # Stop the ray as soon as it hits an occupied cell (except seed cell).
+                if step_idx > 0 and occ[rr, cc2] >= occ_threshold:
+                    break
                 if row_lo <= rr <= row_hi and col_lo <= cc2 <= col_hi:
                     local_mask[rr - row_lo, cc2 - col_lo] = True
 
@@ -458,9 +540,14 @@ class LidarBEVMapper:
         # Colors are applied in BGR order to mirror the reference OpenCV writer.
         img = np.full((out, out, 3), self.cfg.gray_unknown, dtype=np.uint8)
         explored_mask = exp >= self.cfg.exp_pred_threshold
-        obstacle_mask = occ >= self.cfg.map_pred_threshold
+        obstacle_mask = (occ >= self.cfg.map_pred_threshold).astype(np.uint8)
+        # Dilate obstacles visually so sparse LiDAR wall returns look like solid walls,
+        # matching the denser obstacle appearance in Habitat depth-camera training data.
+        if self.cfg.obstacle_render_dilate_ksize > 1:
+            k = int(self.cfg.obstacle_render_dilate_ksize)
+            obstacle_mask = cv2.dilate(obstacle_mask, np.ones((k, k), np.uint8))
         img[explored_mask] = [255, 255, 255]
-        img[obstacle_mask] = [0, 0, 0]
+        img[obstacle_mask.astype(bool)] = [0, 0, 0]
 
         # ---- Trajectory + current position (direct paint, no blending) ----
         # img is in BGR convention (OpenCV); cvtColor(BGR→RGB) is applied at the end.
@@ -506,12 +593,12 @@ class LidarBEVMapper:
                            color_bgr, -1)
                 cv2.circle(img, (fc, fr), self.cfg.frontier_dot_radius,
                            (255, 255, 255), self.cfg.frontier_width)
-                cv2.putText(img, str(idx),
-                            (fc + self.cfg.frontier_dot_radius + 2,
-                             fr + self.cfg.frontier_dot_radius),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            self.cfg.frontier_font_size,
-                            (255, 255, 255), 1, cv2.LINE_AA)
+                # cv2.putText(img, str(idx),
+                #             (fc + self.cfg.frontier_dot_radius + 2,
+                #              fr + self.cfg.frontier_dot_radius),
+                #             cv2.FONT_HERSHEY_SIMPLEX,
+                #             self.cfg.frontier_font_size,
+                #             (255, 255, 255), 1, cv2.LINE_AA)
 
         # ---- Agent arrow -------------------------------------------------
         img = self._draw_agent_arrow(img)
@@ -599,7 +686,7 @@ class LidarBEVMapper:
                         (tip_col, tip_row),
                         self.cfg.arrow_color,
                         self.cfg.arrow_width,
-                        tipLength=self.cfg.arrow_head_length / max(self.cfg.arrow_len_px, 1))
+                        tipLength=0.3)  # matches write_map_with_arrow_and_frontier tipLength
         cv2.circle(img, (int(col), int(row)), self.cfg.mark_radius, self.cfg.arrow_color, -1)
         return img
 
@@ -609,8 +696,10 @@ class LidarBEVMapper:
         cr, cc = out // 2, out // 2
         cfg = self.cfg
 
-        # Scale max_depth to pixels
-        max_depth_px = int(cfg.range_max / cfg.resolution *
+        # Scale vision_range (cells) to pixels in the local BEV crop.
+        # vision_range defines the explored radius and matches training convention.
+        # Do NOT use range_max here — that is a lidar filter, not a visibility radius.
+        max_depth_px = int(cfg.vision_range *
                            (cfg.output_size / (2.0 * cfg.crop_radius)))
 
         half_a = math.radians(cfg.hfov_deg / 2.0)
