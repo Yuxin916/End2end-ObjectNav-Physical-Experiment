@@ -3,8 +3,10 @@ Launch file for vlm_nav_bridge.
 
 Usage (standalone, after autonomy stack is already running):
   ros2 launch vlm_nav_bridge vlm_nav_bridge.launch.py \
-      checkpoint:=/abs/path/to/checkpoint \
-      object_goal:=chair
+      checkpoint:=/abs/path/to/checkpoint
+
+  # Publish goal separately (topic-based, not launch arg):
+  ros2 topic pub /object_goal std_msgs/String "data: 'chair'" -1
 
 Or integrated with the real-robot system:
   ./system_real_robot.sh robot_ip:=192.168.1.120 \
@@ -18,10 +20,7 @@ Or integrated with the real-robot system:
 import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import (
-    DeclareLaunchArgument,
-    SetEnvironmentVariable,
-)
+from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
@@ -32,8 +31,9 @@ def generate_launch_description():
 
     vln_repo = '/home/tsaisplus/projects/VLN_CL_CoTNav'
 
-    # Build PYTHONPATH for the VLN codebase
-    vln_pythonpath = ':'.join([
+    # Build PYTHONPATH for the VLN codebase.
+    # Required so the ROS process can import InternVL + prompt/mapping helpers.
+    vln_pythonpath = os.pathsep.join([
         vln_repo,
         os.path.join(vln_repo, 'InternVL_cleaned', 'internvl_chat'),
         os.path.join(vln_repo, 'scripts'),
@@ -43,9 +43,10 @@ def generate_launch_description():
 
     # Prepend to existing PYTHONPATH
     existing = os.environ.get('PYTHONPATH', '')
-    full_pythonpath = vln_pythonpath + (':' + existing if existing else '')
+    full_pythonpath = vln_pythonpath + (os.pathsep + existing if existing else '')
 
     # ---- Launch arguments -----------------------------------------------
+    # Precedence: launch-argument overrides here > values loaded from YAML.
     args = [
         DeclareLaunchArgument(
             'checkpoint',
@@ -74,9 +75,6 @@ def generate_launch_description():
                               description='Path to vlm_nav_bridge.yaml config'),
     ]
 
-    # ---- Set PYTHONPATH so VLN imports work inside the node process ------
-    env_action = SetEnvironmentVariable('PYTHONPATH', full_pythonpath)
-
     # ---- VLM navigator node ---------------------------------------------
     vlm_node = Node(
         package='vlm_nav_bridge',
@@ -86,7 +84,7 @@ def generate_launch_description():
         parameters=[
             # Load defaults from YAML
             LaunchConfiguration('config_file'),
-            # Override select params via launch arguments.
+            # Override select params via launch arguments (takes precedence).
             {
                 'checkpoint': LaunchConfiguration('checkpoint'),
                 'template': LaunchConfiguration('template'),
@@ -109,4 +107,4 @@ def generate_launch_description():
         additional_env={'PYTHONPATH': full_pythonpath},
     )
 
-    return LaunchDescription(args + [env_action, vlm_node])
+    return LaunchDescription(args + [vlm_node])

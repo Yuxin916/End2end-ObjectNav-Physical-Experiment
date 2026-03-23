@@ -11,7 +11,7 @@ Global map layout (matches VLN training parameters exactly):
   - Cells      : 1344 × 1344
   - Channels   : 4  (occupancy, explored, agent_pos, trajectory)
     Ch 0 – occupancy  : cumulative hit count of obstacle-height points
-    Ch 1 – explored   : cumulative count of lidar-swept cells
+    Ch 1 – explored   : cumulative count of ray-traversed observed cells
     Ch 2 – agent_pos  : 5×5 square at current robot cell (reset each step)
     Ch 3 – trajectory : all robot positions (accumulates over time)
 
@@ -63,6 +63,8 @@ class BEVMapperConfig:
     # Map update thresholds
     map_pred_threshold: float = 1.0  # hits to mark as occupied
     exp_pred_threshold: float = 1.0  # sweeps to mark as explored
+    explored_use_raycast: bool = True
+    explored_max_rays_per_scan: int = 512
 
     # Local crop / output
     crop_radius: int = 150           # cells
@@ -158,6 +160,7 @@ class LidarBEVMapper:
         )
         self.robot_g_col = g_col
         self.robot_g_row = g_row
+        self.local_map = None
 
         self._initialised = True
 
@@ -245,8 +248,11 @@ class LidarBEVMapper:
         if obs_mask.any():
             np.add.at(self.full_map[0], (g_rows[obs_mask], g_cols[obs_mask]), 1.0)
 
-        # ---- 4. Explored channel (ch 1): forward FOV wedge -----
-        self._mark_explored_wedge()
+        # ---- 4. Explored channel (ch 1): scan-driven ray traversal ----
+        if bool(self.cfg.explored_use_raycast):
+            self._mark_explored_raycast(g_rows, g_cols)
+        else:
+            self._mark_explored_wedge()
 
         # ---- 5. Agent position & trajectory channels ---------------------
         self._update_agent_channels()
@@ -294,6 +300,76 @@ class LidarBEVMapper:
             in_region = (dist <= r) & (angle_diff <= half_a)
 
         self.full_map[1, row_lo:row_hi + 1, col_lo:col_hi + 1][in_region] += 1.0
+
+    @staticmethod
+    def _bresenham_cells(r0: int, c0: int, r1: int, c1: int):
+        """Yield integer grid cells along a line from (r0, c0) to (r1, c1)."""
+        dr = abs(r1 - r0)
+        dc = abs(c1 - c0)
+        sr = 1 if r0 < r1 else -1
+        sc = 1 if c0 < c1 else -1
+        rr, cc = r0, c0
+
+        if dc > dr:
+            err = dc // 2
+            while cc != c1:
+                yield rr, cc
+                err -= dr
+                if err < 0:
+                    rr += sr
+                    err += dc
+                cc += sc
+            yield rr, cc
+        else:
+            err = dr // 2
+            while rr != r1:
+                yield rr, cc
+                err -= dc
+                if err < 0:
+                    cc += sc
+                    err += dr
+                rr += sr
+            yield rr, cc
+
+    def _mark_explored_raycast(self, end_rows: np.ndarray, end_cols: np.ndarray):
+        """
+        Mark explored cells by tracing rays from robot cell to lidar endpoint cells.
+
+        Compared to wedge filling, this reduces optimistic marking through walls and
+        aligns explored geometry with what the scan actually observes.
+        """
+        if end_rows is None or end_cols is None or len(end_rows) == 0:
+            return
+
+        rc, cc = int(self.robot_g_row), int(self.robot_g_col)
+        n = int(self.global_cells)
+        vr = int(self.cfg.vision_range)
+
+        row_lo = max(0, rc - vr)
+        row_hi = min(n - 1, rc + vr)
+        col_lo = max(0, cc - vr)
+        col_hi = min(n - 1, cc + vr)
+        if row_hi < row_lo or col_hi < col_lo:
+            return
+
+        endpoints = np.stack(
+            [end_rows.astype(np.int32), end_cols.astype(np.int32)],
+            axis=1,
+        )
+        endpoints = np.unique(endpoints, axis=0)
+
+        max_rays = int(max(1, self.cfg.explored_max_rays_per_scan))
+        if len(endpoints) > max_rays:
+            keep_idx = np.linspace(0, len(endpoints) - 1, max_rays, dtype=np.int32)
+            endpoints = endpoints[keep_idx]
+
+        local_mask = np.zeros((row_hi - row_lo + 1, col_hi - col_lo + 1), dtype=bool)
+        for er, ec in endpoints:
+            for rr, cc2 in self._bresenham_cells(rc, cc, int(er), int(ec)):
+                if row_lo <= rr <= row_hi and col_lo <= cc2 <= col_hi:
+                    local_mask[rr - row_lo, cc2 - col_lo] = True
+
+        self.full_map[1, row_lo:row_hi + 1, col_lo:col_hi + 1][local_mask] += 1.0
 
     def _update_agent_channels(self):
         """Reset ch 2 (agent_pos) and accumulate ch 3 (trajectory)."""
@@ -387,13 +463,15 @@ class LidarBEVMapper:
         img[obstacle_mask] = [0, 0, 0]
 
         # ---- Trajectory + current position (direct paint, no blending) ----
+        # img is in BGR convention (OpenCV); cvtColor(BGR→RGB) is applied at the end.
+        # trail_color=(255,0,0) BGR = blue in RGB output (matches VLN training convention).
+        # arrow_color=(0,0,255) BGR = red in RGB output (matches VLN training convention).
         traj_mask = self.local_map[3] > 0
         if traj_mask.any():
-            # Keep trajectory style identical to training/eval visualizer.
-            img[traj_mask] = [0, 0, 255]
+            img[traj_mask] = list(self.cfg.trail_color)   # blue in output ✓
         agent_mask = self.local_map[2] > 0
         if agent_mask.any():
-            img[agent_mask] = [255, 0, 0]
+            img[agent_mask] = list(self.cfg.arrow_color)  # red in output ✓
 
         # ---- FOV triangle overlay ----------------------------------------
         if draw_fov:
@@ -457,8 +535,8 @@ class LidarBEVMapper:
         img = np.full((n, n, 3), self.cfg.gray_unknown, dtype=np.uint8)
         img[exp >= self.cfg.exp_pred_threshold] = [255, 255, 255]
         img[occ >= self.cfg.map_pred_threshold] = [0, 0, 0]
-        img[self.full_map[3] > 0] = [0, 0, 255]
-        img[self.full_map[2] > 0] = [255, 0, 0]
+        img[self.full_map[3] > 0] = list(self.cfg.trail_color)   # blue in output (BGR)
+        img[self.full_map[2] > 0] = list(self.cfg.arrow_color)  # red in output (BGR)
 
         # Flip Y so row=0 is north/top to match local BEV orientation.
         # np.flipud creates a negative-stride view, which OpenCV drawing

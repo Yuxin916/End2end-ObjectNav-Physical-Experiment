@@ -50,7 +50,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from sensor_msgs.msg import PointCloud2, Image
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import PointStamped
-from std_msgs.msg import String
+from std_msgs.msg import String, Bool
 
 import cv2
 from PIL import Image as PILImage
@@ -96,6 +96,8 @@ class VLMNavigatorNode(Node):
             range_max=self.range_max,
             map_pred_threshold=self.map_pred_threshold,
             exp_pred_threshold=self.exp_pred_threshold,
+            explored_use_raycast=self.explored_use_raycast,
+            explored_max_rays_per_scan=self.explored_max_rays_per_scan,
             crop_radius=self.crop_radius,
             output_size=self.output_size,
             hfov_deg=self.hfov_deg,
@@ -111,6 +113,9 @@ class VLMNavigatorNode(Node):
             clear_border_px=self.frontier_clear_border_px,
             min_distance_m=self.frontier_min_distance_m,
             top_k=self.frontier_top_k,
+            max_samples_per_component=self.frontier_max_samples_per_component,
+            large_component_min_area=self.frontier_large_component_min_area,
+            sample_min_separation_px=self.frontier_sample_min_separation_px,
             resolution=self.map_resolution,
             crop_radius=self.crop_radius,
             output_size=self.output_size,
@@ -122,7 +127,10 @@ class VLMNavigatorNode(Node):
             checkpoint=self.vlm_checkpoint,
             template=self.vlm_template,
             device=self.vlm_device,
+            num_beams=self.vlm_num_beams,
             max_new_tokens=self.vlm_max_new_tokens,
+            min_new_tokens=self.vlm_min_new_tokens,
+            temperature=self.vlm_temperature,
             do_sample=self.vlm_do_sample,
             pad2square=self.vlm_pad2square,
             normalize_type=self.vlm_normalize_type,
@@ -145,9 +153,11 @@ class VLMNavigatorNode(Node):
 
         self.current_wp_x: float = None
         self.current_wp_y: float = None
+        self.current_wp_is_target: bool = False
 
         self._pose_received = False
         self._scan_received = False
+        self._running_vlm_step = False
 
         # Frontier birth RGB (dual-ViT templates)
         self.latest_rgb_pil: PILImage.Image = None
@@ -268,6 +278,9 @@ class VLMNavigatorNode(Node):
         self.target_marker_pub = self.create_publisher(
             PointStamped, '/vlm_target_marker', default_qos
         )
+        self.target_reached_pub = self.create_publisher(
+            Bool, '/vlm_target_reached', default_qos
+        )
 
         # ------------------------------------------------------------------
         # VLM inference timer
@@ -310,7 +323,10 @@ class VLMNavigatorNode(Node):
                                'BEVftFOV_Sem_Pos__FRONTIER_PIXEL_NUMBER_ONLY_STRATEGY2')
         self.declare_parameter('device', 'cuda:0')
         self.declare_parameter('inference_interval', 5.0)
+        self.declare_parameter('num_beams', 1)
         self.declare_parameter('max_new_tokens', 64)
+        self.declare_parameter('min_new_tokens', 1)
+        self.declare_parameter('temperature', 0.0)
         self.declare_parameter('do_sample', False)
         self.declare_parameter('pad2square', True)
         self.declare_parameter('normalize_type', 'imagenet')
@@ -325,6 +341,8 @@ class VLMNavigatorNode(Node):
         self.declare_parameter('range_max', 5.0)
         self.declare_parameter('map_pred_threshold', 1.0)
         self.declare_parameter('exp_pred_threshold', 1.0)
+        self.declare_parameter('explored_use_raycast', True)
+        self.declare_parameter('explored_max_rays_per_scan', 512)
         self.declare_parameter('crop_radius', 150)
         self.declare_parameter('output_size', 448)
 
@@ -335,8 +353,13 @@ class VLMNavigatorNode(Node):
         self.declare_parameter('frontier_clear_border_px', 2)
         self.declare_parameter('frontier_min_distance_m', 0.7)
         self.declare_parameter('frontier_top_k', 5)
+        self.declare_parameter('frontier_max_samples_per_component', 3)
+        self.declare_parameter('frontier_large_component_min_area', 80)
+        self.declare_parameter('frontier_sample_min_separation_px', 20.0)
 
         self.declare_parameter('goal_reached_threshold', 0.5)
+        # If <= 0, fallback to goal_reached_threshold.
+        self.declare_parameter('target_reached_threshold', 0.5)
         self.declare_parameter('waypoint_frame', 'map')
         self.declare_parameter('camera_topic', '/camera/image')
         self.declare_parameter('camera_is_panorama', True)
@@ -349,7 +372,10 @@ class VLMNavigatorNode(Node):
         self.declare_parameter('target_temporal_buffer_size', 3)
         self.declare_parameter('target_temporal_min_hits', 2)
         self.declare_parameter('target_match_label_mode', 'normalized')
-        self.declare_parameter('target_require_sam2', True)
+        # Keep default aligned with launch/yaml: accept non-SAM2 detector outputs.
+        self.declare_parameter('target_require_sam2', False)
+        # Episode semantics switch: when true, changing goal resets map/frontier memory.
+        self.declare_parameter('reset_map_on_goal_change', True)
         self.declare_parameter('target_state_ttl_sec', 2.0)
         self.declare_parameter('target_lidar_min_range', 0.5)
         self.declare_parameter('target_lidar_max_range', 10.0)
@@ -365,7 +391,10 @@ class VLMNavigatorNode(Node):
         self.vlm_template = g('template').value
         self.vlm_device = g('device').value
         self.inference_interval = g('inference_interval').value
+        self.vlm_num_beams = g('num_beams').value
         self.vlm_max_new_tokens = g('max_new_tokens').value
+        self.vlm_min_new_tokens = g('min_new_tokens').value
+        self.vlm_temperature = g('temperature').value
         self.vlm_do_sample = g('do_sample').value
         self.vlm_pad2square = g('pad2square').value
         self.vlm_normalize_type = g('normalize_type').value
@@ -380,6 +409,8 @@ class VLMNavigatorNode(Node):
         self.range_max = g('range_max').value
         self.map_pred_threshold = g('map_pred_threshold').value
         self.exp_pred_threshold = g('exp_pred_threshold').value
+        self.explored_use_raycast = g('explored_use_raycast').value
+        self.explored_max_rays_per_scan = g('explored_max_rays_per_scan').value
         self.crop_radius = g('crop_radius').value
         self.output_size = g('output_size').value
 
@@ -390,8 +421,12 @@ class VLMNavigatorNode(Node):
         self.frontier_clear_border_px = g('frontier_clear_border_px').value
         self.frontier_min_distance_m = g('frontier_min_distance_m').value
         self.frontier_top_k = g('frontier_top_k').value
+        self.frontier_max_samples_per_component = g('frontier_max_samples_per_component').value
+        self.frontier_large_component_min_area = g('frontier_large_component_min_area').value
+        self.frontier_sample_min_separation_px = g('frontier_sample_min_separation_px').value
 
         self.goal_reached_threshold = g('goal_reached_threshold').value
+        self.target_reached_threshold = g('target_reached_threshold').value
         self.waypoint_frame = g('waypoint_frame').value
         self.camera_topic = g('camera_topic').value
         self.camera_is_panorama = g('camera_is_panorama').value
@@ -405,6 +440,7 @@ class VLMNavigatorNode(Node):
         self.target_temporal_min_hits = g('target_temporal_min_hits').value
         self.target_match_label_mode = g('target_match_label_mode').value
         self.target_require_sam2 = g('target_require_sam2').value
+        self.reset_map_on_goal_change = g('reset_map_on_goal_change').value
         self.target_state_ttl_sec = g('target_state_ttl_sec').value
         self.target_lidar_min_range = g('target_lidar_min_range').value
         self.target_lidar_max_range = g('target_lidar_max_range').value
@@ -466,16 +502,29 @@ class VLMNavigatorNode(Node):
 
         # Check if current waypoint reached → early retrigger
         if self.current_wp_x is not None:
+            wp_threshold = float(self.goal_reached_threshold)
+            if self.current_wp_is_target:
+                target_threshold = float(self.target_reached_threshold)
+                if target_threshold > 0.0:
+                    wp_threshold = target_threshold
             dist = math.sqrt(
                 (p.x - self.current_wp_x) ** 2 +
                 (p.y - self.current_wp_y) ** 2
             )
-            if dist < self.goal_reached_threshold:
+            if dist < wp_threshold:
+                if self.current_wp_is_target:
+                    self.get_logger().info(
+                        f'Target waypoint reached (dist={dist:.2f} m, threshold={wp_threshold:.2f} m). '
+                        f'Goal "{self.object_goal}" marked successful.'
+                    )
+                    self._mark_target_goal_success()
+                    return
                 self.get_logger().info(
                     f'Waypoint reached (dist={dist:.2f} m). Re-triggering VLM.'
                 )
                 self.current_wp_x = None
                 self.current_wp_y = None
+                self.current_wp_is_target = False
                 self._run_vlm_step()
 
     def _scan_callback(self, msg: PointCloud2):
@@ -536,6 +585,7 @@ class VLMNavigatorNode(Node):
         now_s = self.get_clock().now().nanoseconds / 1e9
         self.latest_detection_msg_time = now_s
         self.latest_detection = None
+        self.latest_detections = []
 
         try:
             data = json.loads(msg.data)
@@ -562,13 +612,15 @@ class VLMNavigatorNode(Node):
                 continue
             if self.object_goal and not self._label_matches_goal(label, self.object_goal):
                 continue
+            candidate = {
+                'label': label,
+                'confidence': conf,
+                'bbox': [float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])],
+            }
+            self.latest_detections.append(candidate)
             if conf > best_conf:
                 best_conf = conf
-                best = {
-                    'label': label,
-                    'confidence': conf,
-                    'bbox': [float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])],
-                }
+                best = candidate
 
         self.latest_detection = best
         self.target_detection_buffer.append(best is not None)
@@ -647,8 +699,8 @@ class VLMNavigatorNode(Node):
         if new_goal != self.object_goal:
             self.get_logger().info(f'Object goal changed: "{new_goal}"')
             self.object_goal = new_goal
-            # Reset map and birth RGBs when goal changes so we start fresh
-            if self._pose_received:
+            # Optional episode-style reset on goal switch.
+            if self.reset_map_on_goal_change and self._pose_received:
                 self.mapper.reset(
                     self.latest_pose_x,
                     self.latest_pose_y,
@@ -665,6 +717,7 @@ class VLMNavigatorNode(Node):
             self.target_confidence = 0.0
             self.current_wp_x = None
             self.current_wp_y = None
+            self.current_wp_is_target = False
             self.latest_detections = []
 
     # ------------------------------------------------------------------
@@ -695,7 +748,42 @@ class VLMNavigatorNode(Node):
             )
         self._publish_live_bev_debug()
 
+        # Update frontier birth RGBs at 5 Hz so they track frontier discovery time,
+        # not just VLM step time (mirrors mp3d_traj_sam.py per-step frontier_birth update).
+        if (self.vlm.is_dual_vit
+                and self.latest_rgb_pil is not None
+                and self.mapper.local_map is not None):
+            local_r, local_c = self.mapper.get_local_robot_pixel()
+            try:
+                frontier_pts = self.frontier_detector.extract(
+                    self.mapper.local_map, local_r, local_c
+                )
+                current_rgb = self.latest_rgb_pil
+                for fr, fc in frontier_pts:
+                    wx, wy = local_pixel_to_world(
+                        pixel_row=float(fr), pixel_col=float(fc),
+                        robot_x=self.latest_pose_x, robot_y=self.latest_pose_y,
+                        crop_radius=self.crop_radius, output_size=self.output_size,
+                        resolution=self.map_resolution,
+                    )
+                    key = (round(wx / _BIRTH_GRID_M), round(wy / _BIRTH_GRID_M))
+                    if key not in self.frontier_birth_rgb:
+                        self.frontier_birth_rgb[key] = current_rgb
+            except Exception:
+                pass  # Never let birth RGB update crash the debug timer
+
     def _run_vlm_step(self):
+        """Core step wrapper with re-entry guard."""
+        if self._running_vlm_step:
+            self.get_logger().debug('Skip VLM step: previous step still running.')
+            return
+        self._running_vlm_step = True
+        try:
+            self._run_vlm_step_once()
+        finally:
+            self._running_vlm_step = False
+
+    def _run_vlm_step_once(self):
         """Core step: BEV → frontiers → VLM → waypoint."""
         if self.mapper.local_map is None:
             return
@@ -841,6 +929,7 @@ class VLMNavigatorNode(Node):
 
         self.current_wp_x = wx
         self.current_wp_y = wy
+        self.current_wp_is_target = bool(target_pixel is not None and idx == len(frontiers))
 
         # Re-render BEV with selected frontier highlighted
         bev_rgb_sel = self.mapper.render_local_bev(
@@ -904,19 +993,45 @@ class VLMNavigatorNode(Node):
         """Publish an RGB numpy image as sensor_msgs/Image."""
         if rgb_image is None:
             return
+        rgb_u8 = np.ascontiguousarray(rgb_image.astype(np.uint8))
         msg = Image()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = frame_id
-        msg.height, msg.width = rgb_image.shape[:2]
+        msg.height, msg.width = rgb_u8.shape[:2]
         msg.encoding = 'rgb8'
         msg.is_bigendian = False
         msg.step = msg.width * 3
-        msg.data = rgb_image.astype(np.uint8).flatten().tolist()
+        msg.data = rgb_u8.tobytes()
         publisher.publish(msg)
 
     def _publish_bev_debug(self, bev_rgb: np.ndarray):
         """Publish the BEV image as sensor_msgs/Image for RVIZ."""
         self._publish_rgb_image(self.bev_debug_pub, bev_rgb, frame_id='map')
+
+    def _mark_target_goal_success(self):
+        """Mark current object goal as reached and wait for next /object_goal."""
+        done_msg = Bool()
+        done_msg.data = True
+        self.target_reached_pub.publish(done_msg)
+
+        completed_goal = self.object_goal
+        self.object_goal = ''
+        self.current_wp_x = None
+        self.current_wp_y = None
+        self.current_wp_is_target = False
+
+        self.target_found = False
+        self.target_world_xyz = None
+        self.target_pixel_local = None
+        self.target_semantic = None
+        self.target_confidence = 0.0
+        self.latest_detection = None
+        self.latest_detections = []
+        self.target_detection_buffer.clear()
+
+        self.get_logger().info(
+            f'Goal "{completed_goal}" completed. Waiting for next /object_goal.'
+        )
 
     def _publish_live_bev_debug(self):
         """Publish continuously-updated BEV/FOV from lidar+pose callbacks."""
@@ -1138,7 +1253,7 @@ class VLMNavigatorNode(Node):
 
     def _label_matches_goal(self, label: str, goal: str) -> bool:
         if not goal:
-            return True
+            return False  # No active goal → reject all detections
         mode = str(self.target_match_label_mode).lower().strip()
         if mode == 'exact':
             return label.strip().lower() == goal.strip().lower()

@@ -28,6 +28,9 @@ class FrontierConfig:
     clear_border_px: int = 2         # ignore frontiers near image border
     min_distance_m: float = 0.7      # min robot-to-frontier distance (metres)
     top_k: int = 5                   # max frontiers to return
+    max_samples_per_component: int = 3   # allow >1 candidates from large components
+    large_component_min_area: int = 80   # area threshold to trigger multi-sampling
+    sample_min_separation_px: float = 20.0  # keep sampled candidates spatially distinct
     resolution: float = 0.05        # m/cell  (used for distance conversion)
     crop_radius: int = 150           # cells in local crop
     output_size: int = 448           # pixels in local BEV image
@@ -43,6 +46,32 @@ class FrontierDetector:
         self._cell_per_px = (2.0 * cfg.crop_radius) / cfg.output_size
         self._min_dist_cells = cfg.min_distance_m / cfg.resolution
         self._min_dist_px = self._min_dist_cells / self._cell_per_px
+
+    @staticmethod
+    def _fps_sample(points_rc: np.ndarray, k: int, min_sep_px: float) -> np.ndarray:
+        """
+        Farthest-point sample on component pixels to get spatially spread candidates.
+        points_rc: (N, 2) float array of [row, col].
+        """
+        if points_rc.shape[0] == 0 or k <= 0:
+            return np.empty((0, 2), dtype=np.float32)
+        if points_rc.shape[0] <= k:
+            return points_rc.astype(np.float32)
+
+        selected = [0]
+        # Distances to nearest selected point (squared)
+        d2 = np.sum((points_rc - points_rc[0]) ** 2, axis=1)
+        min_sep2 = float(min_sep_px) * float(min_sep_px)
+
+        for _ in range(1, k):
+            idx = int(np.argmax(d2))
+            if d2[idx] < min_sep2:
+                break
+            selected.append(idx)
+            cand_d2 = np.sum((points_rc - points_rc[idx]) ** 2, axis=1)
+            d2 = np.minimum(d2, cand_d2)
+
+        return points_rc[selected].astype(np.float32)
 
     def extract(self,
                 local_map: np.ndarray,
@@ -115,23 +144,50 @@ class FrontierDetector:
             frontier_map, connectivity=8
         )
 
-        # ---- 7. Filter components: size and distance from robot ----------
+        # ---- 7. Filter components and sample candidate points -------------
         robot_r = robot_pixel_row
         robot_c = robot_pixel_col
 
-        valid_centers = []
+        valid_centers = []  # list[(row, col, dist_px)]
         for label in range(1, num_labels):   # skip background (label 0)
             area = stats[label, cv2.CC_STAT_AREA]
             if area < cfg.min_frontier_area:
                 continue
 
-            cr, cc = centroids[label][1], centroids[label][0]  # (row, col)
-            dist_px = math.sqrt((cr - robot_r) ** 2 + (cc - robot_c) ** 2)
-
-            if dist_px < self._min_dist_px:
+            comp_mask = (labels == label)
+            rr, cc = np.where(comp_mask)
+            if rr.size == 0:
                 continue
 
-            valid_centers.append((cr, cc, dist_px))
+            # Default: one centroid per component.
+            sample_points = np.array([[centroids[label][1], centroids[label][0]]], dtype=np.float32)
+
+            # For large frontier components, provide multiple spatially-separated candidates.
+            if (
+                int(cfg.max_samples_per_component) > 1 and
+                area >= int(cfg.large_component_min_area)
+            ):
+                pts = np.stack([rr.astype(np.float32), cc.astype(np.float32)], axis=1)
+                # Deterministic downsample for very large components (speed).
+                if pts.shape[0] > 2000:
+                    stride = int(max(1, pts.shape[0] // 2000))
+                    pts = pts[::stride]
+                # Start FPS from the frontier point nearest to the robot to preserve reachability.
+                d2_robot = (pts[:, 0] - robot_r) ** 2 + (pts[:, 1] - robot_c) ** 2
+                start_idx = int(np.argmin(d2_robot))
+                if start_idx != 0:
+                    pts[[0, start_idx]] = pts[[start_idx, 0]]
+                sample_points = self._fps_sample(
+                    pts,
+                    k=int(cfg.max_samples_per_component),
+                    min_sep_px=float(cfg.sample_min_separation_px),
+                )
+
+            for cr, ccv in sample_points:
+                dist_px = math.sqrt((float(cr) - robot_r) ** 2 + (float(ccv) - robot_c) ** 2)
+                if dist_px < self._min_dist_px:
+                    continue
+                valid_centers.append((float(cr), float(ccv), dist_px))
 
         if not valid_centers:
             return np.empty((0, 2), dtype=np.int32)

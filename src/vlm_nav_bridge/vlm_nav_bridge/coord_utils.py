@@ -112,6 +112,11 @@ def global_cell_to_local_pixel(g_col: int, g_row: int,
     """
     Convert a global map cell to a pixel in the local BEV image.
     Returns (pixel_row, pixel_col).  May be outside [0, output_size).
+
+    Local BEV convention:
+      - col increases rightward  -> +X
+      - row increases downward   -> -Y
+    Since global g_row increases northward (+Y), row offset is flipped here.
     """
     px_per_cell = output_size / (2.0 * crop_radius)
     centre = output_size / 2.0
@@ -120,7 +125,7 @@ def global_cell_to_local_pixel(g_col: int, g_row: int,
     drow = g_row - robot_g_row
 
     pixel_col = centre + dcol * px_per_cell
-    pixel_row = centre + drow * px_per_cell
+    pixel_row = centre - drow * px_per_cell
     return float(pixel_row), float(pixel_col)
 
 
