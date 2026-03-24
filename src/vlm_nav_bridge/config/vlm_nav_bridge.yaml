@@ -254,6 +254,38 @@ vlm_navigator:
     # 0 = panorama centre is robot forward. Adjust if camera is mounted offset.
     camera_yaw_offset_deg: 0.0
 
+    # Sign mapping between crop heading and panorama longitude direction.
+    # -1.0 is typical when ROS yaw is CCW but panorama x-axis increases rightward.
+    # Set to +1.0 if your egocentric crop rotates in the opposite direction.
+    camera_heading_sign: -1.0
+
+    # How strongly heading is applied to panorama crop.
+    # 1.0: full heading compensation (for world-aligned panoramas).
+    # 0.5: half compensation (use when a 360deg robot turn appears as ~2 crop turns).
+    # 0.0: no extra heading rotation (for body-aligned panoramas; often correct on real robot).
+    # If you observe 180deg robot turn causing near full-cycle crop repeat, try 0.0.
+    camera_heading_gain: 0.0
+
+    # If true, panorama crop heading uses yaw relative to episode start yaw.
+    # This keeps the egocentric crop aligned to initial-heading reference (heading=0 at start).
+    camera_heading_use_initial_relative: true
+
+    # Legacy yaw-jump threshold parameter (kept for compatibility).
+    # Current behavior is yaw-first: finite odometry yaw always drives crop heading.
+    camera_heading_yaw_jump_threshold_deg: 45.0
+
+    # Minimum translation (metres) required when using motion-direction fallback.
+    # Motion fallback is used only when yaw is invalid/unavailable.
+    # If movement is smaller than this, last heading is held to avoid jitter.
+    camera_heading_motion_min_displacement_m: 0.05
+
+    # Crop-heading smoothing factor in [0, 1). 0 = no smoothing, larger = smoother/slower.
+    camera_heading_smoothing_alpha: 0.0
+
+    # Low-rate debug log interval for crop heading diagnostics.
+    # Set <= 0 to disable periodic heading debug logs.
+    camera_heading_debug_log_interval_sec: 2.0
+
 
     # ==========================================================================
     # Target Detection (external detector integration)

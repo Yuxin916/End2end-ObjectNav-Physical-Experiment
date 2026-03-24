@@ -9,4 +9,4 @@ pathFollower:
     stopYawRateGain: 3.0
     maxYawRate: 80.0
     dirDiffThre: 0.3
-    stopDisThre: 0.1
+    stopDisThre: 0.2

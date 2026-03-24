@@ -150,6 +150,12 @@ class VLMNavigatorNode(Node):
         self.latest_pose_stamp_s: Optional[float] = None
         self.latest_scan_stamp_s: Optional[float] = None
         self.latest_rgb_stamp_s: Optional[float] = None
+        self.initial_yaw: Optional[float] = None
+        self.last_camera_heading_rad: float = 0.0
+        self.last_camera_heading_source: str = 'init'
+        self._last_reliable_yaw_abs: Optional[float] = None
+        self._prev_pose_xy: Optional[Tuple[float, float]] = None
+        self._last_heading_debug_log_s: float = 0.0
 
         self.object_goal: str = ''
 
@@ -371,6 +377,13 @@ class VLMNavigatorNode(Node):
         self.declare_parameter('camera_project_height', 480)
         self.declare_parameter('camera_project_hfov_deg', 79.0)
         self.declare_parameter('camera_yaw_offset_deg', 0.0)
+        self.declare_parameter('camera_heading_sign', -1.0)
+        self.declare_parameter('camera_heading_gain', 0.5)
+        self.declare_parameter('camera_heading_use_initial_relative', True)
+        self.declare_parameter('camera_heading_yaw_jump_threshold_deg', 45.0)
+        self.declare_parameter('camera_heading_motion_min_displacement_m', 0.05)
+        self.declare_parameter('camera_heading_smoothing_alpha', 0.0)
+        self.declare_parameter('camera_heading_debug_log_interval_sec', 2.0)
         self.declare_parameter('target_detection_topic', '/target_detection')
         self.declare_parameter('target_confidence_threshold', 0.30)
         self.declare_parameter('target_temporal_buffer_size', 3)
@@ -440,6 +453,13 @@ class VLMNavigatorNode(Node):
         self.camera_project_height = g('camera_project_height').value
         self.camera_project_hfov_deg = g('camera_project_hfov_deg').value
         self.camera_yaw_offset_deg = g('camera_yaw_offset_deg').value
+        self.camera_heading_sign = g('camera_heading_sign').value
+        self.camera_heading_gain = g('camera_heading_gain').value
+        self.camera_heading_use_initial_relative = g('camera_heading_use_initial_relative').value
+        self.camera_heading_yaw_jump_threshold_deg = g('camera_heading_yaw_jump_threshold_deg').value
+        self.camera_heading_motion_min_displacement_m = g('camera_heading_motion_min_displacement_m').value
+        self.camera_heading_smoothing_alpha = g('camera_heading_smoothing_alpha').value
+        self.camera_heading_debug_log_interval_sec = g('camera_heading_debug_log_interval_sec').value
         self.target_detection_topic = g('target_detection_topic').value
         self.target_confidence_threshold = g('target_confidence_threshold').value
         self.target_temporal_buffer_size = g('target_temporal_buffer_size').value
@@ -487,6 +507,11 @@ class VLMNavigatorNode(Node):
         self.latest_pose_y = p.y
         self.latest_pose_z = p.z
         self.latest_yaw = quaternion_to_yaw(q.x, q.y, q.z, q.w)
+        if self.initial_yaw is None and np.isfinite(self.latest_yaw):
+            self.initial_yaw = float(self.latest_yaw)
+            self._last_reliable_yaw_abs = float(self.latest_yaw)
+            self.last_camera_heading_rad = 0.0
+            self.last_camera_heading_source = 'yaw'
         self._pose_received = True
 
         # Initialise mapper on first pose
@@ -668,14 +693,21 @@ class VLMNavigatorNode(Node):
 
         Assumptions:
           - Input panorama center column is robot forward at zero yaw.
-          - Output view is yaw-aligned to current robot heading.
+          - Output view is aligned to computed crop heading
+            (initial-relative yaw with robust fallback).
         """
         h_in, w_in = pano_rgb.shape[:2]
         out_w = int(self.camera_project_width)
         out_h = int(self.camera_project_height)
         hfov = math.radians(float(self.camera_project_hfov_deg))
-        yaw = float(self.latest_yaw if self.latest_yaw is not None else 0.0)
-        yaw += math.radians(float(self.camera_yaw_offset_deg))
+        crop_heading = self._compute_camera_crop_heading()
+        # Image longitude increases to the right; ROS yaw is CCW.
+        # camera_heading_sign controls frame convention, camera_heading_gain
+        # controls how much heading is applied for the current panorama source.
+        yaw = (
+            float(self.camera_heading_gain) * float(self.camera_heading_sign) * crop_heading
+            + math.radians(float(self.camera_yaw_offset_deg))
+        )
 
         cx = (out_w - 1.0) * 0.5
         cy = (out_h - 1.0) * 0.5
@@ -703,6 +735,89 @@ class VLMNavigatorNode(Node):
         )
         return projected
 
+    @staticmethod
+    def _wrap_to_pi(angle: float) -> float:
+        """Wrap angle to [-pi, pi]."""
+        return float((angle + np.pi) % (2.0 * np.pi) - np.pi)
+
+    def _smooth_heading(self, new_heading: float) -> float:
+        """Apply optional angle smoothing to reduce crop jitter."""
+        alpha = float(self.camera_heading_smoothing_alpha)
+        alpha = min(max(alpha, 0.0), 0.95)
+        prev = float(self.last_camera_heading_rad)
+        if alpha <= 0.0:
+            smoothed = self._wrap_to_pi(new_heading)
+        else:
+            delta = self._wrap_to_pi(new_heading - prev)
+            smoothed = self._wrap_to_pi(prev + (1.0 - alpha) * delta)
+        self.last_camera_heading_rad = smoothed
+        return smoothed
+
+    def _compute_camera_crop_heading(self) -> float:
+        """
+        Compute panorama crop heading with initial-relative preference and fallback.
+
+        Priority:
+          1) relative yaw from odometry quaternion (if valid),
+          2) motion direction from pose delta (only when yaw invalid),
+          3) hold previous heading.
+        """
+        now_s = self.get_clock().now().nanoseconds / 1e9
+        use_rel = bool(self.camera_heading_use_initial_relative)
+
+        if self.initial_yaw is None and self.latest_yaw is not None and np.isfinite(self.latest_yaw):
+            self.initial_yaw = float(self.latest_yaw)
+            self._last_reliable_yaw_abs = float(self.latest_yaw)
+
+        source = 'hold'
+        heading = float(self.last_camera_heading_rad)
+        latest_yaw_valid = self.latest_yaw is not None and np.isfinite(self.latest_yaw)
+
+        # Yaw-first policy: if odometry yaw is finite, always drive crop heading
+        # so turn-in-place rotates the egocentric crop correctly.
+        if latest_yaw_valid:
+            yaw_abs = float(self.latest_yaw)
+            self._last_reliable_yaw_abs = yaw_abs
+            if use_rel and self.initial_yaw is not None:
+                heading = self._wrap_to_pi(yaw_abs - float(self.initial_yaw))
+            else:
+                heading = self._wrap_to_pi(yaw_abs)
+            source = 'yaw'
+
+        # Fallback to motion heading only when yaw is unavailable/invalid.
+        if source != 'yaw':
+            if self.latest_pose_x is not None and self.latest_pose_y is not None and self._prev_pose_xy is not None:
+                px, py = self._prev_pose_xy
+                dx = float(self.latest_pose_x) - float(px)
+                dy = float(self.latest_pose_y) - float(py)
+                if math.hypot(dx, dy) >= float(self.camera_heading_motion_min_displacement_m):
+                    motion_abs = math.atan2(dy, dx)
+                    if use_rel and self.initial_yaw is not None:
+                        heading = self._wrap_to_pi(motion_abs - float(self.initial_yaw))
+                    else:
+                        heading = self._wrap_to_pi(motion_abs)
+                    source = 'motion'
+
+        heading = self._smooth_heading(heading)
+        if source != self.last_camera_heading_source:
+            self.get_logger().info(
+                f'Camera crop heading source: {source} (prev={self.last_camera_heading_source})'
+            )
+            self.last_camera_heading_source = source
+
+        log_interval = float(self.camera_heading_debug_log_interval_sec)
+        if log_interval > 0.0 and (now_s - float(self._last_heading_debug_log_s)) >= log_interval:
+            self._last_heading_debug_log_s = now_s
+            self.get_logger().debug(
+                f'Camera crop heading={math.degrees(heading):.1f}deg source={source} '
+                f'use_rel={use_rel} sign={float(self.camera_heading_sign):.1f} '
+                f'gain={float(self.camera_heading_gain):.2f} '
+                f'offset_deg={float(self.camera_yaw_offset_deg):.1f}'
+            )
+        if self.latest_pose_x is not None and self.latest_pose_y is not None:
+            self._prev_pose_xy = (float(self.latest_pose_x), float(self.latest_pose_y))
+        return heading
+
     def _goal_callback(self, msg: String):
         new_goal = msg.data.strip()
         if new_goal != self.object_goal:
@@ -716,6 +831,16 @@ class VLMNavigatorNode(Node):
                     self.latest_pose_z,
                 )
                 self.mapper.mark_initial_panoramic_explored()
+                if self.latest_yaw is not None and np.isfinite(self.latest_yaw):
+                    self.initial_yaw = float(self.latest_yaw)
+                    self._last_reliable_yaw_abs = float(self.latest_yaw)
+                else:
+                    self.initial_yaw = None
+                    self._last_reliable_yaw_abs = None
+                self.last_camera_heading_rad = 0.0
+                self.last_camera_heading_source = 'init'
+                self._last_heading_debug_log_s = 0.0
+                self._prev_pose_xy = None
             self.frontier_birth_rgb.clear()
             self.target_birth_rgb = None
             self.latest_detection = None
