@@ -29,3 +29,7 @@ src/base_autonomy/vehicle_simulator/log/*
 .idea/
 
 data/
+
+.venv/
+
+.DS_Store
