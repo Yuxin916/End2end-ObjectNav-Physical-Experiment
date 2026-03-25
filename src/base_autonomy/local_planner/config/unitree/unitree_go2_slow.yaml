@@ -30,7 +30,7 @@ localPlanner:
     # Sensor offset
     sensorOffsetX: 0.2
     sensorOffsetY: 0.0
-  
+
     # Vehicle dimensions
     vehicleLength: 0.6
     vehicleWidth: 0.5
@@ -59,7 +59,7 @@ pathFollower:
     lookAheadDis: 0.5
     maxAccel: 1.0
     goalYawGain: 1.0
-    
+
     maxSpeed: 0.875
     autonomySpeed: 0.875
 
@@ -71,6 +71,7 @@ pathFollower:
     maxYawRate: 60.0
     dirDiffThre: 0.4
     stopDisThre: 0.3
+
 terrainAnalysis:
   ros__parameters:
     minDyObsVFOV: -30.0

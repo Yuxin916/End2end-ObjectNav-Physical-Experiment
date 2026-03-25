@@ -2,29 +2,27 @@ import os
 import yaml
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, PythonExpression
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
-from launch_ros.substitutions import FindPackageShare
 from ament_index_python.packages import get_package_share_directory
 
+
 def generate_launch_description():
-    # Get package share directory
     local_planner_share = get_package_share_directory('local_planner')
 
-    # Get robot config from environment variable or use default
+    # Robot config from env or default
     robot_config_env = os.environ.get('ROBOT_CONFIG_PATH', 'unitree/unitree_go2_slow')
 
-    # Declare launch arguments
-    config_arg = DeclareLaunchArgument(
-        'config',
-        default_value='omniDir',
-        description='omniDir: if with mecanum wheels, standard: if with standard wheels'
-    )
-
+    # Launch arguments
     robot_config_arg = DeclareLaunchArgument(
         'robot_config',
         default_value=robot_config_env,
         description='Robot-specific config file (without .yaml extension)'
+    )
+
+    realRobot_arg = DeclareLaunchArgument(
+        'realRobot',
+        default_value='false'
     )
 
     twoWayDrive_arg = DeclareLaunchArgument(
@@ -57,7 +55,7 @@ def generate_launch_description():
         default_value='0.0'
     )
 
-    # Read sensor offsets from robot config YAML
+    # Read sensor offsets from robot config YAML for TF publisher
     sensor_offsets = {
         'sensorOffsetX': 0.0,
         'sensorOffsetY': 0.0,
@@ -65,115 +63,132 @@ def generate_launch_description():
     }
 
     try:
-        robot_config_path = os.path.join(local_planner_share, 'config', robot_config_env + '.yaml')
+        robot_config_path = os.path.join(
+            local_planner_share, 'config', robot_config_env + '.yaml'
+        )
         with open(robot_config_path, 'r') as file:
             config_data = yaml.safe_load(file)
 
-        # Extract sensor offsets from sensorMountingOffsets/ros__parameters section
-        if 'sensorMountingOffsets' in config_data and 'ros__parameters' in config_data['sensorMountingOffsets']:
+        if (
+            'sensorMountingOffsets' in config_data and
+            'ros__parameters' in config_data['sensorMountingOffsets']
+        ):
             mounting_offsets = config_data['sensorMountingOffsets']['ros__parameters']
             for key in sensor_offsets.keys():
                 if key in mounting_offsets:
                     sensor_offsets[key] = mounting_offsets[key]
     except Exception as e:
-        print(f"Warning: Could not read robot config from {robot_config_env}.yaml, using defaults: {e}")
+        print(
+            f"Warning: Could not read robot config from {robot_config_env}.yaml, "
+            f"using defaults: {e}"
+        )
 
-    # Config file paths will be resolved by the nodes using substitutions
+    robot_config_file = os.path.join(
+        local_planner_share, 'config', robot_config_env + '.yaml'
+    )
 
-    # LocalPlanner node
+    # XML-compatible defaults for localPlanner
+    local_planner_defaults = {
+        'pathFolder': os.path.join(local_planner_share, 'paths'),
+        'vehicleLength': 0.5,
+        'vehicleWidth': 0.5,
+        'sensorOffsetX': 0.0,
+        'sensorOffsetY': 0.0,
+        'twoWayDrive': True,
+        'laserVoxelSize': 0.05,
+        'terrainVoxelSize': 0.2,
+        'useTerrainAnalysis': True,
+        'checkObstacle': True,
+        'checkRotObstacle': False,
+        'adjacentRange': 3.5,
+        'obstacleHeightThre': 0.05,
+        'groundHeightThre': 0.05,
+        'costHeightThre1': 0.1,
+        'costHeightThre2': 0.05,
+        'useCost': False,
+        'slowPathNumThre': 5,
+        'slowGroupNumThre': 1,
+        'pointPerPathThre': 2,
+        'minRelZ': -0.4,
+        'maxRelZ': 0.3,
+        'maxSpeed': 0.875,
+        'dirWeight': 0.02,
+        'dirThre': 90.0,
+        'dirToVehicle': False,
+        'pathScale': 0.875,
+        'minPathScale': 0.675,
+        'pathScaleStep': 0.1,
+        'pathScaleBySpeed': True,
+        'minPathRange': 0.8,
+        'pathRangeStep': 0.6,
+        'pathRangeBySpeed': True,
+        'pathCropByGoal': True,
+        'autonomyMode': LaunchConfiguration('autonomyMode'),
+        'autonomySpeed': 0.875,
+        'joyToSpeedDelay': LaunchConfiguration('joyToSpeedDelay'),
+        'joyToCheckObstacleDelay': 5.0,
+        'goalClearRange': 0.35,
+        'goalBehindRange': 0.35,
+        'freezeAng': 90.0,
+        'freezeTime': 0.0,
+        'goalX': LaunchConfiguration('goalX'),
+        'goalY': LaunchConfiguration('goalY'),
+    }
+
+    # XML-compatible defaults for pathFollower
+    path_follower_defaults = {
+        'realRobot': LaunchConfiguration('realRobot'),
+        'serialPort': '/dev/ttyACM0',
+        'baudrate': 115200,
+        'sensorOffsetX': 0.0,
+        'sensorOffsetY': 0.0,
+        'pubSkipNum': 1,
+        'twoWayDrive': LaunchConfiguration('twoWayDrive'),
+        'lookAheadDis': 0.5,
+        'maxSpeed': 0.875,
+        'maxAccel': 2.0,
+        'switchTimeThre': 1.0,
+        'omniDirDiffThre': 1.5,
+        'slowDwnDisThre': 0.875,
+        'useInclRateToSlow': False,
+        'inclRateThre': 120.0,
+        'slowRate1': 0.25,
+        'slowRate2': 0.5,
+        'slowRate3': 0.75,
+        'slowTime1': 2.0,
+        'slowTime2': 2.0,
+        'useInclToStop': False,
+        'inclThre': 45.0,
+        'stopTime': 5.0,
+        'noRotAtStop': False,
+        'noRotAtGoal': True,
+        'autonomyMode': LaunchConfiguration('autonomyMode'),
+        'autonomySpeed': 0.875,
+        'joyToSpeedDelay': LaunchConfiguration('joyToSpeedDelay'),
+    }
+
     localPlanner_node = Node(
         package='local_planner',
         executable='localPlanner',
         name='localPlanner',
         output='screen',
         parameters=[
-            {
-                'pathFolder': os.path.join(local_planner_share, 'paths'),
-                'twoWayDrive': True,
-                'laserVoxelSize': 0.05,
-                'terrainVoxelSize': 0.2,
-                'useTerrainAnalysis': True,
-                'checkObstacle': True,
-                'checkRotObstacle': False,
-                'adjacentRange': 3.5,
-                'obstacleHeightThre': 0.1,
-                'groundHeightThre': 0.1,
-                'costHeightThre1': 0.1,
-                'costHeightThre2': 0.05,
-                'useCost': False,
-                'slowPathNumThre': 5,
-                'slowGroupNumThre': 1,
-                'pointPerPathThre': 2,
-                'minRelZ': -0.4,
-                'maxRelZ': 0.3,
-                'dirWeight': 0.02,
-                'dirThre': 90.0,
-                'dirToVehicle': False,
-                'pathScale': 0.875,
-                'minPathScale': 0.675,
-                'pathScaleStep': 0.1,
-                'pathScaleBySpeed': True,
-                'minPathRange': 0.8,
-                'pathRangeStep': 0.6,
-                'pathRangeBySpeed': True,
-                'pathCropByGoal': True,
-                'autonomyMode': LaunchConfiguration('autonomyMode'),
-                'joyToSpeedDelay': LaunchConfiguration('joyToSpeedDelay'),
-                'joyToCheckObstacleDelay': 5.0,
-                'freezeAng': 90.0,
-                'freezeTime': 0.0,
-                'goalX': LaunchConfiguration('goalX'),
-                'goalY': LaunchConfiguration('goalY'),
-            },
-            PythonExpression([
-                "'", FindPackageShare('local_planner'), "/config/",
-                LaunchConfiguration('config'), ".yaml'"
-            ]),
-            PythonExpression([
-                "'", FindPackageShare('local_planner'), "/config/",
-                LaunchConfiguration('robot_config'), ".yaml'"
-            ]),
+            local_planner_defaults,
+            robot_config_file,
         ]
     )
 
-    # PathFollower node
     pathFollower_node = Node(
         package='local_planner',
         executable='pathFollower',
         name='pathFollower',
         output='screen',
         parameters=[
-            {
-                'pubSkipNum': 1,
-                'twoWayDrive': LaunchConfiguration('twoWayDrive'),
-                'switchTimeThre': 1.0,
-                'useInclRateToSlow': False,
-                'inclRateThre': 120.0,
-                'slowRate1': 0.25,
-                'slowRate2': 0.5,
-                'slowRate3': 0.75,
-                'slowTime1': 2.0,
-                'slowTime2': 2.0,
-                'useInclToStop': False,
-                'inclThre': 45.0,
-                'stopTime': 5.0,
-                'noRotAtStop': False,
-                'noRotAtGoal': False,
-                'autonomyMode': LaunchConfiguration('autonomyMode'),
-                'joyToSpeedDelay': LaunchConfiguration('joyToSpeedDelay'),
-            },
-            PythonExpression([
-                "'", FindPackageShare('local_planner'), "/config/",
-                LaunchConfiguration('config'), ".yaml'"
-            ]),
-            PythonExpression([
-                "'", FindPackageShare('local_planner'), "/config/",
-                LaunchConfiguration('robot_config'), ".yaml'"
-            ]),
+            path_follower_defaults,
+            robot_config_file,
         ]
     )
 
-    # Static transform publishers with sensor offsets from config
     vehicleTransPublisher_node = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
@@ -200,8 +215,8 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
-        config_arg,
         robot_config_arg,
+        realRobot_arg,
         twoWayDrive_arg,
         autonomyMode_arg,
         joyToSpeedDelay_arg,

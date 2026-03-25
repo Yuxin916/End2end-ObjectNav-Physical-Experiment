@@ -31,3 +31,5 @@ src/base_autonomy/vehicle_simulator/log/*
 data/
 
 .venv/
+
+.DS_Store

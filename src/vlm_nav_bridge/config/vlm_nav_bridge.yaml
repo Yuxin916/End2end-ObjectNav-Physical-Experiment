@@ -127,7 +127,7 @@ vlm_navigator:
 
     # If true, explored map is updated by ray-casting from robot cell to lidar endpoint cells.
     # This reduces optimistic "see-through-wall" explored fill from wedge painting.
-    explored_use_raycast: false
+    explored_use_raycast: true
 
     # Upper bound on unique endpoint rays traced per scan (performance guard).
     # Increase for denser point clouds if explored map looks too sparse.

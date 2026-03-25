@@ -23,7 +23,7 @@ def generate_launch_description():
     base_params = {
         'scanVoxelSize': 0.05,
         'decayTime': 1.0,
-        'noDecayDis': 1.5,
+        'noDecayDis': 1.75,
         'clearingDis': 8.0,
         'useSorting': True,
         'quantileZ': 0.25,
@@ -36,7 +36,7 @@ def generate_launch_description():
         'minDyObsVFOV': -30.0,
         'maxDyObsVFOV': 35.0,
         'minDyObsPointNum': 1,
-        'minOutOfFovPointNum': 20,
+        'minOutOfFovPointNum': 10,
         'obstacleHeightThre': 0.1,
         'noDataObstacle': False,
         'noDataBlockSkipNum': 0,
