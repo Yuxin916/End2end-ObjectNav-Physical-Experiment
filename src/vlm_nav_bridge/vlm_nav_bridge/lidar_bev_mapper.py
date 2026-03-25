@@ -63,11 +63,7 @@ class BEVMapperConfig:
     # Map update thresholds
     map_pred_threshold: float = 1.0  # hits to mark as occupied
     exp_pred_threshold: float = 1.0  # sweeps to mark as explored
-    explored_use_raycast: bool = False
     explored_max_rays_per_scan: int = 512
-    # Dilation for wall mask used only by explored clipping flood-fill.
-    # Helps prevent leakage through thin/gappy wall returns.
-    explored_clip_wall_dilate_ksize: int = 3
     # Visual obstacle dilation for rendering only (does not affect map data).
     # Thickens sparse LiDAR wall returns to look like solid walls in the BEV image.
     # 1 = no dilation. Tune to match training data appearance.
@@ -141,10 +137,6 @@ class LidarBEVMapper:
         self.local_pixel_col: float = cfg.output_size / 2.0
 
         self._initialised = False
-        # True after the first real lidar scan (panoramic step done).
-        # Before this flag is set, all 360° points are used for obstacle detection.
-        # After, only hfov_deg-filtered points are used (matches training convention).
-        self._panoramic_done = False
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -174,18 +166,6 @@ class LidarBEVMapper:
         self.local_map = None
 
         self._initialised = True
-        self._panoramic_done = False
-
-    def mark_initial_panoramic_explored(self):
-        """Prepare for panoramic initialisation at step 0.
-
-        The blind disk pre-fill is intentionally removed: it would mark cells
-        THROUGH walls as explored, producing frontiers outside the room.
-        Instead, the first real LiDAR scan (when _panoramic_done=False) uses
-        full 360° raycast to mark explored cells — this naturally stops AT walls
-        and replicates the 12-step panoramic rotation from mp3d_traj_sam.py.
-        """
-        self._panoramic_done = False  # ensure first scan is treated as panoramic
 
     # ------------------------------------------------------------------
     # Main update — called on each lidar scan callback
@@ -238,11 +218,8 @@ class LidarBEVMapper:
             self._extract_local_map()
             return
 
-        # ---- 1b. Angular FOV filter (explored + post-panoramic obstacle) -
-        # Step 0 (panoramic): use all 360° points for obstacle detection to
-        # capture the full room seen during the initial panoramic rotation.
-        # Step 1+ (forward camera): apply hfov_deg filter to match training.
-        if self.cfg.hfov_deg < 360.0 and self._panoramic_done:
+        # ---- 1b. Angular FOV filter — match training convention (forward camera only) ----
+        if self.cfg.hfov_deg < 360.0:
             half_a = math.radians(self.cfg.hfov_deg / 2.0)
             dx2 = pts[:, 0] - robot_x
             dy2 = pts[:, 1] - robot_y
@@ -275,23 +252,9 @@ class LidarBEVMapper:
             np.add.at(self.full_map[0], (g_rows[obs_mask], g_cols[obs_mask]), 1.0)
 
         # ---- 4. Explored channel (ch 1) ----------------------------------
-        # First scan (panoramic step): smooth 360° wedge/disk fill.
-        # Then clip to reachable cells so explored does not leak through walls.
-        # Subsequent scans: use configured mode (wedge or raycast).
-        if not self._panoramic_done:
-            saved_hfov = self.cfg.hfov_deg
-            self.cfg.hfov_deg = 360.0
-            self._mark_explored_wedge()
-            self.cfg.hfov_deg = saved_hfov
-            self._clip_explored_at_walls()
-            self._panoramic_done = True
-        elif bool(self.cfg.explored_use_raycast):
-            self._mark_explored_raycast(g_rows, g_cols)
-        else:
-            self._mark_explored_wedge()
-            # Wedge mode is optimistic by construction; clip unreachable spill
-            # so explored cells do not remain behind occupied barriers.
-            self._clip_explored_at_walls()
+        # Raycast from robot cell to each lidar endpoint — stops at obstacles,
+        # never marks cells through walls as explored.
+        self._mark_explored_raycast(g_rows, g_cols)
 
         # ---- 5. Agent position & trajectory channels ---------------------
         self._update_agent_channels()
@@ -302,81 +265,6 @@ class LidarBEVMapper:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
-
-    def _clip_explored_at_walls(self):
-        """Remove explored cells not reachable from the robot without crossing walls.
-
-        Operates on a local bounding box (vision_range around robot) so it is
-        fast enough to call after every wedge fill (~200×200 cells, not 1344×1344).
-        """
-        rc, cc = int(self.robot_g_row), int(self.robot_g_col)
-        n = self.global_cells
-        vr = int(self.cfg.vision_range)
-
-        # Local bounding box
-        r0 = max(0, rc - vr);  r1 = min(n, rc + vr + 1)
-        c0 = max(0, cc - vr);  c1 = min(n, cc + vr + 1)
-
-        occ_local = (self.full_map[0, r0:r1, c0:c1] >= self.cfg.map_pred_threshold).astype(np.uint8)
-        if int(self.cfg.explored_clip_wall_dilate_ksize) > 1:
-            k = int(self.cfg.explored_clip_wall_dilate_ksize)
-            occ_local = cv2.dilate(occ_local, np.ones((k, k), np.uint8))
-        exp_local = (self.full_map[1, r0:r1, c0:c1] >= self.cfg.exp_pred_threshold).astype(np.uint8)
-        passable = (exp_local & ~occ_local).astype(np.uint8)
-
-        # cv2.floodFill requires a border of zeros and mask 2px larger.
-        pad = 1
-        h, w = passable.shape
-        canvas = np.zeros((h + 2 * pad, w + 2 * pad), dtype=np.uint8)
-        canvas[pad:pad + h, pad:pad + w] = passable
-
-        mask = np.zeros((h + 2 * pad + 2, w + 2 * pad + 2), dtype=np.uint8)
-        seed_r = (rc - r0) + pad
-        seed_c = (cc - c0) + pad
-        cv2.floodFill(canvas, mask, (seed_c, seed_r), 255)
-
-        reachable = canvas[pad:pad + h, pad:pad + w] == 255
-
-        # Zero out explored cells in this region that are NOT reachable
-        unreachable = exp_local.astype(bool) & ~reachable
-        self.full_map[1, r0:r1, c0:c1][unreachable] = 0.0
-
-    def _mark_explored_wedge(self):
-        """
-        Mark the forward camera FOV wedge as explored (matches training convention).
-
-        Instead of a 360° disk, only cells within ±(hfov_deg/2) of the robot's
-        heading and within vision_range cells are marked explored.
-
-        Coordinate convention in the global map:
-          g_col increases with world +X (east)
-          g_row increases with world +Y (north)
-          robot_yaw: 0 = east, π/2 = north (standard ROS CCW convention)
-        """
-        r = self.cfg.vision_range
-        rc, cc = self.robot_g_row, self.robot_g_col
-        n = self.global_cells
-
-        row_lo = max(0, rc - r)
-        row_hi = min(n - 1, rc + r)
-        col_lo = max(0, cc - r)
-        col_hi = min(n - 1, cc + r)
-
-        rows = np.arange(row_lo, row_hi + 1)
-        cols = np.arange(col_lo, col_hi + 1)
-        rr, cc_grid = np.meshgrid(rows, cols, indexing='ij')
-        dist = np.sqrt((rr - rc) ** 2 + (cc_grid - cc) ** 2)
-
-        if self.cfg.hfov_deg >= 360.0:
-            in_region = dist <= r
-        else:
-            half_a = math.radians(self.cfg.hfov_deg / 2.0)
-            # Angle from robot to each cell (0=east/+X, π/2=north/+Y), matches robot_yaw
-            angle = np.arctan2(rr - rc, cc_grid - cc)
-            angle_diff = np.abs((angle - self.robot_yaw + np.pi) % (2 * np.pi) - np.pi)
-            in_region = (dist <= r) & (angle_diff <= half_a)
-
-        self.full_map[1, row_lo:row_hi + 1, col_lo:col_hi + 1][in_region] += 1.0
 
     @staticmethod
     def _bresenham_cells(r0: int, c0: int, r1: int, c1: int):

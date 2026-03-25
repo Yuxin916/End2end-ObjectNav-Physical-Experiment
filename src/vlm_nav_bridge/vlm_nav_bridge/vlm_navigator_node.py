@@ -96,9 +96,7 @@ class VLMNavigatorNode(Node):
             range_max=self.range_max,
             map_pred_threshold=self.map_pred_threshold,
             exp_pred_threshold=self.exp_pred_threshold,
-            explored_use_raycast=self.explored_use_raycast,
             explored_max_rays_per_scan=self.explored_max_rays_per_scan,
-            explored_clip_wall_dilate_ksize=self.explored_clip_wall_dilate_ksize,
             crop_radius=self.crop_radius,
             output_size=self.output_size,
             hfov_deg=self.hfov_deg,
@@ -349,9 +347,7 @@ class VLMNavigatorNode(Node):
         self.declare_parameter('range_max', 5.0)
         self.declare_parameter('map_pred_threshold', 1.0)
         self.declare_parameter('exp_pred_threshold', 1.0)
-        self.declare_parameter('explored_use_raycast', False)
         self.declare_parameter('explored_max_rays_per_scan', 512)
-        self.declare_parameter('explored_clip_wall_dilate_ksize', 3)
         self.declare_parameter('obstacle_render_dilate_ksize', 1)
         self.declare_parameter('crop_radius', 150)
         self.declare_parameter('output_size', 448)
@@ -426,9 +422,7 @@ class VLMNavigatorNode(Node):
         self.range_max = g('range_max').value
         self.map_pred_threshold = g('map_pred_threshold').value
         self.exp_pred_threshold = g('exp_pred_threshold').value
-        self.explored_use_raycast = g('explored_use_raycast').value
         self.explored_max_rays_per_scan = g('explored_max_rays_per_scan').value
-        self.explored_clip_wall_dilate_ksize = g('explored_clip_wall_dilate_ksize').value
         self.obstacle_render_dilate_ksize = g('obstacle_render_dilate_ksize').value
         self.crop_radius = g('crop_radius').value
         self.output_size = g('output_size').value
@@ -517,12 +511,7 @@ class VLMNavigatorNode(Node):
         # Initialise mapper on first pose
         if not self.mapper.is_initialised:
             self.mapper.reset(p.x, p.y, p.z)
-            # Panoramic camera already sees 360° at start — mark full disk explored
-            # (mirrors the 12-step panoramic rotation in mp3d_traj_sam.py).
-            self.mapper.mark_initial_panoramic_explored()
-            self.get_logger().info(
-                f'Map initialised at ({p.x:.2f}, {p.y:.2f}), 360° panoramic explored.'
-            )
+            self.get_logger().info(f'Map initialised at ({p.x:.2f}, {p.y:.2f}).')
         else:
             # Keep local crop/agent marker moving with odometry even between lidar scans.
             self.mapper.update(
@@ -830,7 +819,6 @@ class VLMNavigatorNode(Node):
                     self.latest_pose_y,
                     self.latest_pose_z,
                 )
-                self.mapper.mark_initial_panoramic_explored()
                 if self.latest_yaw is not None and np.isfinite(self.latest_yaw):
                     self.initial_yaw = float(self.latest_yaw)
                     self._last_reliable_yaw_abs = float(self.latest_yaw)

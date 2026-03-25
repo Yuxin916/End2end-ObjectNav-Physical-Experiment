@@ -125,17 +125,9 @@ vlm_navigator:
     # 1.0 = first time a ray-traversed cell is observed it is marked explored.
     exp_pred_threshold: 1.0
 
-    # If true, explored map is updated by ray-casting from robot cell to lidar endpoint cells.
-    # This reduces optimistic "see-through-wall" explored fill from wedge painting.
-    explored_use_raycast: true
-
     # Upper bound on unique endpoint rays traced per scan (performance guard).
     # Increase for denser point clouds if explored map looks too sparse.
     explored_max_rays_per_scan: 512
-
-    # Dilation kernel size used only when clipping explored cells by wall reachability.
-    # Increase (e.g. 5) if panoramic step-0 explored still leaks through thin wall gaps.
-    explored_clip_wall_dilate_ksize: 3
 
     # Visual dilation of obstacle pixels in the rendered BEV image (render only,
     # does NOT affect map data or frontier detection).
