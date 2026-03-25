@@ -73,6 +73,8 @@ def generate_launch_description():
                               description='Only use detections marked as SAM2'),
         DeclareLaunchArgument('config_file', default_value=default_config,
                               description='Path to vlm_nav_bridge.yaml config'),
+        DeclareLaunchArgument('bev_only', default_value='false',
+                              description='Skip VLM model loading; publish BEV debug only'),
     ]
 
     # ---- VLM navigator node ---------------------------------------------
@@ -96,6 +98,7 @@ def generate_launch_description():
                 'target_detection_topic': LaunchConfiguration('target_detection_topic'),
                 'target_confidence_threshold': LaunchConfiguration('target_confidence_threshold'),
                 'target_require_sam2': LaunchConfiguration('target_require_sam2'),
+                'bev_only': LaunchConfiguration('bev_only'),
             },
         ],
         # Remappings if topic names differ

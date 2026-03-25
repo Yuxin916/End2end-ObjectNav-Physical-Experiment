@@ -135,7 +135,10 @@ class VLMNavigatorNode(Node):
             pad2square=self.vlm_pad2square,
             normalize_type=self.vlm_normalize_type,
         )
-        self.vlm = VLMInterface(vlm_cfg)
+        if not self.bev_only:
+            self.vlm = VLMInterface(vlm_cfg)
+        else:
+            self.vlm = None
 
         # ------------------------------------------------------------------
         # State
@@ -305,7 +308,10 @@ class VLMNavigatorNode(Node):
         self._model_loaded = False
         self._loading = False
         # One-shot timer: fires once 2 s after startup to load the model
-        self._load_timer = self.create_timer(2.0, self._load_model_once)
+        if not self.bev_only:
+            self._load_timer = self.create_timer(2.0, self._load_model_once)
+        else:
+            self.get_logger().info('BEV-only mode: VLM model will NOT be loaded.')
 
         self.get_logger().info(
             f'VLMNavigatorNode started.  '
@@ -396,6 +402,7 @@ class VLMNavigatorNode(Node):
         self.declare_parameter('target_min_assoc_points', 8)
         self.declare_parameter('max_sensor_skew_sec', 0.5)
         self.declare_parameter('write_visualize', True)
+        self.declare_parameter('bev_only', False)
 
     def _load_parameters(self):
         g = self.get_parameter
@@ -468,6 +475,7 @@ class VLMNavigatorNode(Node):
         self.target_min_assoc_points = g('target_min_assoc_points').value
         self.max_sensor_skew_sec = g('max_sensor_skew_sec').value
         self.write_visualize = g('write_visualize').value
+        self.bev_only = g('bev_only').value
 
     # ------------------------------------------------------------------
     # Deferred model loading
@@ -873,7 +881,8 @@ class VLMNavigatorNode(Node):
 
         # Update frontier birth RGBs at 5 Hz so they track frontier discovery time,
         # not just VLM step time (mirrors mp3d_traj_sam.py per-step frontier_birth update).
-        if (self.vlm.is_dual_vit
+        if (self.vlm is not None
+                and self.vlm.is_dual_vit
                 and self.latest_rgb_pil is not None
                 and self.mapper.local_map is not None):
             local_r, local_c = self.mapper.get_local_robot_pixel()
