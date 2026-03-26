@@ -136,6 +136,10 @@ class SAM2DetectorNode(Node):
         self._dino_goal_ctx = ("", [], [])
         self._last_goal_for_init = ""
         self._last_inference_time: float = 0.0
+        # Goal rebroadcast: improves delivery when one-shot /object_goal publish
+        # is missed by peer nodes during startup races.
+        self._goal_rebroadcast_value: str = ''
+        self._goal_rebroadcast_remaining: int = 0
 
         qos = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
@@ -146,6 +150,7 @@ class SAM2DetectorNode(Node):
         self.create_subscription(Image, self.camera_topic, self._camera_callback, qos)
         self.create_subscription(String, '/object_goal', self._goal_callback, qos)
 
+        self.goal_pub = self.create_publisher(String, '/object_goal', qos)
         self.detection_pub = self.create_publisher(String, '/target_detection', qos)
         self.debug_detection_pub = self.create_publisher(Image, '/sam2_detection_debug', qos)
         self.debug_segmentation_pub = self.create_publisher(Image, '/sam2_segmentation_debug', qos)
@@ -156,6 +161,8 @@ class SAM2DetectorNode(Node):
         # Main inference timer
         interval = 1.0 / max(0.1, float(self.inference_hz))
         self.create_timer(interval, self._inference_callback)
+        # Low-rate goal rebroadcast timer for startup race robustness.
+        self.create_timer(0.25, self._goal_rebroadcast_timer_callback)
 
         self.get_logger().info(
             f'SAM2DetectorNode started.  '
@@ -254,10 +261,26 @@ class SAM2DetectorNode(Node):
     # ------------------------------------------------------------------
 
     def _goal_callback(self, msg: String):
-        self.object_goal = msg.data.strip()
+        new_goal = msg.data.strip()
+        if new_goal != self.object_goal and new_goal:
+            # Rebroadcast a few times so other subscribers can recover if
+            # the initial one-shot publish was missed.
+            self._goal_rebroadcast_value = new_goal
+            self._goal_rebroadcast_remaining = 4
+        self.object_goal = new_goal
         target, target_list, confusing = _translate_objnav(self.object_goal, self.scene_mode)
         self._dino_goal_ctx = (target, target_list, confusing)
         self._last_goal_for_init = ""
+
+    def _goal_rebroadcast_timer_callback(self):
+        """Low-rate /object_goal rebroadcast to improve startup reliability."""
+        if self._goal_rebroadcast_remaining <= 0:
+            return
+        if not self._goal_rebroadcast_value:
+            self._goal_rebroadcast_remaining = 0
+            return
+        self.goal_pub.publish(String(data=self._goal_rebroadcast_value))
+        self._goal_rebroadcast_remaining -= 1
 
     def _camera_callback(self, msg: Image):
         try:

@@ -49,8 +49,8 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
 from sensor_msgs.msg import PointCloud2, Image
 from nav_msgs.msg import Odometry
-from geometry_msgs.msg import PointStamped, Pose2D
-from std_msgs.msg import String, Bool
+from geometry_msgs.msg import PointStamped, Pose2D, TwistStamped
+from std_msgs.msg import String, Bool, Int8
 
 import cv2
 from PIL import Image as PILImage
@@ -167,6 +167,16 @@ class VLMNavigatorNode(Node):
         self._pose_received = False
         self._scan_received = False
         self._running_vlm_step = False
+        # After goal success: 20 Hz timer publishes cmd_vel=0 + waypoint at robot pos
+        # for 3 s, dominating the waypoint_converter's 10 Hz republish.
+        self._stop_cmd_vel_count: int = 0
+        # Hold-stop mode after goal success. While enabled, keep publishing stop
+        # commands until a new non-empty /object_goal arrives.
+        self._hold_position_after_success: bool = False
+        # Goal rebroadcast: improves delivery when one-shot /object_goal publish
+        # is missed by one of the subscribers during startup races.
+        self._goal_rebroadcast_value: str = ''
+        self._goal_rebroadcast_remaining: int = 0
 
         # Frontier birth RGB (dual-ViT templates)
         self.latest_rgb_pil: PILImage.Image = None
@@ -296,6 +306,23 @@ class VLMNavigatorNode(Node):
         self.target_reached_pub = self.create_publisher(
             Bool, '/vlm_target_reached', default_qos
         )
+        self.goal_pub = self.create_publisher(
+            String, '/object_goal', default_qos
+        )
+        self.stop_pub = self.create_publisher(
+            Int8, '/stop', default_qos
+        )
+        # Direct stop publisher: bypasses waypoint_converter to ensure local_planner
+        # receives the stop waypoint even if waypoint_converter has a timing race.
+        self.stop_way_point_pub = self.create_publisher(
+            PointStamped, '/way_point', default_qos
+        )
+        # cmd_vel publisher: used only on goal success to send zero velocity
+        # directly, overriding local_planner regardless of joySpeed state.
+        # local_planner/vehicle_simulator use TwistStamped on /cmd_vel.
+        self.cmd_vel_pub = self.create_publisher(
+            TwistStamped, '/cmd_vel', default_qos
+        )
 
         # ------------------------------------------------------------------
         # VLM inference timer
@@ -303,10 +330,15 @@ class VLMNavigatorNode(Node):
         self.vlm_timer = self.create_timer(
             self.inference_interval, self._vlm_timer_callback
         )
+        # Low-rate goal rebroadcast timer for startup race robustness.
+        self.create_timer(0.25, self._goal_rebroadcast_timer_callback)
         # Always-on visual debug publisher (independent from VLM decision timing).
         self.live_debug_timer = self.create_timer(
             0.2, self._live_debug_timer_callback
         )
+        # High-rate stop timer (20 Hz): publishes cmd_vel=0 after goal success to
+        # override local_planner regardless of joySpeed/speedHandler state.
+        self.create_timer(0.05, self._stop_cmd_vel_timer_callback)
 
         # ------------------------------------------------------------------
         # Deferred model loading (load after node is spinning)
@@ -854,6 +886,17 @@ class VLMNavigatorNode(Node):
     def _goal_callback(self, msg: String):
         new_goal = msg.data.strip()
         if new_goal != self.object_goal:
+            if new_goal:
+                # Release hold-stop only when a new non-empty goal is commanded.
+                if self._hold_position_after_success:
+                    self._hold_position_after_success = False
+                    self._stop_cmd_vel_count = 0
+                    self._publish_safety_stop(0)
+                    self.get_logger().info('Received new goal; released stop hold (/stop=0).')
+                # Rebroadcast the received goal a few times to help peer nodes
+                # catch it if they missed the initial one-shot publication.
+                self._goal_rebroadcast_value = new_goal
+                self._goal_rebroadcast_remaining = 4
             self.get_logger().info(f'Object goal changed: "{new_goal}"')
             self.object_goal = new_goal
             self.frontier_birth_rgb.clear()
@@ -931,6 +974,42 @@ class VLMNavigatorNode(Node):
                     self._publish_rgb_image(self.frontier_rgb_debug_pub, mosaic, frame_id='map')
             except Exception:
                 pass  # Never let birth RGB update crash the debug timer
+
+    def _stop_cmd_vel_timer_callback(self):
+        """20 Hz timer: while stop-hold is active, keep publishing cmd_vel=0."""
+        if self._hold_position_after_success or self._stop_cmd_vel_count > 0:
+            self.cmd_vel_pub.publish(self._build_zero_cmd_vel_msg())
+            if not self._hold_position_after_success:
+                self._stop_cmd_vel_count -= 1
+
+    def _goal_rebroadcast_timer_callback(self):
+        """Low-rate /object_goal rebroadcast to improve startup reliability."""
+        if self._goal_rebroadcast_remaining <= 0:
+            return
+        if not self._goal_rebroadcast_value:
+            self._goal_rebroadcast_remaining = 0
+            return
+        self.goal_pub.publish(String(data=self._goal_rebroadcast_value))
+        self._goal_rebroadcast_remaining -= 1
+
+    def _build_zero_cmd_vel_msg(self) -> TwistStamped:
+        """Build a zero-velocity TwistStamped command in vehicle frame."""
+        msg = TwistStamped()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = 'vehicle'
+        msg.twist.linear.x = 0.0
+        msg.twist.linear.y = 0.0
+        msg.twist.linear.z = 0.0
+        msg.twist.angular.x = 0.0
+        msg.twist.angular.y = 0.0
+        msg.twist.angular.z = 0.0
+        return msg
+
+    def _publish_safety_stop(self, level: int):
+        """Publish /stop command for pathFollower safety stop."""
+        stop_msg = Int8()
+        stop_msg.data = int(level)
+        self.stop_pub.publish(stop_msg)
 
     def _run_vlm_step(self):
         """Core step wrapper with re-entry guard."""
@@ -1171,20 +1250,26 @@ class VLMNavigatorNode(Node):
         self._publish_rgb_image(self.bev_debug_pub, bev_rgb, frame_id='map')
 
     def _mark_target_goal_success(self):
-        """Mark current object goal as reached and wait for next /object_goal."""
+        """Mark current object goal as reached"""
         done_msg = Bool()
         done_msg.data = True
         self.target_reached_pub.publish(done_msg)
 
-        # Stop the robot: publish current position as waypoint so local_planner
-        # has no distance left to cover → robot halts.
+        # Stop immediately, then hold-stop until a new non-empty goal arrives.
+        self.cmd_vel_pub.publish(self._build_zero_cmd_vel_msg())  # immediate zero velocity
+        self.get_logger().info('Published zero TwistStamped on /cmd_vel (immediate stop).')
+        self._publish_safety_stop(2)
+        self.get_logger().info('Published /stop=2 (safety stop hold).')
+        self._hold_position_after_success = True
         if self.latest_pose_x is not None:
-            stop_msg = Pose2D()
-            stop_msg.x = float(self.latest_pose_x)
-            stop_msg.y = float(self.latest_pose_y)
-            stop_msg.theta = 0.0
-            self.way_point_pub.publish(stop_msg)
-            self.get_logger().info('Published stop waypoint at current robot position.')
+            # Primary stop path: reset waypoint_converter's internal waypoint source.
+            stop_pose = Pose2D()
+            stop_pose.x = float(self.latest_pose_x)
+            stop_pose.y = float(self.latest_pose_y)
+            stop_pose.theta = 0.0
+            self.way_point_pub.publish(stop_pose)
+            self.get_logger().info('Published stop Pose2D to /way_point_with_heading.')
+        self._stop_cmd_vel_count = 0
 
         completed_goal = self.object_goal
         self.object_goal = ''
@@ -1201,8 +1286,14 @@ class VLMNavigatorNode(Node):
         self.latest_detections = []
         self.target_detection_buffer.clear()
 
+        # Broadcast empty goal so detector nodes (e.g., sam2_detector) stop inferencing.
+        clear_goal_msg = String()
+        clear_goal_msg.data = ''
+        self.goal_pub.publish(clear_goal_msg)
+        self.get_logger().info('Published empty /object_goal to stop detector inference.')
+
         self.get_logger().info(
-            f'Goal "{completed_goal}" completed. Waiting for next /object_goal.'
+            f'Goal "{completed_goal}" completed.'
         )
 
     def _publish_live_bev_debug(self):
@@ -1541,8 +1632,19 @@ class VLMNavigatorNode(Node):
 
         u = 0.5 * (x1 + x2)
         bw = max(1.0, abs(x2 - x1))
-        theta = math.atan((u - cx_img) / fx)
+        # Angle from image centre (positive = right of image centre)
+        theta_img = math.atan((u - cx_img) / fx)
         half_theta = max(math.atan((0.5 * bw) / fx), math.radians(1.0))
+        # The egocentric image is cropped from the panorama at a heading offset
+        # (camera_heading_gain * camera_heading_sign * crop_heading + yaw_offset).
+        # theta_img is from the image centre, so the actual bearing from robot
+        # forward direction = proj_yaw + theta_img.
+        proj_yaw = (
+            float(self.camera_heading_gain) * float(self.camera_heading_sign)
+            * self._compute_camera_crop_heading()
+            + math.radians(float(self.camera_yaw_offset_deg))
+        )
+        theta = theta_img + proj_yaw
 
         pts = self.latest_scan
         dx = pts[:, 0] - self.latest_pose_x
