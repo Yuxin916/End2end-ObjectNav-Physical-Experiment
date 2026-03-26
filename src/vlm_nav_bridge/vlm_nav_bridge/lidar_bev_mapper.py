@@ -80,7 +80,7 @@ class BEVMapperConfig:
 
     arrow_color: Tuple = (0, 0, 255)   # red arrow (BGR)
     arrow_len_px: int = 22
-    arrow_width: int = 4
+    arrow_width: int = 5
     arrow_head_length: int = 10
     arrow_head_width: int = 8
     mark_radius: int = 4
@@ -89,10 +89,10 @@ class BEVMapperConfig:
     trail_alpha: float = 200 / 255.0
     trail_erode_ksize: int = 3
 
-    frontier_dot_radius: int = 5
+    frontier_dot_radius: int = 7
     frontier_color: Tuple = (0, 255, 0)       # green (RGB)
     frontier_outline: Tuple = (255, 255, 255) # white (RGB)
-    frontier_width: int = 2
+    frontier_width: int = 3
     frontier_font_size: float = 0.5  # cv2 scale
     selected_frontier_color: Tuple = (255, 165, 0)  # orange (RGB)
 
@@ -355,8 +355,16 @@ class LidarBEVMapper:
         c0, c1 = max(0, cc - s), min(n - 1, cc + s) + 1
         self.full_map[2, r0:r1, c0:c1] = 1.0
 
-        # Trajectory channel: cumulative
-        self.full_map[3, rc, cc] += 1.0
+        # Trajectory channel: cumulative footprint (match thicker trail look).
+        # Use a 3x3 square instead of a single pixel so trajectory visibility
+        # is closer to visualization_refined outputs.
+        ts = 1  # half-size for 3x3 footprint
+        tr0, tr1 = max(0, rc - ts), min(n - 1, rc + ts) + 1
+        tc0, tc1 = max(0, cc - ts), min(n - 1, cc + ts) + 1
+        self.full_map[3, tr0:tr1, tc0:tc1] = np.maximum(
+            self.full_map[3, tr0:tr1, tc0:tc1],
+            1.0
+        )
 
     def _extract_local_map(self):
         """Crop ±crop_radius cells around robot and resize to output_size."""
