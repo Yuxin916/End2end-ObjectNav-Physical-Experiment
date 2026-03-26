@@ -95,6 +95,15 @@ def generate_launch_description():
     }.items()
   )
 
+  start_waypoint_converter = IncludeLaunchDescription(
+    FrontendLaunchDescriptionSource(os.path.join(
+      get_package_share_directory('waypoint_converter'), 'launch', 'waypoint_converter.launch')
+    ),
+    launch_arguments={
+      'world_name': world_name,
+    }.items()
+  )
+
   start_joy = Node(
     package='joy', 
     executable='joy_node',
@@ -148,6 +157,7 @@ def generate_launch_description():
   ld.add_action(start_sensor_scan_generation)
   ld.add_action(start_arise_slam)
   ld.add_action(start_visualization_tools)
+  ld.add_action(start_waypoint_converter)
   ld.add_action(start_joy)
   ld.add_action(start_mid360)
   ld.add_action(start_unitree_webrtc)

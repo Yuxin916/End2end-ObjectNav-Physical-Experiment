@@ -33,7 +33,7 @@ vlm_navigator:
     # Seconds between VLM inference calls (wall-clock timer).
     # Also re-triggers early when the robot reaches the current waypoint.
     # Lower = more responsive, higher = less GPU load.
-    inference_interval: 5.0
+    inference_interval: 10.0
 
     # Beam search width used by InternVL generation.
     # MP3D default is 1 (greedy-like).
@@ -213,17 +213,14 @@ vlm_navigator:
 
     # Distance threshold (metres) to declare the current waypoint "reached".
     # When robot_distance < threshold, the VLM inference timer re-triggers early.
-    goal_reached_threshold: 0.5
+    goal_reached_threshold: 2.0
 
     # Distance threshold (metres) to declare a TARGET waypoint reached.
     # When reached, vlm_navigator marks current goal success, publishes /vlm_target_reached=true,
     # clears internal object_goal, and waits for the next /object_goal command.
     # Set <= 0 to reuse goal_reached_threshold.
-    target_reached_threshold: 0.5
+    target_reached_threshold: 2.0
 
-    # If true, changing /object_goal resets mapper occupancy state and frontier memory,
-    # matching single-episode MP3D semantics. Set false for multi-goal continuous runs.
-    reset_map_on_goal_change: false
 
     # TF frame for published waypoints. Must match local_planner's expected frame.
     waypoint_frame: "map"
@@ -340,6 +337,13 @@ vlm_navigator:
     # Minimum number of lidar points required inside the gate to confirm 3D target position.
     # If fewer points found, the 2D bbox centre is projected at a fallback depth instead.
     target_min_assoc_points: 8
+
+    # Maximum 2-D displacement (metres) between a newly lidar-estimated target position and
+    # the currently locked position before the lock is refreshed.
+    # Small jitter from lidar noise (<<1 m) keeps the locked position; a large jump
+    # (e.g. target physically moved, or a different object detected) triggers a refresh.
+    # Default 5.0 m — comfortably above lidar noise but below "different object" distance.
+    target_lock_update_dist_m: 5.0
 
 
     # ==========================================================================
