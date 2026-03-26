@@ -49,7 +49,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
 from sensor_msgs.msg import PointCloud2, Image
 from nav_msgs.msg import Odometry
-from geometry_msgs.msg import PointStamped
+from geometry_msgs.msg import PointStamped, Pose2D
 from std_msgs.msg import String, Bool
 
 import cv2
@@ -184,6 +184,11 @@ class VLMNavigatorNode(Node):
         self.target_pixel_local: Optional[Tuple[float, float]] = None
         self.target_semantic: Optional[str] = None
         self.target_confidence: float = 0.0
+        # Locked target state — world position fixed at first confirmed detection,
+        # refreshed only when the new estimate moves > target_lock_update_dist_m.
+        self.target_locked_world_xyz: Optional[Tuple[float, float, float]] = None
+        self.target_locked_semantic: Optional[str] = None
+        self.target_locked_bbox: Optional[list] = None
         self.latest_detection_overlay_rgb: Optional[np.ndarray] = None
         self.latest_mask_overlay_rgb: Optional[np.ndarray] = None
 
@@ -234,7 +239,7 @@ class VLMNavigatorNode(Node):
         # Publications
         # ------------------------------------------------------------------
         self.way_point_pub = self.create_publisher(
-            PointStamped, '/way_point', default_qos
+            Pose2D, '/way_point_with_heading', default_qos
         )
         self.bev_debug_pub = self.create_publisher(
             Image, '/vlm_bev_debug', default_qos
@@ -395,13 +400,12 @@ class VLMNavigatorNode(Node):
         self.declare_parameter('target_match_label_mode', 'normalized')
         # Keep default aligned with launch/yaml: accept non-SAM2 detector outputs.
         self.declare_parameter('target_require_sam2', False)
-        # Episode semantics switch: when true, changing goal resets map/frontier memory.
-        self.declare_parameter('reset_map_on_goal_change', True)
         self.declare_parameter('target_state_ttl_sec', 2.0)
         self.declare_parameter('target_lidar_min_range', 0.5)
         self.declare_parameter('target_lidar_max_range', 10.0)
         self.declare_parameter('target_lateral_gate_m', 0.8)
         self.declare_parameter('target_min_assoc_points', 8)
+        self.declare_parameter('target_lock_update_dist_m', 3.0)
         self.declare_parameter('max_sensor_skew_sec', 0.5)
         self.declare_parameter('write_visualize', True)
         self.declare_parameter('bev_only', False)
@@ -469,12 +473,12 @@ class VLMNavigatorNode(Node):
         self.target_temporal_min_hits = g('target_temporal_min_hits').value
         self.target_match_label_mode = g('target_match_label_mode').value
         self.target_require_sam2 = g('target_require_sam2').value
-        self.reset_map_on_goal_change = g('reset_map_on_goal_change').value
         self.target_state_ttl_sec = g('target_state_ttl_sec').value
         self.target_lidar_min_range = g('target_lidar_min_range').value
         self.target_lidar_max_range = g('target_lidar_max_range').value
         self.target_lateral_gate_m = g('target_lateral_gate_m').value
         self.target_min_assoc_points = g('target_min_assoc_points').value
+        self.target_lock_update_dist_m = g('target_lock_update_dist_m').value
         self.max_sensor_skew_sec = g('max_sensor_skew_sec').value
         self.write_visualize = g('write_visualize').value
         self.bev_only = g('bev_only').value
@@ -852,23 +856,6 @@ class VLMNavigatorNode(Node):
         if new_goal != self.object_goal:
             self.get_logger().info(f'Object goal changed: "{new_goal}"')
             self.object_goal = new_goal
-            # Optional episode-style reset on goal switch.
-            if self.reset_map_on_goal_change and self._pose_received:
-                self.mapper.reset(
-                    self.latest_pose_x,
-                    self.latest_pose_y,
-                    self.latest_pose_z,
-                )
-                if self.latest_yaw is not None and np.isfinite(self.latest_yaw):
-                    self.initial_yaw = float(self.latest_yaw)
-                    self._last_reliable_yaw_abs = float(self.latest_yaw)
-                else:
-                    self.initial_yaw = None
-                    self._last_reliable_yaw_abs = None
-                self.last_camera_heading_rad = 0.0
-                self.last_camera_heading_source = 'init'
-                self._last_heading_debug_log_s = 0.0
-                self._prev_pose_xy = None
             self.frontier_birth_rgb.clear()
             self.target_birth_rgb = None
             self.latest_detection = None
@@ -878,6 +865,9 @@ class VLMNavigatorNode(Node):
             self.target_pixel_local = None
             self.target_semantic = None
             self.target_confidence = 0.0
+            self.target_locked_world_xyz = None
+            self.target_locked_semantic = None
+            self.target_locked_bbox = None
             self.current_wp_x = None
             self.current_wp_y = None
             self.current_wp_is_target = False
@@ -1089,12 +1079,13 @@ class VLMNavigatorNode(Node):
         )
 
         # ---- Publish waypoint -------------------------------------------
-        wp_msg = PointStamped()
-        wp_msg.header.stamp = self.get_clock().now().to_msg()
-        wp_msg.header.frame_id = self.waypoint_frame
-        wp_msg.point.x = wx
-        wp_msg.point.y = wy
-        wp_msg.point.z = 0.0
+        # Publish as Pose2D to /way_point_with_heading so waypoint_converter
+        # can apply traversability adjustment before forwarding to local_planner.
+        # theta=0 means no heading preference at arrival.
+        wp_msg = Pose2D()
+        wp_msg.x = float(wx)
+        wp_msg.y = float(wy)
+        wp_msg.theta = 0.0
         self.way_point_pub.publish(wp_msg)
 
         self.current_wp_x = wx
@@ -1188,12 +1179,10 @@ class VLMNavigatorNode(Node):
         # Stop the robot: publish current position as waypoint so local_planner
         # has no distance left to cover → robot halts.
         if self.latest_pose_x is not None:
-            stop_msg = PointStamped()
-            stop_msg.header.stamp = self.get_clock().now().to_msg()
-            stop_msg.header.frame_id = self.waypoint_frame
-            stop_msg.point.x = self.latest_pose_x
-            stop_msg.point.y = self.latest_pose_y
-            stop_msg.point.z = 0.0
+            stop_msg = Pose2D()
+            stop_msg.x = float(self.latest_pose_x)
+            stop_msg.y = float(self.latest_pose_y)
+            stop_msg.theta = 0.0
             self.way_point_pub.publish(stop_msg)
             self.get_logger().info('Published stop waypoint at current robot position.')
 
@@ -1446,29 +1435,76 @@ class VLMNavigatorNode(Node):
         return 'sam2' in src
 
     def _update_target_state(self):
-        """Update target_found and target BEV position from external detections + lidar."""
+        """Update target_found and target BEV position from external detections + lidar.
+
+        Once a target is confirmed (temporal buffer satisfied + lidar association succeeds)
+        its world position is LOCKED and no longer re-estimated from scratch each call.
+        Only the local BEV pixel is reprojected each tick to smoothly follow robot movement.
+        The lock is refreshed when the new lidar estimate differs from the locked position
+        by more than target_lock_update_dist_m (default 3 m), allowing the target to be
+        updated if it has genuinely moved.  The lock is cleared when the temporal buffer
+        falls below min_hits or the detection TTL expires.
+        """
         now_s = self.get_clock().now().nanoseconds / 1e9
-        self.target_found = False
-        self.target_pixel_local = None
-        self.target_world_xyz = None
-        self.target_semantic = None
 
-        if self.latest_detection is None:
+        # --- Check whether the detection stream is still valid ---
+        detection_expired = (
+            self.latest_detection is None
+            or now_s - self.latest_detection_msg_time > float(self.target_state_ttl_sec)
+        )
+        buffer_insufficient = (
+            len(self.target_detection_buffer) < int(self.target_temporal_min_hits)
+            or sum(self.target_detection_buffer) < int(self.target_temporal_min_hits)
+        )
+
+        if detection_expired or buffer_insufficient:
+            # Clear lock — target no longer consistently detected
+            self.target_locked_world_xyz = None
+            self.target_locked_semantic = None
+            self.target_locked_bbox = None
+            self.target_found = False
+            self.target_pixel_local = None
+            self.target_world_xyz = None
+            self.target_semantic = None
             return
-        if now_s - self.latest_detection_msg_time > float(self.target_state_ttl_sec):
-            return
-        if len(self.target_detection_buffer) < int(self.target_temporal_min_hits):
-            return
-        if sum(self.target_detection_buffer) < int(self.target_temporal_min_hits):
-            return
+
         if self.latest_scan is None or self.latest_pose_x is None or self.latest_yaw is None:
+            self.target_found = False
+            self.target_pixel_local = None
+            self.target_world_xyz = None
+            self.target_semantic = None
             return
 
-        assoc_world = self._associate_target_world_from_lidar(self.latest_detection)
-        if assoc_world is None:
-            return
+        # --- Acquire or conditionally refresh the world-position lock ---
+        if self.target_locked_world_xyz is None:
+            # No lock yet — attempt to acquire from lidar association
+            assoc_world = self._associate_target_world_from_lidar(self.latest_detection)
+            if assoc_world is None:
+                self.target_found = False
+                self.target_pixel_local = None
+                self.target_world_xyz = None
+                self.target_semantic = None
+                return
+            self.target_locked_world_xyz = assoc_world
+            self.target_locked_semantic = str(self.latest_detection.get('label', self.object_goal))
+            self.target_locked_bbox = list(self.latest_detection.get('bbox', []))
+            if self.target_birth_rgb is None and self.latest_rgb_pil is not None:
+                self.target_birth_rgb = self.latest_rgb_pil
+        else:
+            # Lock exists — check if the new estimate has moved significantly
+            assoc_world = self._associate_target_world_from_lidar(self.latest_detection)
+            if assoc_world is not None:
+                lx, ly, _ = self.target_locked_world_xyz
+                nx, ny, _ = assoc_world
+                dist = math.sqrt((nx - lx) ** 2 + (ny - ly) ** 2)
+                if dist > float(self.target_lock_update_dist_m):
+                    # New position differs significantly — refresh lock
+                    self.target_locked_world_xyz = assoc_world
+                    self.target_locked_semantic = str(self.latest_detection.get('label', self.object_goal))
+                    self.target_locked_bbox = list(self.latest_detection.get('bbox', []))
 
-        wx, wy, wz = assoc_world
+        # --- Reproject locked world position → current local BEV pixel ---
+        wx, wy, wz = self.target_locked_world_xyz
         pr, pc = world_to_local_pixel(
             world_x=wx,
             world_y=wy,
@@ -1480,14 +1516,16 @@ class VLMNavigatorNode(Node):
         )
         in_local = (0.0 <= pr < float(self.output_size)) and (0.0 <= pc < float(self.output_size))
         if not in_local:
+            self.target_found = False
+            self.target_pixel_local = None
+            self.target_world_xyz = None
+            self.target_semantic = None
             return
 
         self.target_found = True
         self.target_world_xyz = (float(wx), float(wy), float(wz))
         self.target_pixel_local = (float(pr), float(pc))
-        self.target_semantic = str(self.latest_detection.get('label', self.object_goal))
-        if self.target_birth_rgb is None and self.latest_rgb_pil is not None:
-            self.target_birth_rgb = self.latest_rgb_pil
+        self.target_semantic = self.target_locked_semantic
         self._publish_target_marker(wx, wy)
         self._publish_target_debug_overlay()
 
@@ -1513,7 +1551,10 @@ class VLMNavigatorNode(Node):
         cy = math.cos(self.latest_yaw)
         sy = math.sin(self.latest_yaw)
         forward = cy * dx + sy * dy
-        right = -sy * dx + cy * dy
+        # Robot right direction (90° CW from heading): (sin(yaw), -cos(yaw)).
+        # right_component = sin(yaw)*dx - cos(yaw)*dy.
+        # The ROS body y-axis is LEFT (-right), so y_body = -sy*dx+cy*dy = -right (wrong sign).
+        right = sy * dx - cy * dy
         dist2d = np.sqrt(dx * dx + dy * dy)
 
         min_r = float(self.target_lidar_min_range)
@@ -1549,11 +1590,12 @@ class VLMNavigatorNode(Node):
         if self.latest_rgb_pil is None:
             return
         arr = np.array(self.latest_rgb_pil.convert('RGB'))
-        if self.latest_detection is not None:
-            x1, y1, x2, y2 = [int(v) for v in self.latest_detection.get('bbox', [0, 0, 0, 0])]
+        # Draw from locked bbox/label so the overlay is stable once the target is confirmed
+        if self.target_locked_bbox and len(self.target_locked_bbox) == 4:
+            x1, y1, x2, y2 = [int(v) for v in self.target_locked_bbox]
             cv2.rectangle(arr, (x1, y1), (x2, y2), (255, 128, 0), 2)
-            label = self.latest_detection.get('label', '')
-            conf = float(self.latest_detection.get('confidence', 0.0))
+            label = self.target_locked_semantic or ''
+            conf = float(self.target_confidence)
             cv2.putText(
                 arr,
                 f'{label} {conf:.2f}',
@@ -1564,6 +1606,38 @@ class VLMNavigatorNode(Node):
                 1,
                 cv2.LINE_AA,
             )
+        # Reproject locked 3D world position back to image pixel (green crosshair).
+        # If the lidar association is correct this should sit inside the orange bbox above.
+        if (self.target_locked_world_xyz is not None
+                and self.latest_pose_x is not None
+                and self.latest_yaw is not None):
+            wx, wy, wz = self.target_locked_world_xyz
+            rdx = wx - self.latest_pose_x
+            rdy = wy - self.latest_pose_y
+            rdz = wz - (self.latest_pose_z if self.latest_pose_z is not None else 0.0)
+            cy_yaw = math.cos(self.latest_yaw)
+            sy_yaw = math.sin(self.latest_yaw)
+            fwd = cy_yaw * rdx + sy_yaw * rdy
+            right_c = sy_yaw * rdx - cy_yaw * rdy   # correct right formula
+            if fwd > 0.1:
+                cx_img = (float(self.camera_project_width) - 1.0) * 0.5
+                cy_img = (float(self.camera_project_height) - 1.0) * 0.5
+                hfov = math.radians(float(self.camera_project_hfov_deg))
+                fx_c = cx_img / max(math.tan(hfov * 0.5), 1e-6)
+                vfov = 2.0 * math.atan(
+                    math.tan(hfov * 0.5)
+                    * float(self.camera_project_height) / max(float(self.camera_project_width), 1.0)
+                )
+                fy_c = cy_img / max(math.tan(vfov * 0.5), 1e-6)
+                u_proj = int(round(cx_img + fx_c * right_c / fwd))
+                v_proj = int(round(cy_img - fy_c * rdz / fwd))
+                out_w = int(self.camera_project_width)
+                out_h = int(self.camera_project_height)
+                if 0 <= u_proj < out_w and 0 <= v_proj < out_h:
+                    r = 10
+                    cv2.circle(arr, (u_proj, v_proj), r, (0, 220, 0), 2)
+                    cv2.line(arr, (u_proj - r - 4, v_proj), (u_proj + r + 4, v_proj), (0, 220, 0), 2)
+                    cv2.line(arr, (u_proj, v_proj - r - 4), (u_proj, v_proj + r + 4), (0, 220, 0), 2)
         self._publish_rgb_image(self.target_debug_pub, arr, frame_id='camera')
 
     def _publish_sam2_debug_overlay(self, detections):
