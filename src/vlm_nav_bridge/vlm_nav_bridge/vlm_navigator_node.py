@@ -958,8 +958,11 @@ class VLMNavigatorNode(Node):
         if self.mapper.local_map is not None:
             local_r, local_c = self.mapper.get_local_robot_pixel()
             try:
-                frontier_pts = self.frontier_detector.extract(
+                frontier_raw = self.frontier_detector.extract(
                     self.mapper.local_map, local_r, local_c
+                )
+                frontier_pts, _, _ = self._filter_frontiers_for_reach(
+                    frontier_raw, self.mapper.local_map, local_r, local_c
                 )
                 frontier_rgb_images = []
                 for fr, fc in frontier_pts:
@@ -1047,8 +1050,16 @@ class VLMNavigatorNode(Node):
         target_pixel = self.target_pixel_local
 
         # ---- Extract frontiers ------------------------------------------
-        frontiers = self.frontier_detector.extract(
+        raw_frontiers = self.frontier_detector.extract(
             local_map, local_r, local_c
+        )
+        frontiers, pre_removed, post_removed = self._filter_frontiers_for_reach(
+            raw_frontiers, local_map, local_r, local_c
+        )
+        self.get_logger().info(
+            f'Frontier filter counts: raw={len(raw_frontiers)} pre_removed={pre_removed} '
+            f'post_removed={post_removed} final={len(frontiers)} '
+            f'(radius={self._effective_frontier_filter_distance_m():.2f}m)'
         )
 
         # ---- Render BEV image -------------------------------------------
@@ -1320,7 +1331,8 @@ class VLMNavigatorNode(Node):
         target_pixel = self.target_pixel_local
 
         # Always compute current frontiers for live RVIZ updates.
-        frontiers = self.frontier_detector.extract(local_map, local_r, local_c)
+        raw_frontiers = self.frontier_detector.extract(local_map, local_r, local_c)
+        frontiers, _, _ = self._filter_frontiers_for_reach(raw_frontiers, local_map, local_r, local_c)
         selected_idx = None
         if (
             self.current_wp_x is not None and self.current_wp_y is not None and
@@ -1349,6 +1361,86 @@ class VLMNavigatorNode(Node):
         )
         # /fov: live BEV for RVIZ. /vlm_bev_debug is frozen to the last VLM inference input.
         self._publish_rgb_image(self.fov_pub, bev_live, frame_id='map')
+
+    def _effective_frontier_filter_distance_m(self) -> float:
+        """Distance used to remove frontiers that would already count as reached."""
+        goal_th = max(0.0, float(self.goal_reached_threshold))
+        target_th = float(self.target_reached_threshold)
+        if target_th <= 0.0:
+            target_th = goal_th
+        return max(goal_th, target_th)
+
+    def _filter_frontiers_for_reach(
+        self,
+        frontiers: np.ndarray,
+        local_map: np.ndarray,
+        robot_pixel_row: float,
+        robot_pixel_col: float,
+    ) -> Tuple[np.ndarray, int, int]:
+        """Two-stage frontier filter: pre-distance + post-adjusted safety check."""
+        if frontiers is None or len(frontiers) == 0:
+            return np.empty((0, 2), dtype=np.int32), 0, 0
+        radius_m = self._effective_frontier_filter_distance_m()
+        if radius_m <= 0.0 or self.latest_pose_x is None or self.latest_pose_y is None:
+            return frontiers.astype(np.int32), 0, 0
+
+        # Stage 1: pre-filter by direct robot-to-frontier world distance.
+        pre_kept = []
+        pre_removed = 0
+        for fr, fc in frontiers:
+            wx, wy = local_pixel_to_world(
+                pixel_row=float(fr),
+                pixel_col=float(fc),
+                robot_x=self.latest_pose_x,
+                robot_y=self.latest_pose_y,
+                crop_radius=self.crop_radius,
+                output_size=self.output_size,
+                resolution=self.map_resolution,
+            )
+            if math.hypot(wx - float(self.latest_pose_x), wy - float(self.latest_pose_y)) <= radius_m:
+                pre_removed += 1
+                continue
+            pre_kept.append((int(fr), int(fc)))
+
+        if not pre_kept:
+            return np.empty((0, 2), dtype=np.int32), pre_removed, 0
+
+        # Stage 2: converter-aware approximation.
+        # Estimate post-converter target by snapping to nearest traversable local pixel.
+        traversable = (
+            (local_map[1] >= float(self.exp_pred_threshold))
+            & (local_map[0] < float(self.map_pred_threshold))
+        )
+        trav_rr, trav_cc = np.where(traversable)
+        h, w = traversable.shape
+        post_kept = []
+        post_removed = 0
+        for fr_i, fc_i in pre_kept:
+            rr = min(max(int(round(fr_i)), 0), h - 1)
+            cc = min(max(int(round(fc_i)), 0), w - 1)
+            adj_r, adj_c = rr, cc
+            if not traversable[rr, cc] and trav_rr.size > 0:
+                d2 = (trav_rr - rr) ** 2 + (trav_cc - cc) ** 2
+                nearest = int(np.argmin(d2))
+                adj_r = int(trav_rr[nearest])
+                adj_c = int(trav_cc[nearest])
+            awx, awy = local_pixel_to_world(
+                pixel_row=float(adj_r),
+                pixel_col=float(adj_c),
+                robot_x=self.latest_pose_x,
+                robot_y=self.latest_pose_y,
+                crop_radius=self.crop_radius,
+                output_size=self.output_size,
+                resolution=self.map_resolution,
+            )
+            if math.hypot(awx - float(self.latest_pose_x), awy - float(self.latest_pose_y)) <= radius_m:
+                post_removed += 1
+                continue
+            post_kept.append((fr_i, fc_i))
+
+        if not post_kept:
+            return np.empty((0, 2), dtype=np.int32), pre_removed, post_removed
+        return np.array(post_kept, dtype=np.int32), pre_removed, post_removed
 
     def _local_pixels_to_global_cells(self, local_pixels: np.ndarray) -> np.ndarray:
         if local_pixels is None or len(local_pixels) == 0:
