@@ -170,6 +170,7 @@ class VLMNavigatorNode(Node):
 
         # Frontier birth RGB (dual-ViT templates)
         self.latest_rgb_pil: PILImage.Image = None
+        self.latest_panoramic_arr: Optional[np.ndarray] = None  # raw panoramic before projection
         self.frontier_birth_rgb: dict = {}    # (ix, iy) → PIL.Image
         self.target_birth_rgb: Optional[PILImage.Image] = None
 
@@ -307,6 +308,7 @@ class VLMNavigatorNode(Node):
         # ------------------------------------------------------------------
         self._model_loaded = False
         self._loading = False
+        self._last_vlm_bev_snapshot: Optional[np.ndarray] = None
         # One-shot timer: fires once 2 s after startup to load the model
         if not self.bev_only:
             self._load_timer = self.create_timer(2.0, self._load_model_once)
@@ -597,6 +599,7 @@ class VLMNavigatorNode(Node):
                 return
             panoramic_rgb = arr.copy()
             if self.camera_is_panorama:
+                self.latest_panoramic_arr = panoramic_rgb  # store raw panoramic for per-frontier crop
                 arr = self._project_panorama_to_pinhole(arr)
             self.latest_rgb_pil = PILImage.fromarray(arr)
             if self.write_visualize:
@@ -684,7 +687,8 @@ class VLMNavigatorNode(Node):
             return None
         return None
 
-    def _project_panorama_to_pinhole(self, pano_rgb: np.ndarray) -> np.ndarray:
+    def _project_panorama_to_pinhole(self, pano_rgb: np.ndarray,
+                                      heading_override: Optional[float] = None) -> np.ndarray:
         """
         Project an equirectangular panorama to a pinhole view.
 
@@ -692,12 +696,18 @@ class VLMNavigatorNode(Node):
           - Input panorama center column is robot forward at zero yaw.
           - Output view is aligned to computed crop heading
             (initial-relative yaw with robust fallback).
+
+        Parameters
+        ----------
+        heading_override : float, optional
+            If provided, use this initial-relative heading (radians) instead of
+            the current robot heading. Used for per-frontier birth RGB crops.
         """
         h_in, w_in = pano_rgb.shape[:2]
         out_w = int(self.camera_project_width)
         out_h = int(self.camera_project_height)
         hfov = math.radians(float(self.camera_project_hfov_deg))
-        crop_heading = self._compute_camera_crop_heading()
+        crop_heading = heading_override if heading_override is not None else self._compute_camera_crop_heading()
         # Image longitude increases to the right; ROS yaw is CCW.
         # camera_heading_sign controls frame convention, camera_heading_gain
         # controls how much heading is applied for the current panorama source.
@@ -731,6 +741,28 @@ class VLMNavigatorNode(Node):
             interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_WRAP
         )
         return projected
+
+    def _crop_pano_towards(self, wx: float, wy: float) -> PILImage.Image:
+        """Return an egocentric PIL image cropped from the panorama towards world point (wx, wy).
+
+        Matches the training convention: each frontier's birth RGB is the view from the
+        robot looking towards that frontier, not the current robot heading.
+        Falls back to latest_rgb_pil if panoramic image is unavailable.
+        """
+        if self.latest_panoramic_arr is not None:
+            angle_world = math.atan2(wy - self.latest_pose_y, wx - self.latest_pose_x)
+            heading_rel = self._wrap_to_pi(angle_world - (self.initial_yaw or 0.0))
+            arr = self._project_panorama_to_pinhole(self.latest_panoramic_arr,
+                                                    heading_override=heading_rel)
+            return PILImage.fromarray(arr)
+        if self.latest_rgb_pil is not None:
+            return self.latest_rgb_pil
+        # Gray placeholder when no image data is available yet
+        placeholder = np.full(
+            (int(self.camera_project_height), int(self.camera_project_width), 3),
+            128, dtype=np.uint8,
+        )
+        return PILImage.fromarray(placeholder)
 
     @staticmethod
     def _wrap_to_pi(angle: float) -> float:
@@ -878,19 +910,19 @@ class VLMNavigatorNode(Node):
                 self.latest_yaw if self.latest_yaw is not None else 0.0,
             )
         self._publish_live_bev_debug()
+        # Republish frozen VLM inference input at 5 Hz to keep /vlm_bev_debug alive in RVIZ.
+        if self._last_vlm_bev_snapshot is not None:
+            self._publish_bev_debug(self._last_vlm_bev_snapshot)
 
-        # Update frontier birth RGBs at 5 Hz so they track frontier discovery time,
-        # not just VLM step time (mirrors mp3d_traj_sam.py per-step frontier_birth update).
-        if (self.vlm is not None
-                and self.vlm.is_dual_vit
-                and self.latest_rgb_pil is not None
-                and self.mapper.local_map is not None):
+        # Update frontier birth RGBs at 5 Hz and publish Frontier RGB Debug.
+        # Always runs when local_map is available; camera is optional (gray placeholder used if absent).
+        if self.mapper.local_map is not None:
             local_r, local_c = self.mapper.get_local_robot_pixel()
             try:
                 frontier_pts = self.frontier_detector.extract(
                     self.mapper.local_map, local_r, local_c
                 )
-                current_rgb = self.latest_rgb_pil
+                frontier_rgb_images = []
                 for fr, fc in frontier_pts:
                     wx, wy = local_pixel_to_world(
                         pixel_row=float(fr), pixel_col=float(fc),
@@ -900,7 +932,13 @@ class VLMNavigatorNode(Node):
                     )
                     key = (round(wx / _BIRTH_GRID_M), round(wy / _BIRTH_GRID_M))
                     if key not in self.frontier_birth_rgb:
-                        self.frontier_birth_rgb[key] = current_rgb
+                        # Crop panorama towards this specific frontier for correct birth view.
+                        self.frontier_birth_rgb[key] = self._crop_pano_towards(wx, wy)
+                    frontier_rgb_images.append(self.frontier_birth_rgb[key])
+                # Publish N-tile mosaic for N frontiers.
+                mosaic = self._build_frontier_rgb_mosaic(frontier_rgb_images)
+                if mosaic is not None:
+                    self._publish_rgb_image(self.frontier_rgb_debug_pub, mosaic, frame_id='map')
             except Exception:
                 pass  # Never let birth RGB update crash the debug timer
 
@@ -1071,6 +1109,7 @@ class VLMNavigatorNode(Node):
             draw_fov=True,
         )
         self._publish_bev_debug(bev_rgb_sel)
+        self._last_vlm_bev_snapshot = bev_rgb_sel.copy()
         if self.write_visualize:
             self._publish_visual_debug_maps(frontiers, target_pixel, selected_idx=idx)
         self.get_logger().info(
@@ -1216,8 +1255,7 @@ class VLMNavigatorNode(Node):
             target_position=target_pixel,
             draw_fov=True,
         )
-        # /vlm_bev_debug: primary BEV debug stream; /fov: explicit FOV view used in RVIZ layouts.
-        self._publish_bev_debug(bev_live)
+        # /fov: live BEV for RVIZ. /vlm_bev_debug is frozen to the last VLM inference input.
         self._publish_rgb_image(self.fov_pub, bev_live, frame_id='map')
 
     def _local_pixels_to_global_cells(self, local_pixels: np.ndarray) -> np.ndarray:

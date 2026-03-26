@@ -94,7 +94,7 @@ class BEVMapperConfig:
     frontier_outline: Tuple = (255, 255, 255) # white (RGB)
     frontier_width: int = 2
     frontier_font_size: float = 0.5  # cv2 scale
-    selected_frontier_color: Tuple = (255, 215, 0)  # gold (RGB)
+    selected_frontier_color: Tuple = (255, 165, 0)  # orange (RGB)
 
     fov_color: Tuple = (100, 200, 255)  # BGR
     fov_alpha: float = 0.3
