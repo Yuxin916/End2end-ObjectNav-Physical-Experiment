@@ -177,6 +177,9 @@ class VLMNavigatorNode(Node):
         # is missed by one of the subscribers during startup races.
         self._goal_rebroadcast_value: str = ''
         self._goal_rebroadcast_remaining: int = 0
+        # Detection-driven interrupt state (no-cooldown hybrid policy).
+        self._last_detection_signature: Optional[Tuple[Any, ...]] = None
+        self._pending_detection_interrupt: bool = False
 
         # Frontier birth RGB (dual-ViT templates)
         self.latest_rgb_pil: PILImage.Image = None
@@ -696,6 +699,9 @@ class VLMNavigatorNode(Node):
         self.target_detection_buffer.append(best is not None)
         if best is not None:
             self.target_confidence = float(best['confidence'])
+        change_reason = self._compute_detection_change_reason(best)
+        if change_reason is not None:
+            self._request_detection_interrupt(change_reason)
 
     def _detector_detection_debug_callback(self, msg: Image):
         """Forward detector bbox visualization to bridge debug topics."""
@@ -1021,6 +1027,12 @@ class VLMNavigatorNode(Node):
             self._run_vlm_step_once()
         finally:
             self._running_vlm_step = False
+        # Drain at most one queued detection interrupt after current run.
+        if self._pending_detection_interrupt:
+            self._pending_detection_interrupt = False
+            if self._can_trigger_detection_interrupt():
+                self.get_logger().info('Running queued VLM interrupt from detection change.')
+                self._run_vlm_step()
 
     def _run_vlm_step_once(self):
         """Core step: BEV → frontiers → VLM → waypoint."""
@@ -1525,6 +1537,83 @@ class VLMNavigatorNode(Node):
         src = str(det.get('source', det.get('model', det.get('detector', '')))).lower()
         return 'sam2' in src
 
+    @staticmethod
+    def _bbox_iou_xyxy(box_a, box_b) -> float:
+        """Compute IoU between two [x1, y1, x2, y2] boxes."""
+        if box_a is None or box_b is None:
+            return 0.0
+        ax1, ay1, ax2, ay2 = [float(v) for v in box_a]
+        bx1, by1, bx2, by2 = [float(v) for v in box_b]
+        inter_x1 = max(ax1, bx1)
+        inter_y1 = max(ay1, by1)
+        inter_x2 = min(ax2, bx2)
+        inter_y2 = min(ay2, by2)
+        inter_w = max(0.0, inter_x2 - inter_x1)
+        inter_h = max(0.0, inter_y2 - inter_y1)
+        inter = inter_w * inter_h
+        area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+        area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+        denom = area_a + area_b - inter
+        if denom <= 0.0:
+            return 0.0
+        return inter / denom
+
+    def _compute_detection_signature(self, det: Optional[Dict[str, Any]]) -> Optional[Tuple[Any, ...]]:
+        """Detection signature for change tracking (presence+label+bbox+coarse conf)."""
+        if det is None:
+            return None
+        label = str(det.get('label', '')).strip().lower()
+        bbox = det.get('bbox', None)
+        if bbox is None or len(bbox) != 4:
+            bbox_q = None
+        else:
+            # Quantize to suppress tiny jitter.
+            bbox_q = tuple(int(round(float(v))) for v in bbox)
+        conf = float(det.get('confidence', 0.0))
+        conf_bin = int(round(conf * 10.0))
+        return (label, bbox_q, conf_bin)
+
+    def _compute_detection_change_reason(self, best: Optional[Dict[str, Any]]) -> Optional[str]:
+        """Return a human-readable reason when best detection changed meaningfully."""
+        new_sig = self._compute_detection_signature(best)
+        prev_sig = self._last_detection_signature
+        self._last_detection_signature = new_sig
+        if prev_sig is None and new_sig is None:
+            return None
+        if prev_sig is None and new_sig is not None:
+            return 'target appeared'
+        if prev_sig is not None and new_sig is None:
+            return 'target disappeared'
+        # Both present: compare label and bbox geometry.
+        prev_label, prev_bbox, _ = prev_sig
+        new_label, new_bbox, _ = new_sig
+        if prev_label != new_label:
+            return f'label changed: {prev_label} -> {new_label}'
+        iou = self._bbox_iou_xyxy(prev_bbox, new_bbox)
+        if iou < 0.6:
+            return f'bbox changed (IoU={iou:.2f})'
+        return None
+
+    def _can_trigger_detection_interrupt(self) -> bool:
+        """Preconditions for detection-driven immediate VLM inference."""
+        return (
+            self._pose_received
+            and self._model_loaded
+            and bool(self.object_goal)
+            and not self._hold_position_after_success
+        )
+
+    def _request_detection_interrupt(self, reason: str):
+        """No-cooldown detection interrupt: run now or queue one immediate retry."""
+        if not self._can_trigger_detection_interrupt():
+            return
+        if self._running_vlm_step:
+            self._pending_detection_interrupt = True
+            self.get_logger().info(f'Detection changed ({reason}); queued VLM interrupt.')
+            return
+        self.get_logger().info(f'Detection changed ({reason}); running immediate VLM interrupt.')
+        self._run_vlm_step()
+
     def _update_target_state(self):
         """Update target_found and target BEV position from external detections + lidar.
 
@@ -1537,6 +1626,7 @@ class VLMNavigatorNode(Node):
         falls below min_hits or the detection TTL expires.
         """
         now_s = self.get_clock().now().nanoseconds / 1e9
+        had_lock_before = self.target_locked_world_xyz is not None
 
         # --- Check whether the detection stream is still valid ---
         detection_expired = (
@@ -1557,6 +1647,8 @@ class VLMNavigatorNode(Node):
             self.target_pixel_local = None
             self.target_world_xyz = None
             self.target_semantic = None
+            if had_lock_before:
+                self._request_detection_interrupt('target lock cleared')
             return
 
         if self.latest_scan is None or self.latest_pose_x is None or self.latest_yaw is None:
@@ -1581,6 +1673,7 @@ class VLMNavigatorNode(Node):
             self.target_locked_bbox = list(self.latest_detection.get('bbox', []))
             if self.target_birth_rgb is None and self.latest_rgb_pil is not None:
                 self.target_birth_rgb = self.latest_rgb_pil
+            self._request_detection_interrupt('target lock acquired')
         else:
             # Lock exists — check if the new estimate has moved significantly
             assoc_world = self._associate_target_world_from_lidar(self.latest_detection)
@@ -1593,6 +1686,9 @@ class VLMNavigatorNode(Node):
                     self.target_locked_world_xyz = assoc_world
                     self.target_locked_semantic = str(self.latest_detection.get('label', self.object_goal))
                     self.target_locked_bbox = list(self.latest_detection.get('bbox', []))
+                    self._request_detection_interrupt(
+                        f'target lock moved by {dist:.2f}m (> {float(self.target_lock_update_dist_m):.2f}m)'
+                    )
 
         # --- Reproject locked world position → current local BEV pixel ---
         wx, wy, wz = self.target_locked_world_xyz
