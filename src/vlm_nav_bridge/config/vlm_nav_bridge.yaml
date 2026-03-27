@@ -33,7 +33,7 @@ vlm_navigator:
     # Seconds between VLM inference calls (wall-clock timer).
     # Also re-triggers early when the robot reaches the current waypoint.
     # Lower = more responsive, higher = less GPU load.
-    inference_interval: 10.0
+    inference_interval: 30.0
 
     # Beam search width used by InternVL generation.
     # MP3D default is 1 (greedy-like).
@@ -213,13 +213,13 @@ vlm_navigator:
 
     # Distance threshold (metres) to declare the current waypoint "reached".
     # When robot_distance < threshold, the VLM inference timer re-triggers early.
-    goal_reached_threshold: 2.0
+    goal_reached_threshold: 0.5
 
     # Distance threshold (metres) to declare a TARGET waypoint reached.
     # When reached, vlm_navigator marks current goal success, publishes /vlm_target_reached=true,
     # clears internal object_goal, and waits for the next /object_goal command.
     # Set <= 0 to reuse goal_reached_threshold.
-    target_reached_threshold: 2.0
+    target_reached_threshold: 0.5
 
 
     # TF frame for published waypoints. Must match local_planner's expected frame.
@@ -344,6 +344,10 @@ vlm_navigator:
     # (e.g. target physically moved, or a different object detected) triggers a refresh.
     # Default 5.0 m — comfortably above lidar noise but below "different object" distance.
     target_lock_update_dist_m: 5.0
+
+    # If true, skip target lock refresh when frozen.
+    # This prevents the target from being updated when the robot is moving.
+    target_lock_freeze: true
 
 
     # ==========================================================================

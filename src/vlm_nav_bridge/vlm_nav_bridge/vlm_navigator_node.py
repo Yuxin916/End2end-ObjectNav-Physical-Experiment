@@ -337,7 +337,7 @@ class VLMNavigatorNode(Node):
         self.create_timer(0.25, self._goal_rebroadcast_timer_callback)
         # Always-on visual debug publisher (independent from VLM decision timing).
         self.live_debug_timer = self.create_timer(
-            0.2, self._live_debug_timer_callback
+            0.05, self._live_debug_timer_callback
         )
         # High-rate stop timer (20 Hz): publishes cmd_vel=0 after goal success to
         # override local_planner regardless of joySpeed/speedHandler state.
@@ -441,6 +441,7 @@ class VLMNavigatorNode(Node):
         self.declare_parameter('target_lateral_gate_m', 0.8)
         self.declare_parameter('target_min_assoc_points', 8)
         self.declare_parameter('target_lock_update_dist_m', 3.0)
+        self.declare_parameter('target_lock_freeze', True)
         self.declare_parameter('max_sensor_skew_sec', 0.5)
         self.declare_parameter('write_visualize', True)
         self.declare_parameter('bev_only', False)
@@ -514,6 +515,7 @@ class VLMNavigatorNode(Node):
         self.target_lateral_gate_m = g('target_lateral_gate_m').value
         self.target_min_assoc_points = g('target_min_assoc_points').value
         self.target_lock_update_dist_m = g('target_lock_update_dist_m').value
+        self.target_lock_freeze = g('target_lock_freeze').value
         self.max_sensor_skew_sec = g('max_sensor_skew_sec').value
         self.write_visualize = g('write_visualize').value
         self.bev_only = g('bev_only').value
@@ -700,7 +702,7 @@ class VLMNavigatorNode(Node):
         if best is not None:
             self.target_confidence = float(best['confidence'])
         change_reason = self._compute_detection_change_reason(best)
-        if change_reason is not None:
+        if change_reason is not None and not self.target_lock_freeze:
             self._request_detection_interrupt(change_reason)
 
     def _detector_detection_debug_callback(self, msg: Image):
@@ -1030,8 +1032,9 @@ class VLMNavigatorNode(Node):
             self._run_vlm_step_once()
         finally:
             self._running_vlm_step = False
+
         # Drain at most one queued detection interrupt after current run.
-        if self._pending_detection_interrupt:
+        if self._pending_detection_interrupt and not self.target_lock_freeze:
             self._pending_detection_interrupt = False
             if self._can_trigger_detection_interrupt():
                 self.get_logger().info('Running queued VLM interrupt from detection change.')
@@ -1712,10 +1715,13 @@ class VLMNavigatorNode(Node):
         Once a target is confirmed (temporal buffer satisfied + lidar association succeeds)
         its world position is LOCKED and no longer re-estimated from scratch each call.
         Only the local BEV pixel is reprojected each tick to smoothly follow robot movement.
-        The lock is refreshed when the new lidar estimate differs from the locked position
-        by more than target_lock_update_dist_m (default 3 m), allowing the target to be
-        updated if it has genuinely moved.  The lock is cleared when the temporal buffer
-        falls below min_hits or the detection TTL expires.
+
+        If target_lock_freeze is True, then after the first successful lock acquisition:
+          - the lock is never refreshed,
+          - the lock is not cleared when detections expire,
+          - detection-change VLM interrupts are suppressed.
+
+        A new /object_goal still resets the lock state in _goal_callback().
         """
         now_s = self.get_clock().now().nanoseconds / 1e9
         had_lock_before = self.target_locked_world_xyz is not None
@@ -1731,17 +1737,21 @@ class VLMNavigatorNode(Node):
         )
 
         if detection_expired or buffer_insufficient:
-            # Clear lock — target no longer consistently detected
-            self.target_locked_world_xyz = None
-            self.target_locked_semantic = None
-            self.target_locked_bbox = None
-            self.target_found = False
-            self.target_pixel_local = None
-            self.target_world_xyz = None
-            self.target_semantic = None
-            if had_lock_before:
-                self._request_detection_interrupt('target lock cleared')
-            return
+            if self.target_lock_freeze and self.target_locked_world_xyz is not None:
+                # Frozen mode: keep the locked target position even if detections go quiet.
+                pass
+            else:
+                # Clear lock — target no longer consistently detected
+                self.target_locked_world_xyz = None
+                self.target_locked_semantic = None
+                self.target_locked_bbox = None
+                self.target_found = False
+                self.target_pixel_local = None
+                self.target_world_xyz = None
+                self.target_semantic = None
+                if had_lock_before:
+                    self._request_detection_interrupt('target lock cleared')
+                return
 
         if self.latest_scan is None or self.latest_pose_x is None or self.latest_yaw is None:
             self.target_found = False
@@ -1760,27 +1770,32 @@ class VLMNavigatorNode(Node):
                 self.target_world_xyz = None
                 self.target_semantic = None
                 return
+
             self.target_locked_world_xyz = assoc_world
             self.target_locked_semantic = str(self.latest_detection.get('label', self.object_goal))
             self.target_locked_bbox = list(self.latest_detection.get('bbox', []))
             if self.target_birth_rgb is None and self.latest_rgb_pil is not None:
                 self.target_birth_rgb = self.latest_rgb_pil
+
+            # Keep the first lock-acquired interrupt even in freeze mode,
+            # so the VLM can immediately navigate toward the target.
             self._request_detection_interrupt('target lock acquired')
+
         else:
-            # Lock exists — check if the new estimate has moved significantly
-            assoc_world = self._associate_target_world_from_lidar(self.latest_detection)
-            if assoc_world is not None:
-                lx, ly, _ = self.target_locked_world_xyz
-                nx, ny, _ = assoc_world
-                dist = math.sqrt((nx - lx) ** 2 + (ny - ly) ** 2)
-                if dist > float(self.target_lock_update_dist_m):
-                    # New position differs significantly — refresh lock
-                    self.target_locked_world_xyz = assoc_world
-                    self.target_locked_semantic = str(self.latest_detection.get('label', self.object_goal))
-                    self.target_locked_bbox = list(self.latest_detection.get('bbox', []))
-                    self._request_detection_interrupt(
-                        f'target lock moved by {dist:.2f}m (> {float(self.target_lock_update_dist_m):.2f}m)'
-                    )
+            # Lock exists — only refresh it in non-freeze mode.
+            if not self.target_lock_freeze:
+                assoc_world = self._associate_target_world_from_lidar(self.latest_detection)
+                if assoc_world is not None:
+                    lx, ly, _ = self.target_locked_world_xyz
+                    nx, ny, _ = assoc_world
+                    dist = math.sqrt((nx - lx) ** 2 + (ny - ly) ** 2)
+                    if dist > float(self.target_lock_update_dist_m):
+                        self.target_locked_world_xyz = assoc_world
+                        self.target_locked_semantic = str(self.latest_detection.get('label', self.object_goal))
+                        self.target_locked_bbox = list(self.latest_detection.get('bbox', []))
+                        self._request_detection_interrupt(
+                            f'target lock moved by {dist:.2f}m (> {float(self.target_lock_update_dist_m):.2f}m)'
+                        )
 
         # --- Reproject locked world position → current local BEV pixel ---
         wx, wy, wz = self.target_locked_world_xyz

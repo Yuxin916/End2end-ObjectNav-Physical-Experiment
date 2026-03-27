@@ -129,6 +129,10 @@ class LidarBEVMapper:
         self.robot_g_col: int = 0    # robot grid column
         self.robot_g_row: int = 0    # robot grid row
 
+        # Previous robot grid cell — used to draw a continuous line in ch 3
+        self._prev_g_row: Optional[int] = None
+        self._prev_g_col: Optional[int] = None
+
         # Local map (crop) in pixels, shape (4, output_size, output_size)
         self.local_map: Optional[np.ndarray] = None
 
@@ -164,6 +168,9 @@ class LidarBEVMapper:
         self.robot_g_col = g_col
         self.robot_g_row = g_row
         self.local_map = None
+
+        self._prev_g_row = None
+        self._prev_g_col = None
 
         self._initialised = True
 
@@ -355,16 +362,27 @@ class LidarBEVMapper:
         c0, c1 = max(0, cc - s), min(n - 1, cc + s) + 1
         self.full_map[2, r0:r1, c0:c1] = 1.0
 
-        # Trajectory channel: cumulative footprint (match thicker trail look).
-        # Use a 3x3 square instead of a single pixel so trajectory visibility
-        # is closer to visualization_refined outputs.
-        ts = 1  # half-size for 3x3 footprint
-        tr0, tr1 = max(0, rc - ts), min(n - 1, rc + ts) + 1
-        tc0, tc1 = max(0, cc - ts), min(n - 1, cc + ts) + 1
-        self.full_map[3, tr0:tr1, tc0:tc1] = np.maximum(
-            self.full_map[3, tr0:tr1, tc0:tc1],
-            1.0
-        )
+        # Trajectory channel: draw a line from the previous grid cell to the
+        # current one so the trail is connected even when updates are sparse.
+        # cv2.line uses (col, row) = (x, y) convention.
+        traj_ch = self.full_map[3]
+        if self._prev_g_row is not None and self._prev_g_col is not None:
+            cv2.line(
+                traj_ch,
+                (int(self._prev_g_col), int(self._prev_g_row)),
+                (int(cc), int(rc)),
+                1.0,
+                thickness=3,  # ~3x3 footprint to match training appearance
+            )
+        else:
+            # First stamp: just paint a small square at current position.
+            ts = 1
+            tr0, tr1 = max(0, rc - ts), min(n - 1, rc + ts) + 1
+            tc0, tc1 = max(0, cc - ts), min(n - 1, cc + ts) + 1
+            traj_ch[tr0:tr1, tc0:tc1] = np.maximum(traj_ch[tr0:tr1, tc0:tc1], 1.0)
+
+        self._prev_g_row = rc
+        self._prev_g_col = cc
 
     def _extract_local_map(self):
         """Crop ±crop_radius cells around robot and resize to output_size."""
@@ -516,9 +534,14 @@ class LidarBEVMapper:
         # img is in BGR convention (OpenCV); cvtColor(BGR→RGB) is applied at the end.
         # trail_color=(255,0,0) BGR = blue in RGB output (matches VLN training convention).
         # arrow_color=(0,0,255) BGR = red in RGB output (matches VLN training convention).
-        traj_mask = self.local_map[3] > 0
+        traj_mask = (self.local_map[3] > 0).astype(np.uint8)
         if traj_mask.any():
-            img[traj_mask] = list(self.cfg.trail_color)   # blue in output ✓
+            # Optionally dilate the rendered trail to close sub-pixel gaps after
+            # the 300→448 INTER_NEAREST resize (visual only, does not touch the map).
+            k = int(self.cfg.trail_erode_ksize)
+            if k > 1:
+                traj_mask = cv2.dilate(traj_mask, np.ones((k, k), np.uint8))
+            img[traj_mask > 0] = list(self.cfg.trail_color)   # blue in output ✓
         agent_mask = self.local_map[2] > 0
         if agent_mask.any():
             img[agent_mask] = list(self.cfg.arrow_color)  # red in output ✓
