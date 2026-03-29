@@ -13,7 +13,7 @@ vlm_navigator:
 
     # Path to InternVL checkpoint directory (contains pytorch_model*.bin + config.json).
     # PosD is the best-performing deployable template (dual-ViT, angular soft CE training).
-    checkpoint: "/home/tsaisplus/projects/VLN_CL_CoTNav/all_log/experiments/prompt_revision/a100_dualvit_llm-64_mlp-train-patch-32768-acc1_BEVftFOV_FrontierRGB_PosD__FRONTIER_PIXEL_NUMBER_ONLY/checkpoints"
+    checkpoint: "/home/tsaisplus/projects/VLN_CL_CoTNav/all_log/experiments/prompt_revision/a100_dualvit_llm-64_mlp-train-patch-32768-acc1_BEVftFOV_FrontierRGB_PosA__FRONTIER_PIXEL_NUMBER_ONLY/checkpoints"
 
     # Prompt template — must match the checkpoint.
     # Single-ViT templates (no camera required):
@@ -25,7 +25,7 @@ vlm_navigator:
     #   BEVftFOV_FrontierRGB_PosB__FRONTIER_PIXEL_NUMBER_ONLY_STRATEGY2  (embeddings only)
     #   BEVftFOV_FrontierRGB_PosC__FRONTIER_PIXEL_NUMBER_ONLY_STRATEGY2  (pairwise spatial)
     #   BEVftFOV_FrontierRGB_PosD__FRONTIER_PIXEL_NUMBER_ONLY_STRATEGY2  (PosC + angular soft CE, best SR)
-    template: "BEVftFOV_FrontierRGB_PosD__FRONTIER_PIXEL_NUMBER_ONLY_STRATEGY2"
+    template: "BEVftFOV_FrontierRGB_PosA__FRONTIER_PIXEL_NUMBER_ONLY_STRATEGY2"
 
     # GPU device for VLM inference. Use "cpu" for testing without GPU.
     device: "cuda:0"

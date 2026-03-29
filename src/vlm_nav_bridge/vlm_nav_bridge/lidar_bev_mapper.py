@@ -92,7 +92,7 @@ class BEVMapperConfig:
     frontier_dot_radius: int = 7
     frontier_color: Tuple = (0, 255, 0)       # green (RGB)
     frontier_outline: Tuple = (255, 255, 255) # white (RGB)
-    frontier_width: int = 3
+    frontier_width: int = 1
     frontier_font_size: float = 0.5  # cv2 scale
     selected_frontier_color: Tuple = (255, 165, 0)  # orange (RGB)
 
@@ -372,7 +372,7 @@ class LidarBEVMapper:
                 (int(self._prev_g_col), int(self._prev_g_row)),
                 (int(cc), int(rc)),
                 1.0,
-                thickness=3,  # ~3x3 footprint to match training appearance
+                thickness=2,  # ~3x3 footprint to match training appearance
             )
         else:
             # First stamp: just paint a small square at current position.
