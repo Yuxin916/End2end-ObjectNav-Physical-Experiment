@@ -113,9 +113,6 @@ class VLMNavigatorNode(Node):
             clear_border_px=self.frontier_clear_border_px,
             min_distance_m=self.frontier_min_distance_m,
             top_k=self.frontier_top_k,
-            max_samples_per_component=self.frontier_max_samples_per_component,
-            large_component_min_area=self.frontier_large_component_min_area,
-            sample_min_separation_px=self.frontier_sample_min_separation_px,
             resolution=self.map_resolution,
             crop_radius=self.crop_radius,
             output_size=self.output_size,
@@ -473,10 +470,6 @@ class VLMNavigatorNode(Node):
         self.declare_parameter('frontier_clear_border_px', 2)
         self.declare_parameter('frontier_min_distance_m', 0.7)
         self.declare_parameter('frontier_top_k', 5)
-        self.declare_parameter('frontier_max_samples_per_component', 3)
-        self.declare_parameter('frontier_large_component_min_area', 80)
-        self.declare_parameter('frontier_sample_min_separation_px', 20.0)
-
         self.declare_parameter('goal_reached_threshold', 0.5)
         # If <= 0, fallback to goal_reached_threshold.
         self.declare_parameter('target_reached_threshold', 0.5)
@@ -550,10 +543,6 @@ class VLMNavigatorNode(Node):
         self.frontier_clear_border_px = g('frontier_clear_border_px').value
         self.frontier_min_distance_m = g('frontier_min_distance_m').value
         self.frontier_top_k = g('frontier_top_k').value
-        self.frontier_max_samples_per_component = g('frontier_max_samples_per_component').value
-        self.frontier_large_component_min_area = g('frontier_large_component_min_area').value
-        self.frontier_sample_min_separation_px = g('frontier_sample_min_separation_px').value
-
         self.goal_reached_threshold = g('goal_reached_threshold').value
         self.target_reached_threshold = g('target_reached_threshold').value
         self.waypoint_reached_pause_sec = g('waypoint_reached_pause_sec').value
@@ -1106,9 +1095,7 @@ class VLMNavigatorNode(Node):
         if self.mapper.local_map is not None:
             local_r, local_c = self.mapper.get_local_robot_pixel()
             try:
-                frontier_raw = self.frontier_detector.extract(
-                    self.mapper.local_map, local_r, local_c
-                )
+                frontier_raw = self._extract_frontiers_global()
                 frontier_pts, _, _ = self._filter_frontiers_for_reach(
                     frontier_raw, self.mapper.local_map, local_r, local_c
                 )
@@ -1201,10 +1188,8 @@ class VLMNavigatorNode(Node):
         self._update_target_state()
         target_pixel = self.target_pixel_local
 
-        # ---- Extract frontiers ------------------------------------------
-        raw_frontiers = self.frontier_detector.extract(
-            local_map, local_r, local_c
-        )
+        # ---- Extract frontiers (global map for stability) -----------------
+        raw_frontiers = self._extract_frontiers_global()
         frontiers, pre_removed, post_removed = self._filter_frontiers_for_reach(
             raw_frontiers, local_map, local_r, local_c
         )
@@ -1528,7 +1513,7 @@ class VLMNavigatorNode(Node):
         target_pixel = self.target_pixel_local
 
         # Always compute current frontiers for live RVIZ updates.
-        raw_frontiers = self.frontier_detector.extract(local_map, local_r, local_c)
+        raw_frontiers = self._extract_frontiers_global()
         frontiers, _, _ = self._filter_frontiers_for_reach(raw_frontiers, local_map, local_r, local_c)
         selected_idx = None
         if (
@@ -1567,6 +1552,20 @@ class VLMNavigatorNode(Node):
         if target_th <= 0.0:
             target_th = goal_th
         return max(goal_th, target_th)
+
+    def _extract_frontiers_global(self) -> np.ndarray:
+        """Run frontier extraction on the global map and return local-pixel coords."""
+        if self.mapper.full_map is None or self.latest_pose_x is None:
+            return np.empty((0, 2), dtype=np.float32)
+        return self.frontier_detector.extract_from_global(
+            full_map=self.mapper.full_map,
+            robot_g_row=self.mapper.robot_g_row,
+            robot_g_col=self.mapper.robot_g_col,
+            robot_x=float(self.latest_pose_x),
+            robot_y=float(self.latest_pose_y),
+            crop_radius=self.crop_radius,
+            output_size=self.output_size,
+        )
 
     def _filter_frontiers_for_reach(
         self,

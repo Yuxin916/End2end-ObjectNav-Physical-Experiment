@@ -162,16 +162,16 @@ vlm_navigator:
     frontier_exp_threshold: 0.1
 
     # Dilation kernel size applied to obstacle cells before subtracting from frontier
-    # boundary.  1 = no dilation (frontiers may appear right against walls).
-    # LiDAR walls are sparse 1-cell lines; dilation thickens them and prevents
-    # frontiers from appearing inside/behind walls (replaces Habitat navmesh filter).
-    frontier_dilate_wall_ksize: 5
+    # boundary.  1 = no dilation (matches training).  Training used no dilation
+    # because frontier validity was checked via Habitat navmesh; for physical robot
+    # set to 3 if frontiers appear behind thin walls, but keep low to avoid flicker.
+    frontier_dilate_wall_ksize: 1
 
-    # Morphological closing kernel size applied to the explored mask.
-    # Fills small holes in the explored region that would otherwise generate
-    # spurious interior frontiers.
-    # 5 = 5×5 kernel fills gaps ≤ 2 cells wide. Increase if explored region is noisy.
-    frontier_close_explore_ksize: 5
+    # Morphological closing kernel size applied to the explored mask inside
+    # the frontier detector.  1 = no closing (recommended: _post_process_local_map
+    # already applies dilate+erode with 5×5 before frontier extraction runs;
+    # applying a second close causes instability / flashing).
+    frontier_close_explore_ksize: 1
 
     # Minimum frontier cluster area in pixels.
     # Clusters smaller than this are discarded as noise.
@@ -193,18 +193,6 @@ vlm_navigator:
     # Sorted by distance (nearest first), top-K kept.
     # Training used up to 32 candidates. Set to a large number to return all frontiers.
     frontier_top_k: 32
-
-    # Maximum number of candidate points sampled from one connected frontier component.
-    # >1 helps when the boundary forms one large arc/ring; gives VLM richer choices.
-    frontier_max_samples_per_component: 3
-
-    # Area threshold (pixels) to treat a frontier component as "large" and enable
-    # multi-point sampling. Smaller components still use one centroid candidate.
-    frontier_large_component_min_area: 50
-
-    # Minimum pixel separation between sampled points within the same component.
-    # Increase to spread candidates more; decrease to get denser candidates.
-    frontier_sample_min_separation_px: 10.0
 
 
     # ==========================================================================
