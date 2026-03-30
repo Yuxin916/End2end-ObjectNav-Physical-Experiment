@@ -2019,17 +2019,48 @@ class VLMNavigatorNode(Node):
         return (wx_far, wy_far, False)
 
     def _update_target_state(self):
-        """Update target_found and target BEV position from the latest detection.
+        """Update target_found and reproject target BEV position.
 
-        The waypoint is placed at the first obstacle hit along the detection
-        bearing (ray-cast on the accumulated BEV obstacle map).  If no obstacle
-        is found within lidar range, the waypoint is placed at range_max distance.
-        Every tick refreshes the bearing from the latest detection so the robot
-        continuously steers toward the visible target.
+        Mirrors training-code locking: once target_found=True and
+        target_world_xyz is set, the world position is NEVER recomputed.
+        Only the local BEV pixel is reprojected each tick (because the
+        BEV crop moves with the robot).
+
+        First detection: bearing + raycast -> lock world position.
+        Subsequent ticks: reproject locked position -> local pixel.
         """
         now_s = self.get_clock().now().nanoseconds / 1e9
 
-        # --- Check whether the detection stream is still valid ---
+        # =============================================================
+        # FAST PATH: target already locked -> just reproject to local px
+        # =============================================================
+        if self.target_found and self.target_world_xyz is not None:
+            if self.latest_pose_x is None:
+                return
+            wx, wy = float(self.target_world_xyz[0]), float(self.target_world_xyz[1])
+            pr, pc = world_to_local_pixel(
+                world_x=wx, world_y=wy,
+                robot_x=self.latest_pose_x, robot_y=self.latest_pose_y,
+                crop_radius=self.crop_radius, output_size=self.output_size,
+                resolution=self.map_resolution,
+            )
+            in_local = (0.0 <= pr < float(self.output_size)) and (0.0 <= pc < float(self.output_size))
+            if in_local:
+                self.target_pixel_local = (float(pr), float(pc))
+            else:
+                self.target_pixel_local = None
+            # #region agent log
+            import json as _json_dbg_rp; _dbg_rp = {"sessionId":"b233c0","hypothesisId":"H1_FIX","location":"vlm_navigator_node.py:_update_target_state:reproject","message":"target_reprojected_locked","data":{"wx":wx,"wy":wy,"pr":float(pr),"pc":float(pc),"in_local":in_local,"robot_x":float(self.latest_pose_x),"robot_y":float(self.latest_pose_y)},"timestamp":int(now_s*1000)}
+            with open("/home/tsaisplus/projects/VLN_CL_CoTNav/End2end-ObjectNav-Physical-Experiment/.cursor/debug-b233c0.log","a") as _f_rp: _f_rp.write(_json_dbg_rp.dumps(_dbg_rp)+"\n")
+            # #endregion
+            self._publish_target_marker(wx, wy)
+            return
+
+        # =============================================================
+        # SLOW PATH: target not yet found -> check detection & lock
+        # =============================================================
+
+        # --- Check whether the detection stream is valid ---
         detection_expired = (
             self.latest_detection is None
             or now_s - self.latest_detection_msg_time > float(self.target_state_ttl_sec)
@@ -2053,10 +2084,6 @@ class VLMNavigatorNode(Node):
                 )
                 self._last_gate_fail_log_s = now_s
                 self._last_gate_fail_state = gate_state
-            self.target_found = False
-            self.target_pixel_local = None
-            self.target_world_xyz = None
-            self.target_semantic = None
             return
 
         if self.latest_pose_x is None or self.latest_yaw is None:
@@ -2064,19 +2091,11 @@ class VLMNavigatorNode(Node):
                 f'[target_state] GATE FAIL no pose '
                 f'pose_x={self.latest_pose_x} yaw={self.latest_yaw}'
             )
-            self.target_found = False
-            self.target_pixel_local = None
-            self.target_world_xyz = None
-            self.target_semantic = None
             return
 
         # --- Compute bearing from detection bbox centre ---
         bbox = self.latest_detection.get('bbox', None)
         if bbox is None or len(bbox) != 4:
-            self.target_found = False
-            self.target_pixel_local = None
-            self.target_world_xyz = None
-            self.target_semantic = None
             return
 
         x1, y1, x2, y2 = [float(v) for v in bbox]
@@ -2119,26 +2138,27 @@ class VLMNavigatorNode(Node):
         in_local = (0.0 <= pr < float(self.output_size)) and (0.0 <= pc < float(self.output_size))
         label = str(self.latest_detection.get('label', self.object_goal))
         self._file_logger.info(
-            f'[target_state] bearing theta_img={math.degrees(theta_img):.1f}deg '
+            f'[target_state] LOCKING bearing theta_img={math.degrees(theta_img):.1f}deg '
             f'theta={math.degrees(theta):.1f}deg raycast_hit={raycast_hit} dist={raycast_dist:.2f}m '
             f'wp=({wx:.3f},{wy:.3f}) pixel=({pr:.1f},{pc:.1f}) in_local={in_local} '
             f'label={label}'
         )
         if not in_local:
-            self.target_found = False
-            self.target_pixel_local = None
-            self.target_world_xyz = None
-            self.target_semantic = None
             return
 
+        # --- LOCK the target world position (never recomputed after this) ---
         self.target_found = True
         self.target_world_xyz = (wx, wy, wz)
         self.target_pixel_local = (float(pr), float(pc))
         self.target_semantic = label
         self._file_logger.info(
-            f'[target_state] OK target_pixel_local=({pr:.1f},{pc:.1f}) '
-            f'target_found=True wp=({wx:.3f},{wy:.3f})'
+            f'[target_state] LOCKED target at world=({wx:.3f},{wy:.3f}) '
+            f'pixel=({pr:.1f},{pc:.1f})'
         )
+        # #region agent log
+        import json as _json_dbg2; _dbg_set = {"sessionId":"b233c0","hypothesisId":"H1_FIX","location":"vlm_navigator_node.py:_update_target_state:lock","message":"target_world_LOCKED","data":{"wx":float(wx),"wy":float(wy),"pr":float(pr),"pc":float(pc),"raycast_hit":raycast_hit,"raycast_dist":raycast_dist,"robot_x":float(self.latest_pose_x),"robot_y":float(self.latest_pose_y),"robot_yaw":float(self.latest_yaw)},"timestamp":int(self.get_clock().now().nanoseconds/1e6)}
+        with open("/home/tsaisplus/projects/VLN_CL_CoTNav/End2end-ObjectNav-Physical-Experiment/.cursor/debug-b233c0.log","a") as _f_dbg2: _f_dbg2.write(_json_dbg2.dumps(_dbg_set)+"\n")
+        # #endregion
         self._publish_target_marker(wx, wy)
         self._publish_target_debug_overlay()
 
