@@ -327,11 +327,6 @@ vlm_navigator:
     # Prevents navigating to stale target positions after the object moves out of view.
     target_state_ttl_sec: 3.0
 
-    # Distance (metres) to place the target waypoint along the detection bearing.
-    # Each time _update_target_state runs with a valid detection, a waypoint is placed
-    # this far ahead of the robot in the direction of the bbox centre.
-    # As the robot moves, new detections continuously refresh the bearing.
-    target_approach_step_m: 0.5
 
 
     # ==========================================================================

@@ -201,6 +201,7 @@ class VLMNavigatorNode(Node):
         self.target_world_xyz: Optional[Tuple[float, float, float]] = None
         self.target_pixel_local: Optional[Tuple[float, float]] = None
         self.target_semantic: Optional[str] = None
+        self._target_raycast_hit: bool = False
         self.target_confidence: float = 0.0
         self.latest_detection_overlay_rgb: Optional[np.ndarray] = None
         self.latest_mask_overlay_rgb: Optional[np.ndarray] = None
@@ -502,7 +503,6 @@ class VLMNavigatorNode(Node):
         # Keep default aligned with launch/yaml: accept non-SAM2 detector outputs.
         self.declare_parameter('target_require_sam2', False)
         self.declare_parameter('target_state_ttl_sec', 2.0)
-        self.declare_parameter('target_approach_step_m', 2.0)
         self.declare_parameter('target_tv_labels', ['tv_monitor', 'monitor', 'screen'])
         self.declare_parameter('target_screen_standoff_enable', False)
         self.declare_parameter('target_screen_standoff_m', 0.6)
@@ -578,7 +578,6 @@ class VLMNavigatorNode(Node):
         self.target_match_label_mode = g('target_match_label_mode').value
         self.target_require_sam2 = g('target_require_sam2').value
         self.target_state_ttl_sec = g('target_state_ttl_sec').value
-        self.target_approach_step_m = g('target_approach_step_m').value
         self.target_tv_labels = g('target_tv_labels').value
         self.target_screen_standoff_enable = g('target_screen_standoff_enable').value
         self.target_screen_standoff_m = g('target_screen_standoff_m').value
@@ -1360,7 +1359,9 @@ class VLMNavigatorNode(Node):
 
         self.current_wp_x = wx
         self.current_wp_y = wy
-        self.current_wp_is_target = bool(target_pixel is not None and idx == len(frontiers))
+        _is_target_selection = bool(target_pixel is not None and idx == len(frontiers))
+        _raycast_hit = getattr(self, '_target_raycast_hit', False)
+        self.current_wp_is_target = _is_target_selection and _raycast_hit
 
         # Re-render BEV with selected frontier highlighted
         bev_rgb_sel = self.mapper.render_local_bev(
@@ -1984,13 +1985,48 @@ class VLMNavigatorNode(Node):
         self.get_logger().info(f'Detection changed ({reason}); running immediate VLM interrupt.')
         self._run_vlm_step()
 
+    def _raycast_obstacle_along_bearing(self, bearing_world: float,
+                                         max_range_m: float = None) -> Tuple[float, float, bool]:
+        """Cast a ray on the global BEV obstacle map from robot position along bearing.
+
+        Returns (world_x, world_y, hit) where hit is True if an obstacle was found.
+        If no obstacle is found, returns the point at max_range along the bearing.
+        """
+        if max_range_m is None:
+            max_range_m = float(self.mapper.cfg.range_max)
+        res = float(self.mapper.cfg.resolution)
+        threshold = float(self.mapper.cfg.map_pred_threshold)
+        rx = float(self.latest_pose_x)
+        ry = float(self.latest_pose_y)
+        cos_b = math.cos(bearing_world)
+        sin_b = math.sin(bearing_world)
+        min_dist = max(0.3, float(self.mapper.cfg.range_min))
+
+        if self.mapper.full_map is not None:
+            n_steps = int(max_range_m / res)
+            start_step = int(min_dist / res)
+            for i in range(start_step, n_steps + 1):
+                d = i * res
+                wx = rx + d * cos_b
+                wy = ry + d * sin_b
+                gc = int((wx - self.mapper.map_origin_x) / res)
+                gr = int((wy - self.mapper.map_origin_y) / res)
+                if 0 <= gc < self.mapper.global_cells and 0 <= gr < self.mapper.global_cells:
+                    if self.mapper.full_map[0, gr, gc] >= threshold:
+                        return (wx, wy, True)
+
+        wx_far = rx + max_range_m * cos_b
+        wy_far = ry + max_range_m * sin_b
+        return (wx_far, wy_far, False)
+
     def _update_target_state(self):
         """Update target_found and target BEV position from the latest detection.
 
-        Instead of locking a 3D world position via lidar association, the waypoint
-        is placed at a fixed step distance along the bearing derived from the
-        detection bbox centre.  Every tick refreshes the bearing from the latest
-        detection so the robot continuously steers toward the visible target.
+        The waypoint is placed at the first obstacle hit along the detection
+        bearing (ray-cast on the accumulated BEV obstacle map).  If no obstacle
+        is found within lidar range, the waypoint is placed at range_max distance.
+        Every tick refreshes the bearing from the latest detection so the robot
+        continuously steers toward the visible target.
         """
         now_s = self.get_clock().now().nanoseconds / 1e9
 
@@ -2061,14 +2097,15 @@ class VLMNavigatorNode(Node):
         theta = theta_img + proj_yaw
 
         robot_yaw = float(self.latest_yaw)
-        step = float(self.target_approach_step_m)
         # Pinhole: u > cx → theta_img > 0 = target to the **right** in the image.
         # In map frame (yaw ψ CCW from +X), “right of forward” is a **clockwise** turn:
         # unit direction (cos(ψ - θ), sin(ψ - θ)).  Using ψ + θ mirrors left/right and
         # places the BEV target dot on the opposite side of the FOV from DET_CENTER.
-        wx = float(self.latest_pose_x) + step * math.cos(robot_yaw - theta)
-        wy = float(self.latest_pose_y) + step * math.sin(robot_yaw - theta)
+        bearing_world = robot_yaw - theta
+        wx, wy, raycast_hit = self._raycast_obstacle_along_bearing(bearing_world)
+        self._target_raycast_hit = raycast_hit
         wz = float(self.latest_pose_z) if self.latest_pose_z is not None else 0.0
+        raycast_dist = math.sqrt((wx - float(self.latest_pose_x))**2 + (wy - float(self.latest_pose_y))**2)
 
         if self.target_birth_rgb is None and self.latest_rgb_pil is not None:
             self.target_birth_rgb = self.latest_rgb_pil
@@ -2084,7 +2121,7 @@ class VLMNavigatorNode(Node):
         label = str(self.latest_detection.get('label', self.object_goal))
         self._file_logger.info(
             f'[target_state] bearing theta_img={math.degrees(theta_img):.1f}deg '
-            f'theta={math.degrees(theta):.1f}deg step={step:.1f}m '
+            f'theta={math.degrees(theta):.1f}deg raycast_hit={raycast_hit} dist={raycast_dist:.2f}m '
             f'wp=({wx:.3f},{wy:.3f}) pixel=({pr:.1f},{pc:.1f}) in_local={in_local} '
             f'label={label}'
         )
