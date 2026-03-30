@@ -2049,10 +2049,6 @@ class VLMNavigatorNode(Node):
                 self.target_pixel_local = (float(pr), float(pc))
             else:
                 self.target_pixel_local = None
-            # #region agent log
-            import json as _json_dbg_rp; _dbg_rp = {"sessionId":"b233c0","hypothesisId":"H1_FIX","location":"vlm_navigator_node.py:_update_target_state:reproject","message":"target_reprojected_locked","data":{"wx":wx,"wy":wy,"pr":float(pr),"pc":float(pc),"in_local":in_local,"robot_x":float(self.latest_pose_x),"robot_y":float(self.latest_pose_y)},"timestamp":int(now_s*1000)}
-            with open("/home/tsaisplus/projects/VLN_CL_CoTNav/End2end-ObjectNav-Physical-Experiment/.cursor/debug-b233c0.log","a") as _f_rp: _f_rp.write(_json_dbg_rp.dumps(_dbg_rp)+"\n")
-            # #endregion
             self._publish_target_marker(wx, wy)
             return
 
@@ -2155,10 +2151,6 @@ class VLMNavigatorNode(Node):
             f'[target_state] LOCKED target at world=({wx:.3f},{wy:.3f}) '
             f'pixel=({pr:.1f},{pc:.1f})'
         )
-        # #region agent log
-        import json as _json_dbg2; _dbg_set = {"sessionId":"b233c0","hypothesisId":"H1_FIX","location":"vlm_navigator_node.py:_update_target_state:lock","message":"target_world_LOCKED","data":{"wx":float(wx),"wy":float(wy),"pr":float(pr),"pc":float(pc),"raycast_hit":raycast_hit,"raycast_dist":raycast_dist,"robot_x":float(self.latest_pose_x),"robot_y":float(self.latest_pose_y),"robot_yaw":float(self.latest_yaw)},"timestamp":int(self.get_clock().now().nanoseconds/1e6)}
-        with open("/home/tsaisplus/projects/VLN_CL_CoTNav/End2end-ObjectNav-Physical-Experiment/.cursor/debug-b233c0.log","a") as _f_dbg2: _f_dbg2.write(_json_dbg2.dumps(_dbg_set)+"\n")
-        # #endregion
         self._publish_target_marker(wx, wy)
         self._publish_target_debug_overlay()
 
