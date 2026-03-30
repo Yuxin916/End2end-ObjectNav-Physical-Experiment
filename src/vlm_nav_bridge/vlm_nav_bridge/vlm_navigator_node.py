@@ -344,6 +344,27 @@ class VLMNavigatorNode(Node):
         self.create_timer(0.05, self._stop_cmd_vel_timer_callback)
 
         # ------------------------------------------------------------------
+        # Debug image saving
+        # ------------------------------------------------------------------
+        self._debug_image_cache: dict = {}
+        self._debug_save_subdirs: dict = {}
+        self._debug_save_counters: dict = {}
+        if self.debug_save_dir:
+            import os as _os
+            _slots = ('fov', 'vlm_bev_debug', 'frontier_rgb_debug',
+                      'sam2_detection_debug', 'sam2_segmentation_debug')
+            for _name in _slots:
+                _subdir = _os.path.join(self.debug_save_dir, _name)
+                _os.makedirs(_subdir, exist_ok=True)
+                self._debug_save_subdirs[_name] = _subdir
+                self._debug_save_counters[_name] = 0
+            self.create_timer(self.debug_save_interval_sec,
+                              self._save_debug_images_callback)
+            self.get_logger().info(
+                f'Debug image saving enabled → {self.debug_save_dir}'
+            )
+
+        # ------------------------------------------------------------------
         # Deferred model loading (load after node is spinning)
         # ------------------------------------------------------------------
         self._model_loaded = False
@@ -445,6 +466,8 @@ class VLMNavigatorNode(Node):
         self.declare_parameter('max_sensor_skew_sec', 0.5)
         self.declare_parameter('write_visualize', True)
         self.declare_parameter('bev_only', False)
+        self.declare_parameter('debug_save_dir', '')
+        self.declare_parameter('debug_save_interval_sec', 1.0)
 
     def _load_parameters(self):
         g = self.get_parameter
@@ -519,6 +542,8 @@ class VLMNavigatorNode(Node):
         self.max_sensor_skew_sec = g('max_sensor_skew_sec').value
         self.write_visualize = g('write_visualize').value
         self.bev_only = g('bev_only').value
+        self.debug_save_dir = g('debug_save_dir').value.strip()
+        self.debug_save_interval_sec = float(g('debug_save_interval_sec').value)
 
     # ------------------------------------------------------------------
     # Deferred model loading
@@ -709,11 +734,13 @@ class VLMNavigatorNode(Node):
         """Forward detector bbox visualization to bridge debug topics."""
         self.sam2_detection_debug_pub.publish(msg)
         self.latest_detection_overlay_rgb = self._decode_ros_rgb_image(msg)
+        self._cache_debug_image('sam2_detection_debug', self.latest_detection_overlay_rgb)
 
     def _detector_segmentation_debug_callback(self, msg: Image):
         """Forward detector segmentation visualization to bridge debug topics."""
         self.sam2_segmentation_debug_pub.publish(msg)
         self.latest_mask_overlay_rgb = self._decode_ros_rgb_image(msg)
+        self._cache_debug_image('sam2_segmentation_debug', self.latest_mask_overlay_rgb)
 
     def _decode_ros_rgb_image(self, msg: Image) -> Optional[np.ndarray]:
         """Decode ROS Image to RGB numpy image (best-effort)."""
@@ -983,6 +1010,7 @@ class VLMNavigatorNode(Node):
                 mosaic = self._build_frontier_rgb_mosaic(frontier_rgb_images)
                 if mosaic is not None:
                     self._publish_rgb_image(self.frontier_rgb_debug_pub, mosaic, frame_id='map')
+                    self._cache_debug_image('frontier_rgb_debug', mosaic)
             except Exception:
                 pass  # Never let birth RGB update crash the debug timer
 
@@ -1114,6 +1142,7 @@ class VLMNavigatorNode(Node):
                     frontier_rgb_mosaic,
                     frame_id='map',
                 )
+                self._cache_debug_image('frontier_rgb_debug', frontier_rgb_mosaic)
 
         # ---- VLM inference ----------------------------------------------
         t0 = time.time()
@@ -1274,6 +1303,24 @@ class VLMNavigatorNode(Node):
     def _publish_bev_debug(self, bev_rgb: np.ndarray):
         """Publish the BEV image as sensor_msgs/Image for RVIZ."""
         self._publish_rgb_image(self.bev_debug_pub, bev_rgb, frame_id='map')
+        self._cache_debug_image('vlm_bev_debug', bev_rgb)
+
+    def _cache_debug_image(self, name: str, img: np.ndarray):
+        """Store the latest RGB image for a named slot (flushed to disk at 1 Hz)."""
+        if self.debug_save_dir and img is not None:
+            self._debug_image_cache[name] = img
+
+    def _save_debug_images_callback(self):
+        """Write each cached debug image to its subfolder at ~1 Hz."""
+        import os as _os
+        for name, img in list(self._debug_image_cache.items()):
+            subdir = self._debug_save_subdirs.get(name)
+            if subdir is None:
+                continue
+            idx = self._debug_save_counters[name]
+            bgr = cv2.cvtColor(img.astype(np.uint8), cv2.COLOR_RGB2BGR)
+            cv2.imwrite(_os.path.join(subdir, f'{idx:06d}.png'), bgr)
+            self._debug_save_counters[name] = idx + 1
 
     def _mark_target_goal_success(self):
         """Mark current object goal as reached"""
@@ -1364,6 +1411,7 @@ class VLMNavigatorNode(Node):
         )
         # /fov: live BEV for RVIZ. /vlm_bev_debug is frozen to the last VLM inference input.
         self._publish_rgb_image(self.fov_pub, bev_live, frame_id='map')
+        self._cache_debug_image('fov', bev_live)
 
     def _effective_frontier_filter_distance_m(self) -> float:
         """Distance used to remove frontiers that would already count as reached."""
@@ -1998,7 +2046,9 @@ class VLMNavigatorNode(Node):
         self.latest_detection_overlay_rgb = det_img
         self.latest_mask_overlay_rgb = mask_img
         self._publish_rgb_image(self.sam2_detection_debug_pub, det_img, frame_id='camera')
+        self._cache_debug_image('sam2_detection_debug', det_img)
         self._publish_rgb_image(self.sam2_segmentation_debug_pub, mask_img, frame_id='camera')
+        self._cache_debug_image('sam2_segmentation_debug', mask_img)
 
     def _log_sensor_skew(self):
         """Parity check: log pose/scan/rgb timestamp skew."""

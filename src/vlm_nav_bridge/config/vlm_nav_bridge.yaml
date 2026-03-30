@@ -362,3 +362,18 @@ vlm_navigator:
     # NOTE: Visualization appearance (arrow size/color, trail color, frontier dot radius,
     # FOV overlay alpha) is hardcoded in BEVMapperConfig defaults in lidar_bev_mapper.py
     # and cannot be changed via this config file.
+
+
+    # ==========================================================================
+    # Debug Image Saving
+    # ==========================================================================
+
+    # Absolute path to directory where debug images are saved.
+    # Subdirectories are created automatically for each topic:
+    #   fov/, vlm_bev_debug/, frontier_rgb_debug/,
+    #   sam2_detection_debug/, sam2_segmentation_debug/
+    # Leave empty ("") to disable image saving entirely.
+    debug_save_dir: "/home/tsaisplus/projects/VLN_CL_CoTNav/End2end-ObjectNav-Physical-Experiment/debug_images"
+
+    # How often to write images to disk (seconds). Default 1.0 = 1 Hz.
+    debug_save_interval_sec: 1.0

@@ -33,3 +33,5 @@ data/
 .venv/
 
 .DS_Store
+
+debug_images/
