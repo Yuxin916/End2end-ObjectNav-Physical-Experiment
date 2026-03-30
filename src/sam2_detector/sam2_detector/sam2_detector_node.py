@@ -47,10 +47,13 @@ from pathlib import Path
 import numpy as np
 import cv2
 
+import math
+
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
+from nav_msgs.msg import Odometry
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
 
@@ -136,6 +139,10 @@ class SAM2DetectorNode(Node):
         self._dino_goal_ctx = ("", [], [])
         self._last_goal_for_init = ""
         self._last_inference_time: float = 0.0
+        # Fix 1: track last pose where temporal tracker was flushed.
+        self._last_flush_x: Optional[float] = None
+        self._last_flush_y: Optional[float] = None
+        self._last_flush_yaw: Optional[float] = None
         # Goal rebroadcast: improves delivery when one-shot /object_goal publish
         # is missed by peer nodes during startup races.
         self._goal_rebroadcast_value: str = ''
@@ -149,6 +156,7 @@ class SAM2DetectorNode(Node):
 
         self.create_subscription(Image, self.camera_topic, self._camera_callback, qos)
         self.create_subscription(String, '/object_goal', self._goal_callback, qos)
+        self.create_subscription(Odometry, '/state_estimation', self._odom_callback, qos)
 
         self.goal_pub = self.create_publisher(String, '/object_goal', qos)
         self.detection_pub = self.create_publisher(String, '/target_detection', qos)
@@ -193,6 +201,9 @@ class SAM2DetectorNode(Node):
         self.declare_parameter('temporal_min_hits', 3)
         self.declare_parameter('use_temporal_filter', True)
         self.declare_parameter('nms_threshold', 0.5)
+        # Fix 1: flush temporal tracker when robot moves significantly.
+        self.declare_parameter('movement_flush_dist_m', 0.3)
+        self.declare_parameter('movement_flush_turn_deg', 20.0)
 
     def _load_parameters(self):
         g = self.get_parameter
@@ -207,6 +218,8 @@ class SAM2DetectorNode(Node):
         self.camera_topic = g('camera_topic').value
         self.vln_repo_path = g('vln_repo_path').value
         self.scene_mode = str(g('scene_mode').value).strip().lower()
+        self.movement_flush_dist_m = float(g('movement_flush_dist_m').value)
+        self.movement_flush_turn_deg = float(g('movement_flush_turn_deg').value)
 
     def _ensure_vln_imports(self):
         """
@@ -282,6 +295,41 @@ class SAM2DetectorNode(Node):
         self.goal_pub.publish(String(data=self._goal_rebroadcast_value))
         self._goal_rebroadcast_remaining -= 1
 
+    def _odom_callback(self, msg: Odometry):
+        """Fix 1: flush temporal tracker when robot moves beyond threshold."""
+        if not self._model_loaded or self._dino_sam_perceiver is None:
+            return
+        p = msg.pose.pose.position
+        q = msg.pose.pose.orientation
+        x, y = float(p.x), float(p.y)
+        # Quaternion → yaw
+        siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
+        cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+        yaw = math.atan2(siny_cosp, cosy_cosp)
+
+        if self._last_flush_x is None:
+            self._last_flush_x, self._last_flush_y, self._last_flush_yaw = x, y, yaw
+            return
+
+        dist = math.sqrt((x - self._last_flush_x) ** 2 + (y - self._last_flush_y) ** 2)
+        dyaw = abs(math.atan2(
+            math.sin(yaw - self._last_flush_yaw),
+            math.cos(yaw - self._last_flush_yaw),
+        ))
+        dyaw_deg = math.degrees(dyaw)
+
+        if dist > self.movement_flush_dist_m or dyaw_deg > self.movement_flush_turn_deg:
+            try:
+                self._dino_sam_perceiver.sam.temporal_tracker.reset()
+            except Exception:
+                pass
+            # Force re-initialize on next inference so SAM tracking restarts cleanly.
+            self._last_goal_for_init = ""
+            self._last_flush_x, self._last_flush_y, self._last_flush_yaw = x, y, yaw
+            self.get_logger().debug(
+                f'Temporal tracker flushed: dist={dist:.2f}m turn={dyaw_deg:.1f}°'
+            )
+
     def _camera_callback(self, msg: Image):
         try:
             raw = bytes(msg.data)
@@ -318,7 +366,27 @@ class SAM2DetectorNode(Node):
         min_interval = 1.0 / max(0.1, self.inference_hz)
         if now - self._last_inference_time < min_interval * 0.9:
             return
+
+        # Fix 3: drop stale frames — if the latest image is older than 0.3 s,
+        # the robot has already moved and lidar association will use the wrong pose.
+        image_stamp_s = (
+            float(self.latest_rgb_stamp_sec) +
+            float(self.latest_rgb_stamp_nanosec) / 1e9
+        )
+        frame_age = now - image_stamp_s
+        if frame_age > 1.0:
+            self.get_logger().warn(
+                f'Dropping stale frame: age={frame_age:.3f}s > 0.3s',
+                throttle_duration_sec=2.0,
+            )
+            return
+
         self._last_inference_time = now
+
+        # Snapshot the image stamp before inference (it must not change mid-call).
+        snap_stamp_sec = int(self.latest_rgb_stamp_sec)
+        snap_stamp_nanosec = int(self.latest_rgb_stamp_nanosec)
+        snap_stamp_s = float(snap_stamp_sec) + float(snap_stamp_nanosec) / 1e9
 
         rgb = self.latest_rgb.copy()
         detections = self._run_detection_dino_sam_mp3d(rgb)
@@ -336,17 +404,21 @@ class SAM2DetectorNode(Node):
                     clean[k] = v.item()
                 else:
                     clean[k] = v
+            # Fix 1: stamp on each detection = image stamp so navigator snapshot
+            # lookup uses the correct pose/scan.
+            clean['stamp'] = snap_stamp_s
             json_detections.append(clean)
 
-        now_msg = self.get_clock().now().to_msg()
+        # Fix 1: top-level stamp also tracks image stamp, not inference time.
         payload = json.dumps({
             'goal': self.object_goal,
             'source': 'dino_sam',
             'frame_id': self.latest_rgb_frame_id,
-            'stamp_sec': int(now_msg.sec),
-            'stamp_nanosec': int(now_msg.nanosec),
-            'image_stamp_sec': int(self.latest_rgb_stamp_sec),
-            'image_stamp_nanosec': int(self.latest_rgb_stamp_nanosec),
+            'stamp': snap_stamp_s,
+            'stamp_sec': snap_stamp_sec,
+            'stamp_nanosec': snap_stamp_nanosec,
+            'image_stamp_sec': snap_stamp_sec,
+            'image_stamp_nanosec': snap_stamp_nanosec,
             'image_frame_id': self.latest_rgb_frame_id,
             'detections': json_detections,
         })
@@ -354,10 +426,11 @@ class SAM2DetectorNode(Node):
 
         if detections:
             self.get_logger().debug(
-                f'Published {len(detections)} detections for goal="{self.object_goal}"'
+                f'Published {len(detections)} detections for goal="{self.object_goal}" '
+                f'frame_age={frame_age:.3f}s'
             )
 
-        self._publish_debug(rgb, detections)
+        self._publish_debug(rgb, detections, snap_stamp_sec, snap_stamp_nanosec)
 
     def _run_detection_dino_sam_mp3d(self, rgb: np.ndarray) -> List[dict]:
         if self._dino_sam_perceiver is None:
@@ -451,7 +524,13 @@ class SAM2DetectorNode(Node):
     # Debug image
     # ------------------------------------------------------------------
 
-    def _publish_debug(self, rgb: np.ndarray, detections: List[dict]):
+    def _publish_debug(
+        self,
+        rgb: np.ndarray,
+        detections: List[dict],
+        stamp_sec: int = 0,
+        stamp_nanosec: int = 0,
+    ):
         if (
             not self.debug_detection_pub.get_subscription_count() and
             not self.debug_segmentation_pub.get_subscription_count()
@@ -489,7 +568,10 @@ class SAM2DetectorNode(Node):
 
         def _to_msg(img: np.ndarray) -> Image:
             msg = Image()
-            msg.header.stamp = self.get_clock().now().to_msg()
+            # Fix 2: use the original image stamp so the bbox overlay is
+            # temporally consistent with the frame it was detected on.
+            msg.header.stamp.sec = stamp_sec
+            msg.header.stamp.nanosec = stamp_nanosec
             msg.header.frame_id = 'camera'
             msg.height, msg.width = img.shape[:2]
             msg.encoding = 'rgb8'

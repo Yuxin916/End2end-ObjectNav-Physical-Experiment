@@ -163,6 +163,7 @@ class VLMNavigatorNode(Node):
         self.current_wp_x: float = None
         self.current_wp_y: float = None
         self.current_wp_is_target: bool = False
+        self._last_wp_reached_time: float = 0.0  # wall-clock time of last waypoint-reached retrigger
 
         self._pose_received = False
         self._scan_received = False
@@ -173,6 +174,8 @@ class VLMNavigatorNode(Node):
         # Hold-stop mode after goal success. While enabled, keep publishing stop
         # commands until a new non-empty /object_goal arrives.
         self._hold_position_after_success: bool = False
+        # Temporary pause after non-target waypoint reached.
+        self._hold_after_wp_reached_until_s: float = 0.0
         # Goal rebroadcast: improves delivery when one-shot /object_goal publish
         # is missed by one of the subscribers during startup races.
         self._goal_rebroadcast_value: str = ''
@@ -188,6 +191,8 @@ class VLMNavigatorNode(Node):
         self.target_birth_rgb: Optional[PILImage.Image] = None
 
         # External detector + temporal target state
+        self._last_gate_fail_log_s: float = 0.0
+        self._last_gate_fail_state: Optional[Tuple[bool, bool, bool]] = None
         self.latest_detection_msg_time: float = 0.0
         self.latest_detection: Optional[Dict[str, Any]] = None
         self.latest_detections: list = []
@@ -197,13 +202,9 @@ class VLMNavigatorNode(Node):
         self.target_pixel_local: Optional[Tuple[float, float]] = None
         self.target_semantic: Optional[str] = None
         self.target_confidence: float = 0.0
-        # Locked target state — world position fixed at first confirmed detection,
-        # refreshed only when the new estimate moves > target_lock_update_dist_m.
-        self.target_locked_world_xyz: Optional[Tuple[float, float, float]] = None
-        self.target_locked_semantic: Optional[str] = None
-        self.target_locked_bbox: Optional[list] = None
         self.latest_detection_overlay_rgb: Optional[np.ndarray] = None
         self.latest_mask_overlay_rgb: Optional[np.ndarray] = None
+        self._last_projected_crop_heading: Optional[float] = None
 
         # ------------------------------------------------------------------
         # QoS
@@ -291,6 +292,9 @@ class VLMNavigatorNode(Node):
         self.egocentric_rgb_pub = self.create_publisher(
             Image, '/egocentric_rgb', default_qos
         )
+        self.egocentric_rgb_debug_pub = self.create_publisher(
+            Image, '/egocentric_rgb_debug', default_qos
+        )
         self.frontier_rgb_debug_pub = self.create_publisher(
             Image, '/frontier_rgb_debug', default_qos
         )
@@ -349,9 +353,10 @@ class VLMNavigatorNode(Node):
         self._debug_image_cache: dict = {}
         self._debug_save_subdirs: dict = {}
         self._debug_save_counters: dict = {}
+        self._debug_save_last_size: dict = {}  # name → (h, w) of last written image
         if self.debug_save_dir:
             import os as _os
-            _slots = ('fov', 'vlm_bev_debug', 'frontier_rgb_debug',
+            _slots = ('fov', 'vlm_bev_debug', 'egocentric_rgb', 'frontier_rgb_debug',
                       'sam2_detection_debug', 'sam2_segmentation_debug')
             for _name in _slots:
                 _subdir = _os.path.join(self.debug_save_dir, _name)
@@ -363,6 +368,45 @@ class VLMNavigatorNode(Node):
             self.get_logger().info(
                 f'Debug image saving enabled → {self.debug_save_dir}'
             )
+
+        # ------------------------------------------------------------------
+        # File logger for target-detection diagnostics
+        # ------------------------------------------------------------------
+        import os as _os
+        import datetime as _dt
+        _log_dir = _os.path.join(
+            self.debug_save_dir if self.debug_save_dir else '.',
+            'log',
+        )
+        _os.makedirs(_log_dir, exist_ok=True)
+        _ts = _dt.datetime.now().strftime('%Y%m%d_%H%M%S')
+        _log_path = _os.path.join(_log_dir, f'target_debug_{_ts}.log')
+        self._file_logger = logging.getLogger(f'vlm_target_debug_{_ts}')
+        self._file_logger.setLevel(logging.DEBUG)
+        _fh = logging.FileHandler(_log_path)
+        _fh.setFormatter(logging.Formatter('%(asctime)s %(message)s'))
+        self._file_logger.addHandler(_fh)
+        self._file_logger.propagate = False
+        self.get_logger().info(f'Target debug log → {_log_path}')
+
+        # Bridge: also pipe rclpy node logger through _file_logger so every
+        # self.get_logger().info/warn/error call is captured on disk.
+        class _RclpyToFile(logging.Handler):
+            def __init__(self, flogger):
+                super().__init__()
+                self._fl = flogger
+            def emit(self, record):
+                self._fl.log(record.levelno, f'[ros] {self.format(record)}')
+        _bridge = _RclpyToFile(self._file_logger)
+        _bridge.setFormatter(logging.Formatter('%(message)s'))
+        # rclpy routes its logging through the 'rclpy' hierarchy; we attach to
+        # the node-specific child so we only capture this node's output.
+        _rclpy_node_logger = logging.getLogger(f'rclpy.{self.get_name()}')
+        if not _rclpy_node_logger.handlers:
+            _rclpy_node_logger.addHandler(_bridge)
+        # Also attach to root 'rclpy' logger to catch any direct calls
+        _rclpy_root_logger = logging.getLogger('rclpy')
+        _rclpy_root_logger.addHandler(_bridge)
 
         # ------------------------------------------------------------------
         # Deferred model loading (load after node is spinning)
@@ -435,6 +479,7 @@ class VLMNavigatorNode(Node):
         self.declare_parameter('goal_reached_threshold', 0.5)
         # If <= 0, fallback to goal_reached_threshold.
         self.declare_parameter('target_reached_threshold', 0.5)
+        self.declare_parameter('waypoint_reached_pause_sec', 2.0)
         self.declare_parameter('waypoint_frame', 'map')
         self.declare_parameter('camera_topic', '/camera/image')
         self.declare_parameter('camera_is_panorama', True)
@@ -457,12 +502,11 @@ class VLMNavigatorNode(Node):
         # Keep default aligned with launch/yaml: accept non-SAM2 detector outputs.
         self.declare_parameter('target_require_sam2', False)
         self.declare_parameter('target_state_ttl_sec', 2.0)
-        self.declare_parameter('target_lidar_min_range', 0.5)
-        self.declare_parameter('target_lidar_max_range', 10.0)
-        self.declare_parameter('target_lateral_gate_m', 0.8)
-        self.declare_parameter('target_min_assoc_points', 8)
-        self.declare_parameter('target_lock_update_dist_m', 3.0)
-        self.declare_parameter('target_lock_freeze', True)
+        self.declare_parameter('target_approach_step_m', 2.0)
+        self.declare_parameter('target_tv_labels', ['tv_monitor', 'monitor', 'screen'])
+        self.declare_parameter('target_screen_standoff_enable', False)
+        self.declare_parameter('target_screen_standoff_m', 0.6)
+        self.declare_parameter('target_screen_standoff_max_snap_m', 1.5)
         self.declare_parameter('max_sensor_skew_sec', 0.5)
         self.declare_parameter('write_visualize', True)
         self.declare_parameter('bev_only', False)
@@ -512,6 +556,7 @@ class VLMNavigatorNode(Node):
 
         self.goal_reached_threshold = g('goal_reached_threshold').value
         self.target_reached_threshold = g('target_reached_threshold').value
+        self.waypoint_reached_pause_sec = g('waypoint_reached_pause_sec').value
         self.waypoint_frame = g('waypoint_frame').value
         self.camera_topic = g('camera_topic').value
         self.camera_is_panorama = g('camera_is_panorama').value
@@ -533,17 +578,25 @@ class VLMNavigatorNode(Node):
         self.target_match_label_mode = g('target_match_label_mode').value
         self.target_require_sam2 = g('target_require_sam2').value
         self.target_state_ttl_sec = g('target_state_ttl_sec').value
-        self.target_lidar_min_range = g('target_lidar_min_range').value
-        self.target_lidar_max_range = g('target_lidar_max_range').value
-        self.target_lateral_gate_m = g('target_lateral_gate_m').value
-        self.target_min_assoc_points = g('target_min_assoc_points').value
-        self.target_lock_update_dist_m = g('target_lock_update_dist_m').value
-        self.target_lock_freeze = g('target_lock_freeze').value
+        self.target_approach_step_m = g('target_approach_step_m').value
+        self.target_tv_labels = g('target_tv_labels').value
+        self.target_screen_standoff_enable = g('target_screen_standoff_enable').value
+        self.target_screen_standoff_m = g('target_screen_standoff_m').value
+        self.target_screen_standoff_max_snap_m = g('target_screen_standoff_max_snap_m').value
         self.max_sensor_skew_sec = g('max_sensor_skew_sec').value
         self.write_visualize = g('write_visualize').value
         self.bev_only = g('bev_only').value
         self.debug_save_dir = g('debug_save_dir').value.strip()
         self.debug_save_interval_sec = float(g('debug_save_interval_sec').value)
+
+    # ------------------------------------------------------------------
+    # Dual-sink logging helper (ROS console + file)
+    # ------------------------------------------------------------------
+
+    def _flog(self, msg: str, level: str = 'info'):
+        """Write msg to both the ROS node logger and the file logger."""
+        getattr(self.get_logger(), level)(msg)
+        getattr(self._file_logger, level if level != 'warn' else 'warning')(msg)
 
     # ------------------------------------------------------------------
     # Deferred model loading
@@ -618,8 +671,20 @@ class VLMNavigatorNode(Node):
                     )
                     self._mark_target_goal_success()
                     return
+                now = time.monotonic()
+                min_retrigger_interval = max(3.0, float(self.inference_interval) * 0.1)
+                if now - self._last_wp_reached_time < min_retrigger_interval:
+                    return
+                self._last_wp_reached_time = now
+                pause_s = max(0.0, float(self.waypoint_reached_pause_sec))
+                if pause_s > 0.0:
+                    self._hold_after_wp_reached_until_s = max(
+                        float(self._hold_after_wp_reached_until_s), now + pause_s
+                    )
+                    self.cmd_vel_pub.publish(self._build_zero_cmd_vel_msg())
                 self.get_logger().info(
-                    f'Waypoint reached (dist={dist:.2f} m). Re-triggering VLM.'
+                    f'Waypoint reached (dist={dist:.2f} m). '
+                    f'Pause stop for {pause_s:.2f}s; re-triggering VLM.'
                 )
                 self.current_wp_x = None
                 self.current_wp_y = None
@@ -667,11 +732,20 @@ class VLMNavigatorNode(Node):
             if self.camera_is_panorama:
                 self.latest_panoramic_arr = panoramic_rgb  # store raw panoramic for per-frontier crop
                 arr = self._project_panorama_to_pinhole(arr)
+            else:
+                # Pinhole camera path: no panorama crop heading term.
+                self._last_projected_crop_heading = 0.0
             self.latest_rgb_pil = PILImage.fromarray(arr)
             if self.write_visualize:
                 self._publish_rgb_image(self.panoramic_pub, panoramic_rgb, frame_id='camera')
                 self._publish_rgb_image(self.rgb_pub, arr, frame_id='camera')
+            # Publish clean image to /egocentric_rgb (SAM2 detector input).
             self._publish_rgb_image(self.egocentric_rgb_pub, arr, frame_id='camera')
+            # Annotated overlay goes to a separate debug-only topic.
+            ego_dbg = arr.copy()
+            self._draw_target_points_on_egocentric(ego_dbg)
+            self._publish_rgb_image(self.egocentric_rgb_debug_pub, ego_dbg, frame_id='camera')
+            self._cache_debug_image('egocentric_rgb', ego_dbg)
         except Exception as e:
             self.get_logger().warn(f'Camera callback error: {e}')
 
@@ -690,56 +764,103 @@ class VLMNavigatorNode(Node):
         try:
             data = json.loads(msg.data)
         except Exception as e:
-            self.get_logger().warn(f'Invalid target_detection JSON: {e}')
+            self._flog(f'[det_cb] INVALID JSON: {e}', 'warn')
             self.target_detection_buffer.append(False)
             return
 
         detections = data.get('detections', data if isinstance(data, list) else [data])
-        self._publish_sam2_debug_overlay(detections)
+        n_raw = len(detections)
+        self._file_logger.info(
+            f'[det_cb] received n_raw={n_raw} goal="{self.object_goal}" '
+            f'require_sam2={self.target_require_sam2} '
+            f'conf_thr={float(self.target_confidence_threshold):.2f}'
+        )
         best = None
+        best_stamp = None
         best_conf = -1.0
-        for det in detections:
+        for i, det in enumerate(detections):
             if not isinstance(det, dict):
+                self._file_logger.info(f'[det_cb] det[{i}] SKIP not dict: type={type(det)}')
                 continue
             if self.target_require_sam2 and not self._is_sam2_detection(det):
+                self._file_logger.info(
+                    f'[det_cb] det[{i}] SKIP require_sam2: source="{det.get("source","")}" '
+                    f'model="{det.get("model","")}" detector="{det.get("detector","")}"'
+                )
                 continue
             label = str(det.get('label', det.get('class_name', det.get('name', '')))).strip()
             conf = float(det.get('confidence', det.get('score', 0.0)))
             bbox = det.get('bbox', det.get('bbox_xyxy', None))
             if not label or bbox is None or len(bbox) != 4:
+                self._file_logger.info(
+                    f'[det_cb] det[{i}] SKIP bad fields: label="{label}" '
+                    f'bbox={bbox}'
+                )
                 continue
             if conf < float(self.target_confidence_threshold):
+                self._file_logger.info(
+                    f'[det_cb] det[{i}] SKIP low_conf: label="{label}" '
+                    f'conf={conf:.3f} < thr={float(self.target_confidence_threshold):.3f}'
+                )
                 continue
-            if self.object_goal and not self._label_matches_goal(label, self.object_goal):
+            norm_label = label.lower().strip()
+            norm_goal = self.object_goal.lower().strip() if self.object_goal else ''
+            goal_match = (not self.object_goal) or self._label_matches_goal(label, self.object_goal)
+            if not goal_match:
+                self._file_logger.info(
+                    f'[det_cb] det[{i}] SKIP label_mismatch: '
+                    f'norm_label="{norm_label}" norm_goal="{norm_goal}"'
+                )
                 continue
             candidate = {
                 'label': label,
                 'confidence': conf,
                 'bbox': [float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])],
             }
+            self._file_logger.info(
+                f'[det_cb] det[{i}] ACCEPTED: label="{label}" conf={conf:.3f} '
+                f'bbox={candidate["bbox"]} goal="{self.object_goal}"'
+            )
             self.latest_detections.append(candidate)
             if conf > best_conf:
                 best_conf = conf
                 best = candidate
+                best_stamp = det.get('stamp', data.get('stamp', None) if isinstance(data, dict) else None)
 
+        buf_before = len(self.target_detection_buffer)
         self.latest_detection = best
         self.target_detection_buffer.append(best is not None)
+        buf_hits = sum(1 for v in self.target_detection_buffer if v)
+        self._file_logger.info(
+            f'[det_cb] RESULT best={"YES label=" + best["label"] + " conf=" + f"{best_conf:.3f}" if best else "None"} '
+            f'buffer_len={len(self.target_detection_buffer)} buf_hits={buf_hits} '
+            f'min_hits={int(self.target_temporal_min_hits)}'
+        )
         if best is not None:
             self.target_confidence = float(best['confidence'])
-        change_reason = self._compute_detection_change_reason(best)
-        if change_reason is not None and not self.target_lock_freeze:
-            self._request_detection_interrupt(change_reason)
 
     def _detector_detection_debug_callback(self, msg: Image):
-        """Forward detector bbox visualization to bridge debug topics."""
-        self.sam2_detection_debug_pub.publish(msg)
-        self.latest_detection_overlay_rgb = self._decode_ros_rgb_image(msg)
+        """Forward detector bbox visualization with target projection overlays."""
+        arr = self._decode_ros_rgb_image(msg)
+        if arr is None:
+            self.sam2_detection_debug_pub.publish(msg)
+            return
+        arr = np.ascontiguousarray(arr).copy()
+        self._draw_target_points_on_egocentric(arr)
+        self.latest_detection_overlay_rgb = arr
+        self._publish_rgb_image(self.sam2_detection_debug_pub, arr, frame_id=msg.header.frame_id or 'camera')
         self._cache_debug_image('sam2_detection_debug', self.latest_detection_overlay_rgb)
 
     def _detector_segmentation_debug_callback(self, msg: Image):
-        """Forward detector segmentation visualization to bridge debug topics."""
-        self.sam2_segmentation_debug_pub.publish(msg)
-        self.latest_mask_overlay_rgb = self._decode_ros_rgb_image(msg)
+        """Forward detector segmentation visualization with target projection overlays."""
+        arr = self._decode_ros_rgb_image(msg)
+        if arr is None:
+            self.sam2_segmentation_debug_pub.publish(msg)
+            return
+        arr = np.ascontiguousarray(arr).copy()
+        self._draw_target_points_on_egocentric(arr)
+        self.latest_mask_overlay_rgb = arr
+        self._publish_rgb_image(self.sam2_segmentation_debug_pub, arr, frame_id=msg.header.frame_id or 'camera')
         self._cache_debug_image('sam2_segmentation_debug', self.latest_mask_overlay_rgb)
 
     def _decode_ros_rgb_image(self, msg: Image) -> Optional[np.ndarray]:
@@ -779,6 +900,7 @@ class VLMNavigatorNode(Node):
         out_h = int(self.camera_project_height)
         hfov = math.radians(float(self.camera_project_hfov_deg))
         crop_heading = heading_override if heading_override is not None else self._compute_camera_crop_heading()
+        self._last_projected_crop_heading = float(crop_heading)
         # Image longitude increases to the right; ROS yaw is CCW.
         # camera_heading_sign controls frame convention, camera_heading_gain
         # controls how much heading is applied for the current panorama source.
@@ -928,6 +1050,7 @@ class VLMNavigatorNode(Node):
                     self._stop_cmd_vel_count = 0
                     self._publish_safety_stop(0)
                     self.get_logger().info('Received new goal; released stop hold (/stop=0).')
+                self._hold_after_wp_reached_until_s = 0.0
                 # Rebroadcast the received goal a few times to help peer nodes
                 # catch it if they missed the initial one-shot publication.
                 self._goal_rebroadcast_value = new_goal
@@ -943,9 +1066,6 @@ class VLMNavigatorNode(Node):
             self.target_pixel_local = None
             self.target_semantic = None
             self.target_confidence = 0.0
-            self.target_locked_world_xyz = None
-            self.target_locked_semantic = None
-            self.target_locked_bbox = None
             self.current_wp_x = None
             self.current_wp_y = None
             self.current_wp_is_target = False
@@ -1016,9 +1136,11 @@ class VLMNavigatorNode(Node):
 
     def _stop_cmd_vel_timer_callback(self):
         """20 Hz timer: while stop-hold is active, keep publishing cmd_vel=0."""
-        if self._hold_position_after_success or self._stop_cmd_vel_count > 0:
+        now = time.monotonic()
+        hold_wp_pause = now < float(self._hold_after_wp_reached_until_s)
+        if self._hold_position_after_success or self._stop_cmd_vel_count > 0 or hold_wp_pause:
             self.cmd_vel_pub.publish(self._build_zero_cmd_vel_msg())
-            if not self._hold_position_after_success:
+            if not self._hold_position_after_success and not hold_wp_pause:
                 self._stop_cmd_vel_count -= 1
 
     def _goal_rebroadcast_timer_callback(self):
@@ -1062,7 +1184,7 @@ class VLMNavigatorNode(Node):
             self._running_vlm_step = False
 
         # Drain at most one queued detection interrupt after current run.
-        if self._pending_detection_interrupt and not self.target_lock_freeze:
+        if self._pending_detection_interrupt:
             self._pending_detection_interrupt = False
             if self._can_trigger_detection_interrupt():
                 self.get_logger().info('Running queued VLM interrupt from detection change.')
@@ -1187,6 +1309,19 @@ class VLMNavigatorNode(Node):
                     resolution=self.map_resolution,
                 )
             sel_row, sel_col = int(target_pixel[0]), int(target_pixel[1])
+            target_label = str(self.target_semantic or self.object_goal or '')
+            if bool(self.target_screen_standoff_enable) and self._is_tv_like_label(target_label):
+                standoff_wp = self._compute_screen_standoff_waypoint(wx, wy)
+                if standoff_wp is not None:
+                    wx, wy = standoff_wp
+                    self.get_logger().info(
+                        f'Applied screen standoff waypoint ({float(self.target_screen_standoff_m):.2f}m) '
+                        f'for label="{target_label}".'
+                    )
+                else:
+                    self.get_logger().info(
+                        f'Screen standoff unavailable for label="{target_label}"; using raw target point.'
+                    )
             self.get_logger().info(
                 f'VLM selected TARGET candidate (idx={idx}, conf={self.target_confidence:.2f}).'
             )
@@ -1221,6 +1356,7 @@ class VLMNavigatorNode(Node):
         wp_msg.y = float(wy)
         wp_msg.theta = 0.0
         self.way_point_pub.publish(wp_msg)
+        self._hold_after_wp_reached_until_s = 0.0
 
         self.current_wp_x = wx
         self.current_wp_y = wy
@@ -1311,14 +1447,24 @@ class VLMNavigatorNode(Node):
             self._debug_image_cache[name] = img
 
     def _save_debug_images_callback(self):
-        """Write each cached debug image to its subfolder at ~1 Hz."""
+        """Write each cached debug image to its subfolder at ~1 Hz.
+
+        All slot counters advance together every tick so frame indices stay
+        aligned across subfolders even when some topics start later or fire
+        infrequently (e.g. sam2_detection only when a detection exists).
+        Ticks where a slot has no image yet produce no file for that slot.
+        """
         import os as _os
-        for name, img in list(self._debug_image_cache.items()):
-            subdir = self._debug_save_subdirs.get(name)
-            if subdir is None:
-                continue
+        for name, subdir in self._debug_save_subdirs.items():
             idx = self._debug_save_counters[name]
-            bgr = cv2.cvtColor(img.astype(np.uint8), cv2.COLOR_RGB2BGR)
+            img = self._debug_image_cache.get(name)
+            if img is not None:
+                h, w = img.shape[:2]
+                self._debug_save_last_size[name] = (h, w)
+                bgr = cv2.cvtColor(img.astype(np.uint8), cv2.COLOR_RGB2BGR)
+            else:
+                h, w = self._debug_save_last_size.get(name, (1, 1))
+                bgr = np.zeros((h, w, 3), dtype=np.uint8)
             cv2.imwrite(_os.path.join(subdir, f'{idx:06d}.png'), bgr)
             self._debug_save_counters[name] = idx + 1
 
@@ -1668,6 +1814,87 @@ class VLMNavigatorNode(Node):
     def _normalize_label(self, text: str) -> str:
         return re.sub(r'[^a-z0-9]+', '', text.lower().strip())
 
+    def _target_tv_label_set(self) -> set:
+        raw = self.target_tv_labels
+        if isinstance(raw, str):
+            tokens = [raw]
+        elif isinstance(raw, (list, tuple)):
+            tokens = list(raw)
+        else:
+            tokens = []
+        return {self._normalize_label(str(t)) for t in tokens if str(t).strip()}
+
+    def _is_tv_like_label(self, label: str) -> bool:
+        if not label:
+            return False
+        return self._normalize_label(label) in self._target_tv_label_set()
+
+    def _compute_screen_standoff_waypoint(self, target_wx: float, target_wy: float) -> Optional[Tuple[float, float]]:
+        """Compute a reachable standoff goal in front of a screen-like target."""
+        if (
+            self.mapper.local_map is None
+            or self.latest_pose_x is None
+            or self.latest_pose_y is None
+        ):
+            return None
+        rx = float(self.latest_pose_x)
+        ry = float(self.latest_pose_y)
+        vx = rx - float(target_wx)
+        vy = ry - float(target_wy)
+        norm = math.hypot(vx, vy)
+        if norm < 1e-4:
+            return None
+        d = max(0.0, float(self.target_screen_standoff_m))
+        cand_wx = float(target_wx) + (vx / norm) * d
+        cand_wy = float(target_wy) + (vy / norm) * d
+
+        pr, pc = world_to_local_pixel(
+            world_x=cand_wx,
+            world_y=cand_wy,
+            robot_x=rx,
+            robot_y=ry,
+            crop_radius=self.crop_radius,
+            output_size=self.output_size,
+            resolution=self.map_resolution,
+        )
+        h, w = self.mapper.local_map.shape[1], self.mapper.local_map.shape[2]
+        rr = int(round(pr))
+        cc = int(round(pc))
+        if not (0 <= rr < h and 0 <= cc < w):
+            return None
+
+        traversable = (
+            (self.mapper.local_map[1] >= float(self.exp_pred_threshold))
+            & (self.mapper.local_map[0] < float(self.map_pred_threshold))
+        )
+        if traversable[rr, cc]:
+            return cand_wx, cand_wy
+
+        trav_rr, trav_cc = np.where(traversable)
+        if trav_rr.size == 0:
+            return None
+        d2 = (trav_rr - rr) ** 2 + (trav_cc - cc) ** 2
+        nearest = int(np.argmin(d2))
+        snap_r = int(trav_rr[nearest])
+        snap_c = int(trav_cc[nearest])
+        snap_dist_m = (
+            math.sqrt(float((snap_r - rr) ** 2 + (snap_c - cc) ** 2))
+            * float(self.map_resolution)
+            * (2.0 * float(self.crop_radius) / float(self.output_size))
+        )
+        if snap_dist_m > float(self.target_screen_standoff_max_snap_m):
+            return None
+        swx, swy = local_pixel_to_world(
+            pixel_row=float(snap_r),
+            pixel_col=float(snap_c),
+            robot_x=rx,
+            robot_y=ry,
+            crop_radius=self.crop_radius,
+            output_size=self.output_size,
+            resolution=self.map_resolution,
+        )
+        return float(swx), float(swy)
+
     def _label_matches_goal(self, label: str, goal: str) -> bool:
         if not goal:
             return False  # No active goal → reject all detections
@@ -1758,21 +1985,14 @@ class VLMNavigatorNode(Node):
         self._run_vlm_step()
 
     def _update_target_state(self):
-        """Update target_found and target BEV position from external detections + lidar.
+        """Update target_found and target BEV position from the latest detection.
 
-        Once a target is confirmed (temporal buffer satisfied + lidar association succeeds)
-        its world position is LOCKED and no longer re-estimated from scratch each call.
-        Only the local BEV pixel is reprojected each tick to smoothly follow robot movement.
-
-        If target_lock_freeze is True, then after the first successful lock acquisition:
-          - the lock is never refreshed,
-          - the lock is not cleared when detections expire,
-          - detection-change VLM interrupts are suppressed.
-
-        A new /object_goal still resets the lock state in _goal_callback().
+        Instead of locking a 3D world position via lidar association, the waypoint
+        is placed at a fixed step distance along the bearing derived from the
+        detection bbox centre.  Every tick refreshes the bearing from the latest
+        detection so the robot continuously steers toward the visible target.
         """
         now_s = self.get_clock().now().nanoseconds / 1e9
-        had_lock_before = self.target_locked_world_xyz is not None
 
         # --- Check whether the detection stream is still valid ---
         detection_expired = (
@@ -1785,78 +2005,89 @@ class VLMNavigatorNode(Node):
         )
 
         if detection_expired or buffer_insufficient:
-            if self.target_lock_freeze and self.target_locked_world_xyz is not None:
-                # Frozen mode: keep the locked target position even if detections go quiet.
-                pass
-            else:
-                # Clear lock — target no longer consistently detected
-                self.target_locked_world_xyz = None
-                self.target_locked_semantic = None
-                self.target_locked_bbox = None
-                self.target_found = False
-                self.target_pixel_local = None
-                self.target_world_xyz = None
-                self.target_semantic = None
-                if had_lock_before:
-                    self._request_detection_interrupt('target lock cleared')
-                return
-
-        if self.latest_scan is None or self.latest_pose_x is None or self.latest_yaw is None:
+            gate_state = (detection_expired, buffer_insufficient)
+            state_changed = gate_state != self._last_gate_fail_state
+            elapsed = now_s - self._last_gate_fail_log_s
+            if state_changed or elapsed >= 1.0:
+                self._file_logger.info(
+                    f'[target_state] GATE FAIL detection_expired={detection_expired} '
+                    f'buffer_insufficient={buffer_insufficient} '
+                    f'latest_det_none={self.latest_detection is None} '
+                    f'ttl_age={now_s - self.latest_detection_msg_time:.2f}s '
+                    f'buf_len={len(self.target_detection_buffer)} buf_hits={sum(self.target_detection_buffer)}'
+                )
+                self._last_gate_fail_log_s = now_s
+                self._last_gate_fail_state = gate_state
             self.target_found = False
             self.target_pixel_local = None
             self.target_world_xyz = None
             self.target_semantic = None
             return
 
-        # --- Acquire or conditionally refresh the world-position lock ---
-        if self.target_locked_world_xyz is None:
-            # No lock yet — attempt to acquire from lidar association
-            assoc_world = self._associate_target_world_from_lidar(self.latest_detection)
-            if assoc_world is None:
-                self.target_found = False
-                self.target_pixel_local = None
-                self.target_world_xyz = None
-                self.target_semantic = None
-                return
+        if self.latest_pose_x is None or self.latest_yaw is None:
+            self._file_logger.info(
+                f'[target_state] GATE FAIL no pose '
+                f'pose_x={self.latest_pose_x} yaw={self.latest_yaw}'
+            )
+            self.target_found = False
+            self.target_pixel_local = None
+            self.target_world_xyz = None
+            self.target_semantic = None
+            return
 
-            self.target_locked_world_xyz = assoc_world
-            self.target_locked_semantic = str(self.latest_detection.get('label', self.object_goal))
-            self.target_locked_bbox = list(self.latest_detection.get('bbox', []))
-            if self.target_birth_rgb is None and self.latest_rgb_pil is not None:
-                self.target_birth_rgb = self.latest_rgb_pil
+        # --- Compute bearing from detection bbox centre ---
+        bbox = self.latest_detection.get('bbox', None)
+        if bbox is None or len(bbox) != 4:
+            self.target_found = False
+            self.target_pixel_local = None
+            self.target_world_xyz = None
+            self.target_semantic = None
+            return
 
-            # Keep the first lock-acquired interrupt even in freeze mode,
-            # so the VLM can immediately navigate toward the target.
-            self._request_detection_interrupt('target lock acquired')
+        x1, y1, x2, y2 = [float(v) for v in bbox]
+        cx_img = (float(self.camera_project_width) - 1.0) * 0.5
+        hfov = math.radians(float(self.camera_project_hfov_deg))
+        fx = cx_img / max(math.tan(hfov * 0.5), 1e-6)
+        u_det = 0.5 * (x1 + x2)
 
-        else:
-            # Lock exists — only refresh it in non-freeze mode.
-            if not self.target_lock_freeze:
-                assoc_world = self._associate_target_world_from_lidar(self.latest_detection)
-                if assoc_world is not None:
-                    lx, ly, _ = self.target_locked_world_xyz
-                    nx, ny, _ = assoc_world
-                    dist = math.sqrt((nx - lx) ** 2 + (ny - ly) ** 2)
-                    if dist > float(self.target_lock_update_dist_m):
-                        self.target_locked_world_xyz = assoc_world
-                        self.target_locked_semantic = str(self.latest_detection.get('label', self.object_goal))
-                        self.target_locked_bbox = list(self.latest_detection.get('bbox', []))
-                        self._request_detection_interrupt(
-                            f'target lock moved by {dist:.2f}m (> {float(self.target_lock_update_dist_m):.2f}m)'
-                        )
+        theta_img = math.atan((u_det - cx_img) / fx)
 
-        # --- Reproject locked world position → current local BEV pixel ---
-        wx, wy, wz = self.target_locked_world_xyz
+        crop_heading = float(self._compute_camera_crop_heading())
+        proj_yaw = (
+            float(self.camera_heading_gain) * float(self.camera_heading_sign)
+            * crop_heading
+            + math.radians(float(self.camera_yaw_offset_deg))
+        )
+        theta = theta_img + proj_yaw
+
+        robot_yaw = float(self.latest_yaw)
+        step = float(self.target_approach_step_m)
+        # Pinhole: u > cx → theta_img > 0 = target to the **right** in the image.
+        # In map frame (yaw ψ CCW from +X), “right of forward” is a **clockwise** turn:
+        # unit direction (cos(ψ - θ), sin(ψ - θ)).  Using ψ + θ mirrors left/right and
+        # places the BEV target dot on the opposite side of the FOV from DET_CENTER.
+        wx = float(self.latest_pose_x) + step * math.cos(robot_yaw - theta)
+        wy = float(self.latest_pose_y) + step * math.sin(robot_yaw - theta)
+        wz = float(self.latest_pose_z) if self.latest_pose_z is not None else 0.0
+
+        if self.target_birth_rgb is None and self.latest_rgb_pil is not None:
+            self.target_birth_rgb = self.latest_rgb_pil
+
+        # --- Convert world waypoint → local BEV pixel ---
         pr, pc = world_to_local_pixel(
-            world_x=wx,
-            world_y=wy,
-            robot_x=self.latest_pose_x,
-            robot_y=self.latest_pose_y,
-            crop_radius=self.crop_radius,
-            output_size=self.output_size,
+            world_x=wx, world_y=wy,
+            robot_x=self.latest_pose_x, robot_y=self.latest_pose_y,
+            crop_radius=self.crop_radius, output_size=self.output_size,
             resolution=self.map_resolution,
         )
         in_local = (0.0 <= pr < float(self.output_size)) and (0.0 <= pc < float(self.output_size))
+        label = str(self.latest_detection.get('label', self.object_goal))
+        self._file_logger.info(
+            f'[target_state] bearing theta_img={math.degrees(theta_img):.1f}deg '
+            f'theta={math.degrees(theta):.1f}deg step={step:.1f}m '
+            f'wp=({wx:.3f},{wy:.3f}) pixel=({pr:.1f},{pc:.1f}) in_local={in_local} '
+            f'label={label}'
+        )
         if not in_local:
             self.target_found = False
             self.target_pixel_local = None
@@ -1865,70 +2096,15 @@ class VLMNavigatorNode(Node):
             return
 
         self.target_found = True
-        self.target_world_xyz = (float(wx), float(wy), float(wz))
+        self.target_world_xyz = (wx, wy, wz)
         self.target_pixel_local = (float(pr), float(pc))
-        self.target_semantic = self.target_locked_semantic
+        self.target_semantic = label
+        self._file_logger.info(
+            f'[target_state] OK target_pixel_local=({pr:.1f},{pc:.1f}) '
+            f'target_found=True wp=({wx:.3f},{wy:.3f})'
+        )
         self._publish_target_marker(wx, wy)
         self._publish_target_debug_overlay()
-
-    def _associate_target_world_from_lidar(self, detection: Dict[str, Any]) -> Optional[Tuple[float, float, float]]:
-        """Associate a 2D detection with lidar points and estimate target world position."""
-        bbox = detection.get('bbox', None)
-        if bbox is None or len(bbox) != 4:
-            return None
-        x1, y1, x2, y2 = [float(v) for v in bbox]
-        cx_img = (float(self.camera_project_width) - 1.0) * 0.5
-        hfov = math.radians(float(self.camera_project_hfov_deg))
-        fx = cx_img / max(math.tan(hfov * 0.5), 1e-6)
-
-        u = 0.5 * (x1 + x2)
-        bw = max(1.0, abs(x2 - x1))
-        # Angle from image centre (positive = right of image centre)
-        theta_img = math.atan((u - cx_img) / fx)
-        half_theta = max(math.atan((0.5 * bw) / fx), math.radians(1.0))
-        # The egocentric image is cropped from the panorama at a heading offset
-        # (camera_heading_gain * camera_heading_sign * crop_heading + yaw_offset).
-        # theta_img is from the image centre, so the actual bearing from robot
-        # forward direction = proj_yaw + theta_img.
-        proj_yaw = (
-            float(self.camera_heading_gain) * float(self.camera_heading_sign)
-            * self._compute_camera_crop_heading()
-            + math.radians(float(self.camera_yaw_offset_deg))
-        )
-        theta = theta_img + proj_yaw
-
-        pts = self.latest_scan
-        dx = pts[:, 0] - self.latest_pose_x
-        dy = pts[:, 1] - self.latest_pose_y
-
-        cy = math.cos(self.latest_yaw)
-        sy = math.sin(self.latest_yaw)
-        forward = cy * dx + sy * dy
-        # Robot right direction (90° CW from heading): (sin(yaw), -cos(yaw)).
-        # right_component = sin(yaw)*dx - cos(yaw)*dy.
-        # The ROS body y-axis is LEFT (-right), so y_body = -sy*dx+cy*dy = -right (wrong sign).
-        right = sy * dx - cy * dy
-        dist2d = np.sqrt(dx * dx + dy * dy)
-
-        min_r = float(self.target_lidar_min_range)
-        max_r = float(self.target_lidar_max_range)
-        expected_right = np.tan(theta) * np.maximum(forward, 1e-3)
-        lateral_gate = float(self.target_lateral_gate_m) + np.abs(forward) * np.tan(half_theta)
-        lateral_err = np.abs(right - expected_right)
-        z_ok = (pts[:, 2] > self.latest_pose_z - 0.3) & (pts[:, 2] < self.latest_pose_z + 2.0)
-
-        mask = (
-            (forward > 0.0) &
-            (dist2d >= min_r) & (dist2d <= max_r) &
-            (lateral_err <= lateral_gate) &
-            z_ok
-        )
-        selected = pts[mask]
-        if selected.shape[0] < int(self.target_min_assoc_points):
-            return None
-
-        med = np.median(selected, axis=0)
-        return float(med[0]), float(med[1]), float(med[2])
 
     def _publish_target_marker(self, wx: float, wy: float):
         msg = PointStamped()
@@ -1939,116 +2115,26 @@ class VLMNavigatorNode(Node):
         msg.point.z = 0.0
         self.target_marker_pub.publish(msg)
 
+    def _draw_target_points_on_egocentric(self, arr: np.ndarray):
+        """Draw DET_CENTER marker on an egocentric RGB image."""
+        if self.latest_detection is not None:
+            bbox = self.latest_detection.get('bbox', None)
+            if bbox is not None and len(bbox) == 4:
+                x1, y1, x2, y2 = [int(v) for v in bbox]
+                cu = int(round(0.5 * (x1 + x2)))
+                cv_pt = int(round(0.5 * (y1 + y2)))
+                cv2.circle(arr, (cu, cv_pt), 5, (255, 128, 0), -1)
+                cv2.putText(
+                    arr, 'DET_CENTER', (cu + 8, max(14, cv_pt - 8)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 128, 0), 1, cv2.LINE_AA
+                )
+
     def _publish_target_debug_overlay(self):
         if self.latest_rgb_pil is None:
             return
         arr = np.array(self.latest_rgb_pil.convert('RGB'))
-        # Draw from locked bbox/label so the overlay is stable once the target is confirmed
-        if self.target_locked_bbox and len(self.target_locked_bbox) == 4:
-            x1, y1, x2, y2 = [int(v) for v in self.target_locked_bbox]
-            cv2.rectangle(arr, (x1, y1), (x2, y2), (255, 128, 0), 2)
-            label = self.target_locked_semantic or ''
-            conf = float(self.target_confidence)
-            cv2.putText(
-                arr,
-                f'{label} {conf:.2f}',
-                (x1, max(14, y1 - 6)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                (255, 128, 0),
-                1,
-                cv2.LINE_AA,
-            )
-        # Reproject locked 3D world position back to image pixel (green crosshair).
-        # If the lidar association is correct this should sit inside the orange bbox above.
-        if (self.target_locked_world_xyz is not None
-                and self.latest_pose_x is not None
-                and self.latest_yaw is not None):
-            wx, wy, wz = self.target_locked_world_xyz
-            rdx = wx - self.latest_pose_x
-            rdy = wy - self.latest_pose_y
-            rdz = wz - (self.latest_pose_z if self.latest_pose_z is not None else 0.0)
-            cy_yaw = math.cos(self.latest_yaw)
-            sy_yaw = math.sin(self.latest_yaw)
-            fwd = cy_yaw * rdx + sy_yaw * rdy
-            right_c = sy_yaw * rdx - cy_yaw * rdy   # correct right formula
-            if fwd > 0.1:
-                cx_img = (float(self.camera_project_width) - 1.0) * 0.5
-                cy_img = (float(self.camera_project_height) - 1.0) * 0.5
-                hfov = math.radians(float(self.camera_project_hfov_deg))
-                fx_c = cx_img / max(math.tan(hfov * 0.5), 1e-6)
-                vfov = 2.0 * math.atan(
-                    math.tan(hfov * 0.5)
-                    * float(self.camera_project_height) / max(float(self.camera_project_width), 1.0)
-                )
-                fy_c = cy_img / max(math.tan(vfov * 0.5), 1e-6)
-                u_proj = int(round(cx_img + fx_c * right_c / fwd))
-                v_proj = int(round(cy_img - fy_c * rdz / fwd))
-                out_w = int(self.camera_project_width)
-                out_h = int(self.camera_project_height)
-                if 0 <= u_proj < out_w and 0 <= v_proj < out_h:
-                    r = 10
-                    cv2.circle(arr, (u_proj, v_proj), r, (0, 220, 0), 2)
-                    cv2.line(arr, (u_proj - r - 4, v_proj), (u_proj + r + 4, v_proj), (0, 220, 0), 2)
-                    cv2.line(arr, (u_proj, v_proj - r - 4), (u_proj, v_proj + r + 4), (0, 220, 0), 2)
+        self._draw_target_points_on_egocentric(arr)
         self._publish_rgb_image(self.target_debug_pub, arr, frame_id='camera')
-
-    def _publish_sam2_debug_overlay(self, detections):
-        """Publish raw external detector overlays for RVIZ inspection."""
-        if self.latest_rgb_pil is None:
-            return
-        arr = np.array(self.latest_rgb_pil.convert('RGB'))
-        det_img = arr.copy()
-        mask_img = arr.copy()
-        for det in detections:
-            if not isinstance(det, dict):
-                continue
-            bbox = det.get('bbox', det.get('bbox_xyxy', None))
-            if bbox is None or len(bbox) != 4:
-                continue
-            x1, y1, x2, y2 = [int(v) for v in bbox]
-            label = str(det.get('label', det.get('class_name', det.get('name', ''))))
-            conf = float(det.get('confidence', det.get('score', 0.0)))
-            is_sam2 = self._is_sam2_detection(det)
-            color = (0, 255, 255) if is_sam2 else (160, 160, 160)
-            cv2.rectangle(det_img, (x1, y1), (x2, y2), color, 2)
-            cv2.rectangle(mask_img, (x1, y1), (x2, y2), color, 2)
-            tag = "SAM2" if is_sam2 else "EXT"
-            cv2.putText(
-                det_img,
-                f'{label} {conf:.2f} {tag}',
-                (x1, max(14, y1 - 6)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.45,
-                color,
-                1,
-                cv2.LINE_AA,
-            )
-            cv2.putText(
-                mask_img,
-                f'{label} {conf:.2f} {tag}',
-                (x1, max(14, y1 - 6)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.45,
-                color,
-                1,
-                cv2.LINE_AA,
-            )
-
-            # Optional polygon mask visualization if provided by detector
-            poly = det.get('mask_polygon', None)
-            if isinstance(poly, list) and len(poly) >= 3:
-                pts = np.array(poly, dtype=np.int32).reshape(-1, 1, 2)
-                overlay = mask_img.copy()
-                cv2.fillPoly(overlay, [pts], color)
-                mask_img = cv2.addWeighted(overlay, 0.25, mask_img, 0.75, 0)
-
-        self.latest_detection_overlay_rgb = det_img
-        self.latest_mask_overlay_rgb = mask_img
-        self._publish_rgb_image(self.sam2_detection_debug_pub, det_img, frame_id='camera')
-        self._cache_debug_image('sam2_detection_debug', det_img)
-        self._publish_rgb_image(self.sam2_segmentation_debug_pub, mask_img, frame_id='camera')
-        self._cache_debug_image('sam2_segmentation_debug', mask_img)
 
     def _log_sensor_skew(self):
         """Parity check: log pose/scan/rgb timestamp skew."""

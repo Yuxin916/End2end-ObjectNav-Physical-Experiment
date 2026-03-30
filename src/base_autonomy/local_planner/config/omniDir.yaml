@@ -39,8 +39,8 @@ localPlanner:
     maxRelZ: 0.3
 
     # ===== Speed =====
-    maxSpeed: 0.875
-    autonomySpeed: 0.875
+    maxSpeed: 0.4
+    autonomySpeed: 0.4
 
     # ===== Direction =====
     dirWeight: 0.02
@@ -48,7 +48,7 @@ localPlanner:
     dirToVehicle: false
 
     # ===== Path scaling =====
-    pathScale: 0.875
+    pathScale: 0.4
     minPathScale: 0.675
     pathScaleStep: 0.1
     pathScaleBySpeed: true
@@ -91,8 +91,8 @@ pathFollower:
     lookAheadDis: 0.5
 
     # ===== Speed =====
-    maxSpeed: 0.875
-    autonomySpeed: 0.875
+    maxSpeed: 0.4
+    autonomySpeed: 0.4
     maxAccel: 2.0
 
     # ===== Switching =====

@@ -10,6 +10,15 @@ if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
     tmux kill-session -t "$SESSION_NAME"
 fi
 
+# cleanup old processes
+echo "Killing old ros/unity processes if any..."
+pkill -9 -f ros || true
+pkill -9 -f unity || true
+
+# cleanup debug images
+echo "Removing $WORKDIR/debug_images ..."
+rm -rf "$WORKDIR/debug_images"
+
 # create new detached session
 tmux new-session -d -s "$SESSION_NAME" -c "$WORKDIR"
 

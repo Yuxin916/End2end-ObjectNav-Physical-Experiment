@@ -263,9 +263,6 @@ class LidarBEVMapper:
         # never marks cells through walls as explored.
         self._mark_explored_raycast(g_rows, g_cols)
 
-        # ---- 4b. Post-process full_map (mirrors mapping_utils.post_process_map) ------
-        self._post_process_full_map()
-
         # ---- 5. Agent position & trajectory channels ---------------------
         self._update_agent_channels()
 
@@ -416,18 +413,86 @@ class LidarBEVMapper:
                 canvas[ch], (out, out), interpolation=cv2.INTER_NEAREST
             )
 
+        # Apply post-processing to the local crop only (not the global map).
+        # This mirrors post_process_map() from the VLN training pipeline so the
+        # VLM and frontier detector see the same processed representation used at
+        # training time, while preserving the raw accumulated counts in full_map.
+        local = self._post_process_local_map(local, out)
+
         self.local_map = local
 
         # Robot pixel position in the local crop (always centre)
         self.local_pixel_row = out / 2.0
         self.local_pixel_col = out / 2.0
 
+    def _post_process_local_map(self, local: np.ndarray, size: int) -> np.ndarray:
+        """Apply post_process_map() logic to a local crop (CHW, size×size).
+
+        Works on a copy so the caller's array is not modified.  The robot pixel
+        centre is always (size/2, size/2) in the local crop.
+
+        Returns the processed (4, size, size) float32 array.
+        """
+        k = np.ones((5, 5), np.uint8)
+        occ = local[0].copy()
+        exp = local[1].copy()
+
+        occ = cv2.erode(cv2.dilate(occ.astype(np.uint8), k), k).astype(np.float32)
+        exp = cv2.erode(cv2.dilate(exp.astype(np.uint8), k), k).astype(np.float32)
+
+        exp[occ == 1] = 0.0
+
+        # Pass 1: keep only the explored component containing the robot centre
+        exp_binary = (exp > 0).astype(np.uint8)
+        num_labels, labels, _, _ = cv2.connectedComponentsWithStats(
+            exp_binary, connectivity=4
+        )
+        if num_labels > 1:
+            ry, rx = size // 2, size // 2
+            target = int(labels[ry, rx])
+            if target == 0:
+                min_dist, target = float('inf'), 1
+                for i in range(1, num_labels):
+                    ys, xs = np.where(labels == i)
+                    d = int(((xs - rx) ** 2 + (ys - ry) ** 2).min())
+                    if d < min_dist:
+                        min_dist, target = d, i
+            exp = (labels == target).astype(np.float32)
+
+        exp[occ == 1] = 1.0
+        exp_copy_1 = exp.copy()
+
+        # Pass 2: trim occ to cells connected to the explored region
+        exp_binary2 = (exp > 0).astype(np.uint8)
+        num_labels2, labels2, _, _ = cv2.connectedComponentsWithStats(
+            exp_binary2, connectivity=4
+        )
+        if num_labels2 > 1:
+            ry, rx = size // 2, size // 2
+            target2 = int(labels2[ry, rx])
+            if target2 == 0:
+                min_dist, target2 = float('inf'), 1
+                for i in range(1, num_labels2):
+                    ys, xs = np.where(labels2 == i)
+                    d = int(((xs - rx) ** 2 + (ys - ry) ** 2).min())
+                    if d < min_dist:
+                        min_dist, target2 = d, i
+            exp2 = (labels2 == target2).astype(np.float32)
+            occ[exp2 == 0] = 0.0
+            exp_copy_1[exp2 == 0] = 0.0
+
+        result = local.copy()
+        result[0] = occ
+        result[1] = exp_copy_1
+        return result
+
     def _post_process_full_map(self):
         """Port of post_process_map() from mapping_utils.py (VLN_CL_CoTNav training).
 
-        Applied to self.full_map (global CHW, 1344×1344) after each raycast update
-        and before local crop extraction — matching the training pipeline exactly
-        (mapping.py line 577).
+        NOTE: This method is kept for reference but is NO LONGER called automatically.
+        Post-processing is now applied to the local crop only (in _extract_local_map)
+        to avoid corrupting the globally accumulated obstacle/explored counts.
+        Call this manually if you need a fully post-processed global map snapshot.
 
         Fills raycasting gaps via morphological close (dilate+erode, 3×3) on both
         occ and exp channels, then removes explored blobs disconnected from the

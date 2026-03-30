@@ -171,7 +171,7 @@ vlm_navigator:
     # Fills small holes in the explored region that would otherwise generate
     # spurious interior frontiers.
     # 5 = 5×5 kernel fills gaps ≤ 2 cells wide. Increase if explored region is noisy.
-    frontier_close_explore_ksize: 3
+    frontier_close_explore_ksize: 5
 
     # Minimum frontier cluster area in pixels.
     # Clusters smaller than this are discarded as noise.
@@ -187,7 +187,7 @@ vlm_navigator:
     # Prevents the robot from selecting a frontier that is already behind it
     # or within its own footprint.
     # Tune for robot footprint: Go2 ~0.5 m, G1 ~0.5 m. Default 0.7 m adds margin.
-    frontier_min_distance_m: 0.3
+    frontier_min_distance_m: 0.7
 
     # Maximum number of frontier candidates passed to the VLM.
     # Sorted by distance (nearest first), top-K kept.
@@ -200,11 +200,11 @@ vlm_navigator:
 
     # Area threshold (pixels) to treat a frontier component as "large" and enable
     # multi-point sampling. Smaller components still use one centroid candidate.
-    frontier_large_component_min_area: 80
+    frontier_large_component_min_area: 50
 
     # Minimum pixel separation between sampled points within the same component.
     # Increase to spread candidates more; decrease to get denser candidates.
-    frontier_sample_min_separation_px: 20.0
+    frontier_sample_min_separation_px: 10.0
 
 
     # ==========================================================================
@@ -221,6 +221,9 @@ vlm_navigator:
     # Set <= 0 to reuse goal_reached_threshold.
     target_reached_threshold: 0.5
 
+    # After a non-target waypoint is reached, hold cmd_vel=0 for this duration
+    # while VLM inference runs and before the next waypoint is issued.
+    waypoint_reached_pause_sec: 2.0
 
     # TF frame for published waypoints. Must match local_planner's expected frame.
     waypoint_frame: "map"
@@ -296,16 +299,19 @@ vlm_navigator:
     # Minimum detection confidence to accept a target detection.
     # GroundingDINO scores are roughly in [0.3, 0.9]. 0.30 is permissive;
     # raise to 0.5 for fewer false positives in cluttered scenes.
-    target_confidence_threshold: 0.30
+    # Fix 2: raised from 0.30 → 0.40 to match box_threshold increase in sam2_detector.yaml.
+    target_confidence_threshold: 0.40
 
     # Size of the temporal detection buffer (number of recent frames).
     # A detection is only confirmed if ≥ target_temporal_min_hits frames
     # within this buffer contain valid detections.
+    # [DIAG] lowered to 1 to bypass temporal gate during stamp-fix validation
     target_temporal_buffer_size: 3
 
     # Minimum confirmed detections in the buffer to accept the target.
     # 2-of-3 (default) requires two consecutive detections — suppresses single spurious hits.
     # Set to 1 for faster target response (at cost of more false positives).
+    # [DIAG] lowered to 1 — any single hit becomes a valid detection
     target_temporal_min_hits: 2
 
     # Label matching mode: "exact" (case-sensitive) or "normalized" (alphanumeric only).
@@ -319,35 +325,13 @@ vlm_navigator:
     # Time-to-live for a target detection (seconds).
     # If no new detection arrives within this window, the target state is cleared.
     # Prevents navigating to stale target positions after the object moves out of view.
-    target_state_ttl_sec: 2.0
+    target_state_ttl_sec: 3.0
 
-    # Minimum lidar range for target association (metres).
-    # Lidar points closer than this are excluded when projecting the target bbox into 3D.
-    target_lidar_min_range: 0.5
-
-    # Maximum lidar range for target association (metres).
-    # Lidar points farther than this are excluded.
-    target_lidar_max_range: 10.0
-
-    # Angular gate half-width (metres, at target range) for lidar-to-bbox association.
-    # Points within ±target_lateral_gate_m of the bbox horizontal centre are selected.
-    # Increase if lidar association fails (target PCD empty); decrease if noisy.
-    target_lateral_gate_m: 0.8
-
-    # Minimum number of lidar points required inside the gate to confirm 3D target position.
-    # If fewer points found, the 2D bbox centre is projected at a fallback depth instead.
-    target_min_assoc_points: 8
-
-    # Maximum 2-D displacement (metres) between a newly lidar-estimated target position and
-    # the currently locked position before the lock is refreshed.
-    # Small jitter from lidar noise (<<1 m) keeps the locked position; a large jump
-    # (e.g. target physically moved, or a different object detected) triggers a refresh.
-    # Default 5.0 m — comfortably above lidar noise but below "different object" distance.
-    target_lock_update_dist_m: 5.0
-
-    # If true, skip target lock refresh when frozen.
-    # This prevents the target from being updated when the robot is moving.
-    target_lock_freeze: true
+    # Distance (metres) to place the target waypoint along the detection bearing.
+    # Each time _update_target_state runs with a valid detection, a waypoint is placed
+    # this far ahead of the robot in the direction of the bbox centre.
+    # As the robot moves, new detections continuously refresh the bearing.
+    target_approach_step_m: 0.5
 
 
     # ==========================================================================

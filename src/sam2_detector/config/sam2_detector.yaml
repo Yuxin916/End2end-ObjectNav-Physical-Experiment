@@ -7,13 +7,19 @@ sam2_detector:
 
     # params to MMDINOSAM_Perceiver constructor
     # Minimum GroundingDINO box confidence to keep a detection.
-    box_threshold:  0.3
+    # Fix 2: raised from 0.3 → 0.40 to reduce false positives when robot moves.
+    box_threshold:  0.40
     # Minimum GroundingDINO token (phrase) confidence threshold.
-    text_threshold: 0.3
-    temporal_buffer_size: 5
-    temporal_min_hits: 3
+    # Fix 2: raised from 0.3 → 0.35.
+    text_threshold: 0.35
+    # Fix 2: reduced buffer/min_hits so stale frames expire faster.
+    temporal_buffer_size: 3
+    temporal_min_hits: 2
     use_temporal_filter: True
     nms_threshold: 0.5
+    # Fix 1: flush temporal tracker when robot moves this far (m) or turns this much (deg).
+    movement_flush_dist_m: 0.3
+    movement_flush_turn_deg: 20.0
 
 
     # ==========================================================================
