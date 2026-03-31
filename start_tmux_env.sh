@@ -2,7 +2,7 @@
 set -e
 
 SESSION_NAME="sagan_nav_physical_experiment"
-WORKDIR="$HOME/projects/VLN_CL_CoTNav/End2end-ObjectNav-Physical-Experiment"
+WORKDIR="/home/all/yuxin/End2end-ObjectNav-Physical-Experiment"
 
 # kill existing session if exists
 if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
@@ -29,10 +29,10 @@ tmux split-window -v -t "$SESSION_NAME":0.1 -c "$WORKDIR"
 tmux select-layout -t "$SESSION_NAME":0 tiled
 
 # common pre-build setup
-PREBUILD_SETUP="cd \"$WORKDIR\" && conda deactivate && source .venv/bin/activate && source /opt/ros/jazzy/setup.zsh"
+PREBUILD_SETUP="cd \"$WORKDIR\" && conda deactivate && source .venv/bin/activate && source /opt/ros/jazzy/setup.bash"
 
 # full post-build setup
-FULL_SETUP="cd \"$WORKDIR\" && conda deactivate && source .venv/bin/activate && source /opt/ros/jazzy/setup.zsh && source install/setup.zsh"
+FULL_SETUP="cd \"$WORKDIR\" && conda deactivate && source .venv/bin/activate && source /opt/ros/jazzy/setup.bash && source install/setup.bash"
 
 # commands to auto-run after build
 CMD_PANE0="ROS_DOMAIN_ID=1 ROBOT_CONFIG_PATH='omniDir' ./system_simulation.sh"
