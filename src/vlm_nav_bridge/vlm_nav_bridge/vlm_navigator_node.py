@@ -381,7 +381,6 @@ class VLMNavigatorNode(Node):
         self._debug_image_cache: dict = {}
         self._debug_save_subdirs: dict = {}
         self._debug_save_counters: dict = {}
-        self._debug_save_last_size: dict = {}  # name → (h, w) of last written image
         if self.debug_save_dir:
             import os as _os
             _slots = ('fov', 'vlm_bev_debug', 'egocentric_rgb', 'frontier_rgb_debug',
@@ -1191,6 +1190,12 @@ class VLMNavigatorNode(Node):
             self.current_wp_y = None
             self.current_wp_is_target = False
             self.latest_detections = []
+            # Immediately trigger the first VLM inference when a new goal
+            # arrives, then reset the timer so subsequent ticks are aligned
+            # from this point (avoiding a redundant fire right after).
+            if new_goal and self._model_loaded and self._pose_received and not self._initial_spin_active:
+                self._run_vlm_step()
+                self.vlm_timer.reset()
 
     # ------------------------------------------------------------------
     # VLM timer callback
@@ -1587,24 +1592,23 @@ class VLMNavigatorNode(Node):
             self._debug_image_cache[name] = img
 
     def _save_debug_images_callback(self):
-        """Write each cached debug image to its subfolder at ~1 Hz.
+        """Write cached debug images to disk only after valid image arrival.
 
-        All slot counters advance together every tick so frame indices stay
-        aligned across subfolders even when some topics start later or fire
-        infrequently (e.g. sam2_detection only when a detection exists).
-        Ticks where a slot has no image yet produce no file for that slot.
+        This avoids startup placeholder frames (e.g. 1x1 black images) before
+        each stream has produced real data.
         """
         import os as _os
         for name, subdir in self._debug_save_subdirs.items():
-            idx = self._debug_save_counters[name]
             img = self._debug_image_cache.get(name)
-            if img is not None:
-                h, w = img.shape[:2]
-                self._debug_save_last_size[name] = (h, w)
-                bgr = cv2.cvtColor(img.astype(np.uint8), cv2.COLOR_RGB2BGR)
-            else:
-                h, w = self._debug_save_last_size.get(name, (1, 1))
-                bgr = np.zeros((h, w, 3), dtype=np.uint8)
+            if img is None:
+                continue
+            if not isinstance(img, np.ndarray) or img.ndim < 2:
+                continue
+            h, w = img.shape[:2]
+            if h <= 1 or w <= 1:
+                continue
+            idx = self._debug_save_counters[name]
+            bgr = cv2.cvtColor(img.astype(np.uint8), cv2.COLOR_RGB2BGR)
             cv2.imwrite(_os.path.join(subdir, f'{idx:06d}.png'), bgr)
             self._debug_save_counters[name] = idx + 1
 
