@@ -9,11 +9,11 @@ vlm_navigator:
 
     # Absolute path to the VLN_CL_CoTNav repository root.
     # Used to inject PYTHONPATH for InternVL imports (no Habitat dependency).
-    vln_repo_path: "/home/tsaisplus/projects/VLN_CL_CoTNav"
+    vln_repo_path: "../"
 
     # Path to InternVL checkpoint directory (contains pytorch_model*.bin + config.json).
     # PosD is the best-performing deployable template (dual-ViT, angular soft CE training).
-    checkpoint: "/home/tsaisplus/projects/VLN_CL_CoTNav/all_log/experiments/prompt_revision/a100_dualvit_llm-64_mlp-train-patch-32768-acc1_BEVftFOV_FrontierRGB_PosD__FRONTIER_PIXEL_NUMBER_ONLY/checkpoints"
+    checkpoint: "../all_log/experiments/prompt_revision/a100_dualvit_llm-64_mlp-train-patch-32768-acc1_BEVftFOV_FrontierRGB_PosD__FRONTIER_PIXEL_NUMBER_ONLY/checkpoints"
 
     # Prompt template — must match the checkpoint.
     # Single-ViT templates (no camera required):
@@ -337,7 +337,7 @@ vlm_navigator:
     #   fov/, vlm_bev_debug/, frontier_rgb_debug/,
     #   sam2_detection_debug/, sam2_segmentation_debug/
     # Leave empty ("") to disable image saving entirely.
-    debug_save_dir: "/home/tsaisplus/projects/VLN_CL_CoTNav/End2end-ObjectNav-Physical-Experiment/debug_images"
+    debug_save_dir: "./debug_images"
 
     # How often to write images to disk (seconds). Default 1.0 = 1 Hz.
     debug_save_interval_sec: 1.0

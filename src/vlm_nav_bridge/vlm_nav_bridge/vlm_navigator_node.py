@@ -461,7 +461,7 @@ class VLMNavigatorNode(Node):
 
     def _declare_parameters(self):
         self.declare_parameter('vln_repo_path',
-                               '/home/tsaisplus/projects/VLN_CL_CoTNav')
+                               '../')
         self.declare_parameter('checkpoint', '')
         self.declare_parameter('template',
                                'BEVftFOV_Sem_Pos__FRONTIER_PIXEL_NUMBER_ONLY_STRATEGY2')

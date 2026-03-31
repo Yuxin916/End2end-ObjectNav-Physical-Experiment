@@ -48,7 +48,7 @@ _DUAL_VIT_TEMPLATES = {
 
 @dataclass
 class VLMConfig:
-    vln_repo_path: str = "/home/tsaisplus/projects/VLN_CL_CoTNav"
+    vln_repo_path: str = "../"
     checkpoint: str = ""
     template: str = "BEVftFOV_FrontierRGB_PosB__FRONTIER_PIXEL_NUMBER_ONLY_STRATEGY2"
     device: str = "cuda:0"

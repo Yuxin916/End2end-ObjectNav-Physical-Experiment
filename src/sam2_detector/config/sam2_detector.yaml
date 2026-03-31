@@ -1,7 +1,7 @@
 sam2_detector:
   ros__parameters:
     # Single detector pipeline: GroundingDINO + SAM (mp3d_traj_sam parity).
-    vln_repo_path: "/home/tsaisplus/projects/VLN_CL_CoTNav"
+    vln_repo_path: "../"  # relative to sam2_detector package; used for InternVL imports
     scene_mode: "unity"   # unity | real_world (controls goal translation rule set)
 
 

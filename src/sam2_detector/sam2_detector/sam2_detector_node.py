@@ -233,7 +233,7 @@ class SAM2DetectorNode(Node):
         self.declare_parameter('inference_hz', 1.0)
         self.declare_parameter('device', 'cuda:0')
         self.declare_parameter('camera_topic', '/egocentric_rgb')
-        self.declare_parameter('vln_repo_path', '/home/tsaisplus/projects/VLN_CL_CoTNav')
+        self.declare_parameter('vln_repo_path', '../')
         self.declare_parameter('scene_mode', 'unity')  # unity | real_world
 
         self.declare_parameter('box_threshold', 0.3)

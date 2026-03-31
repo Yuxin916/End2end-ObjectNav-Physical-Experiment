@@ -29,7 +29,7 @@ def generate_launch_description():
     pkg_share = get_package_share_directory('vlm_nav_bridge')
     default_config = os.path.join(pkg_share, 'config', 'vlm_nav_bridge.yaml')
 
-    vln_repo = '/home/tsaisplus/projects/VLN_CL_CoTNav'
+    vln_repo = '../'
 
     # Build PYTHONPATH for the VLN codebase.
     # Required so the ROS process can import InternVL + prompt/mapping helpers.
@@ -50,7 +50,7 @@ def generate_launch_description():
     args = [
         DeclareLaunchArgument(
             'checkpoint',
-            default_value='/home/tsaisplus/projects/VLN_CL_CoTNav/all_log/experiments/prompt_revision/a100_dualvit_llm-64_mlp-train-patch-32768-acc1_BEVftFOV_FrontierRGB_PosD__FRONTIER_PIXEL_NUMBER_ONLY/checkpoints',
+            default_value='../all_log/experiments/prompt_revision/a100_dualvit_llm-64_mlp-train-patch-32768-acc1_BEVftFOV_FrontierRGB_PosD__FRONTIER_PIXEL_NUMBER_ONLY/checkpoints',
                               description='Absolute path to InternVL checkpoint directory'),
         DeclareLaunchArgument('template',
                               default_value='BEVftFOV_FrontierRGB_PosD__FRONTIER_PIXEL_NUMBER_ONLY_STRATEGY2',

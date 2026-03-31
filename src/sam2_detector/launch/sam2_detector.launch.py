@@ -24,7 +24,7 @@ def generate_launch_description():
     # Precedence: launch arguments below override config-file defaults.
     args = [
         DeclareLaunchArgument('vln_repo_path',
-                              default_value='/home/tsaisplus/projects/VLN_CL_CoTNav',
+                              default_value='../',
                               description='Path to VLN repo root (for mp3d GroundingDINO+SAM)'),
         DeclareLaunchArgument('inference_hz', default_value='2.0',
                               description='Maximum inference rate (Hz)'),
