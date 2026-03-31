@@ -30,7 +30,7 @@ sam2_detector:
     # VLM bridge directly since it reads the latest /target_detection message.
     # 2.0 Hz is sufficient for 5-second VLM inference cycles.
     # maximum 2 detections per second
-    inference_hz: 2.0
+    inference_hz: 1.0
 
     # GPU device for SAM / GroundingDINO inference.
     # Can be different from vlm_nav_bridge device if multi-GPU available.

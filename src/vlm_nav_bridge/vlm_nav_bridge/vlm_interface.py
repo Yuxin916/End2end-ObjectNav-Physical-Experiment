@@ -54,6 +54,7 @@ class VLMConfig:
     device: str = "cuda:0"
     max_new_tokens: int = 64
     min_new_tokens: int = 1
+    inference_interval: float = 5.0
     num_beams: int = 1
     temperature: float = 0.0
     do_sample: bool = False

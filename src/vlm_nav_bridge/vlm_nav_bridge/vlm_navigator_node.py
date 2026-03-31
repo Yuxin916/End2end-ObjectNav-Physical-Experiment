@@ -50,7 +50,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from sensor_msgs.msg import PointCloud2, Image
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import PointStamped, Pose2D, TwistStamped
-from std_msgs.msg import String, Bool, Int8
+from std_msgs.msg import String, Bool, Int8, Float32
 
 import cv2
 from PIL import Image as PILImage
@@ -163,7 +163,7 @@ class VLMNavigatorNode(Node):
         self.current_wp_x: float = None
         self.current_wp_y: float = None
         self.current_wp_is_target: bool = False
-        self._last_wp_reached_time: float = 0.0  # wall-clock time of last waypoint-reached retrigger
+
 
         self._pose_received = False
         self._scan_received = False
@@ -184,8 +184,20 @@ class VLMNavigatorNode(Node):
         self._last_detection_signature: Optional[Tuple[Any, ...]] = None
         self._pending_detection_interrupt: bool = False
 
+        # Initial 360° spin state: robot spins in place once at node startup
+        # (triggered on the first pose received), accumulating odometry rotation
+        # until 2π is reached before VLM navigation begins.
+        self._initial_spin_active: bool = True   # armed; activates on first pose
+        self._initial_spin_accumulated_rad: float = 0.0
+        self._initial_spin_prev_yaw: Optional[float] = None
+        self._initial_spin_angular_vel: float = 6  # rad/s (CCW)
+
         # Frontier birth RGB (dual-ViT templates)
         self.latest_rgb_pil: PILImage.Image = None
+        self._last_camera_process_time: float = 0.0
+        # Precomputed base remap maps for panorama→pinhole (yaw-independent parts).
+        # Keyed by (out_w, out_h, hfov_deg, w_in, h_in).  Per-frame cost = scalar add only.
+        self._pano_base_maps: Optional[tuple] = None  # (key, base_map_x, map_y)
         self.latest_panoramic_arr: Optional[np.ndarray] = None  # raw panoramic before projection
         self.frontier_birth_rgb: dict = {}    # (ix, iy) → PIL.Image
         self.target_birth_rgb: Optional[PILImage.Image] = None
@@ -249,12 +261,27 @@ class VLMNavigatorNode(Node):
             Image, self.camera_topic,
             self._camera_callback, default_qos
         )
-
+        # Track waypoint_converter's adjusted goal so distance checks use the
+        # actual navigation target rather than the raw frontier position.
+        self.create_subscription(
+            PointStamped, '/way_point',
+            self._converted_waypoint_callback, default_qos
+        )
+        # waypoint_converter publishes this when the adjusted waypoint is reached.
+        # Use it as the primary trigger for the next VLM step (avoids the
+        # frontier_min_distance / goal_reached_threshold mismatch entirely).
+        self.create_subscription(
+            Float32, '/way_point_reached',
+            self._waypoint_reached_callback, default_qos
+        )
         # ------------------------------------------------------------------
         # Publications
         # ------------------------------------------------------------------
-        self.way_point_pub = self.create_publisher(
-            Pose2D, '/way_point_with_heading', default_qos
+        # self.way_point_pub = self.create_publisher(
+        #     Pose2D, '/way_point_with_heading', default_qos
+        # )
+        self.fake_way_point_pub = self.create_publisher(
+            PointStamped, '/way_point', default_qos
         )
         self.bev_debug_pub = self.create_publisher(
             Image, '/vlm_bev_debug', default_qos
@@ -479,6 +506,7 @@ class VLMNavigatorNode(Node):
         self.declare_parameter('waypoint_reached_pause_sec', 2.0)
         self.declare_parameter('waypoint_frame', 'map')
         self.declare_parameter('camera_topic', '/camera/image')
+        self.declare_parameter('camera_hz', 5.0)
         self.declare_parameter('camera_is_panorama', True)
         self.declare_parameter('camera_project_width', 640)
         self.declare_parameter('camera_project_height', 480)
@@ -551,6 +579,7 @@ class VLMNavigatorNode(Node):
         self.waypoint_reached_pause_sec = g('waypoint_reached_pause_sec').value
         self.waypoint_frame = g('waypoint_frame').value
         self.camera_topic = g('camera_topic').value
+        self.camera_hz = float(g('camera_hz').value)
         self.camera_is_panorama = g('camera_is_panorama').value
         self.camera_project_width = g('camera_project_width').value
         self.camera_project_height = g('camera_project_height').value
@@ -633,7 +662,27 @@ class VLMNavigatorNode(Node):
             self._last_reliable_yaw_abs = float(self.latest_yaw)
             self.last_camera_heading_rad = 0.0
             self.last_camera_heading_source = 'yaw'
+            # Seed the spin tracker on first valid yaw.
+            if self._initial_spin_active and self._initial_spin_prev_yaw is None:
+                self._initial_spin_prev_yaw = float(self.latest_yaw)
+                self.get_logger().info('Starting initial 360° spin.')
         self._pose_received = True
+
+        # Accumulate rotation for the initial 360° spin.
+        if self._initial_spin_active and self._initial_spin_prev_yaw is not None:
+            diff = self.latest_yaw - self._initial_spin_prev_yaw
+            # Normalise to [-π, π]
+            diff = (diff + math.pi) % (2 * math.pi) - math.pi
+            self._initial_spin_accumulated_rad += abs(diff)
+            if self._initial_spin_accumulated_rad >= 2 * math.pi:
+                self._initial_spin_active = False
+                self._initial_spin_accumulated_rad = 0.0
+                self._initial_spin_prev_yaw = None
+                self.get_logger().info(
+                    'Initial 360° spin complete. Handing over to VLM navigation.'
+                )
+        if self._initial_spin_active:
+            self._initial_spin_prev_yaw = float(self.latest_yaw)
 
         # Initialise mapper on first pose
         if not self.mapper.is_initialised:
@@ -650,53 +699,109 @@ class VLMNavigatorNode(Node):
             )
             self._publish_live_bev_debug()
 
-        # Check if current waypoint reached → early retrigger
+        # Check if current waypoint reached → retrigger VLM or mark success.
         if self.current_wp_x is not None:
-            wp_threshold = float(self.goal_reached_threshold)
-            if self.current_wp_is_target:
-                target_threshold = float(self.target_reached_threshold)
-                if target_threshold > 0.0:
-                    wp_threshold = target_threshold
             dist = math.sqrt(
                 (p.x - self.current_wp_x) ** 2 +
                 (p.y - self.current_wp_y) ** 2
             )
-            if dist < wp_threshold:
-                if self.current_wp_is_target:
+            if self.current_wp_is_target:
+                target_threshold = float(self.target_reached_threshold)
+                if dist < target_threshold:
                     self.get_logger().info(
-                        f'Target waypoint reached (dist={dist:.2f} m, threshold={wp_threshold:.2f} m). '
+                        f'Target waypoint reached (dist={dist:.2f} m, threshold={target_threshold:.2f} m). '
                         f'Goal "{self.object_goal}" marked successful.'
                     )
                     self._mark_target_goal_success()
-                    return
-                now = time.monotonic()
-                min_retrigger_interval = max(3.0, float(self.inference_interval) * 0.1)
-                if now - self._last_wp_reached_time < min_retrigger_interval:
-                    return
-                self._last_wp_reached_time = now
-                pause_s = max(0.0, float(self.waypoint_reached_pause_sec))
-                if pause_s > 0.0:
-                    self._hold_after_wp_reached_until_s = max(
-                        float(self._hold_after_wp_reached_until_s), now + pause_s
-                    )
-                    self.cmd_vel_pub.publish(self._build_zero_cmd_vel_msg())
-                self.get_logger().info(
-                    f'Waypoint reached (dist={dist:.2f} m). '
-                    f'Pause stop for {pause_s:.2f}s; re-triggering VLM.'
-                )
-                self.current_wp_x = None
-                self.current_wp_y = None
-                self.current_wp_is_target = False
-                self._run_vlm_step()
+            else:
+                if dist < float(self.goal_reached_threshold):
+                    self._on_waypoint_reached(dist)
+
+    def _converted_waypoint_callback(self, msg: PointStamped):
+        """Update current_wp_x/y to the waypoint_converter's adjusted position.
+
+        Only applies to frontier (non-target) waypoints.  For target waypoints
+        the converter may snap to a traversable point much closer than the true
+        target, which would cause an immediate false "reached" trigger.  Target
+        waypoint position must stay at the raycasted target world coordinate.
+        """
+        if self.current_wp_x is None:
+            return
+        if self.current_wp_is_target:
+            return
+        self.current_wp_x = float(msg.point.x)
+        self.current_wp_y = float(msg.point.y)
+
+    def _waypoint_reached_callback(self, msg: Float32):
+        """Legacy callback for /way_point_reached (waypoint_converter removed).
+        Kept as a fallback; delegates to _on_waypoint_reached."""
+        if self.current_wp_x is None:
+            return
+        if self.current_wp_is_target:
+            return
+        self._on_waypoint_reached(msg.data)
+
+    def _on_waypoint_reached(self, dist: float = 0.0):
+        """Common handler when a non-target waypoint is reached.
+
+        Called from _pose_callback distance check (primary) or the legacy
+        _waypoint_reached_callback.  Clears the current waypoint, optionally
+        pauses, re-triggers VLM inference, and resets the VLM timer.
+        """
+        now = time.monotonic()
+
+        self.current_wp_x = None
+        self.current_wp_y = None
+        self.current_wp_is_target = False
+
+        pause_s = max(0.0, float(self.waypoint_reached_pause_sec))
+        if pause_s > 0.0:
+            self._hold_after_wp_reached_until_s = max(
+                float(self._hold_after_wp_reached_until_s), now + pause_s
+            )
+            self.cmd_vel_pub.publish(self._build_zero_cmd_vel_msg())
+        self.get_logger().info(
+            f'Waypoint reached (dist={dist:.2f} m). Re-triggering VLM.'
+        )
+        self._run_vlm_step()
+        self.vlm_timer.reset()
 
     def _lookup_pose_at(self, stamp_s: float):
-        """Return (x, y, z, yaw) from pose history closest to stamp_s.
-        Falls back to latest pose if history is empty or stamp is out of range."""
+        """Return (x, y, z, yaw, matched_stamp_s) interpolated from pose history at stamp_s.
+        Linearly interpolates between the two bracketing entries; falls back to nearest
+        if stamp is out of range.  Falls back to latest pose if history is empty."""
         if not self._pose_history:
-            return self.latest_pose_x, self.latest_pose_y, self.latest_pose_z, self.latest_yaw
-        best = min(self._pose_history, key=lambda e: abs(e[0] - stamp_s))
-        _, x, y, z, yaw = best
-        return x, y, z, yaw
+            latest_stamp = self.latest_pose_stamp_s if self.latest_pose_stamp_s is not None else float('nan')
+            return self.latest_pose_x, self.latest_pose_y, self.latest_pose_z, self.latest_yaw, latest_stamp
+
+        history = list(self._pose_history)
+
+        # Find bracketing entries
+        before = [e for e in history if e[0] <= stamp_s]
+        after  = [e for e in history if e[0] >  stamp_s]
+
+        if not before:
+            # stamp before entire history — use oldest
+            t, x, y, z, yaw = after[0]
+            return x, y, z, yaw, t
+        if not after:
+            # stamp after entire history — use newest
+            t, x, y, z, yaw = before[-1]
+            return x, y, z, yaw, t
+
+        t0, x0, y0, z0, yaw0 = before[-1]
+        t1, x1, y1, z1, yaw1 = after[0]
+        alpha = (stamp_s - t0) / max(t1 - t0, 1e-9)
+
+        # Linear interpolation for position
+        xi = x0 + alpha * (x1 - x0)
+        yi = y0 + alpha * (y1 - y0)
+        zi = z0 + alpha * (z1 - z0)
+        # Wrap-aware yaw interpolation
+        dyaw = ((yaw1 - yaw0) + math.pi) % (2.0 * math.pi) - math.pi
+        yawi = yaw0 + alpha * dyaw
+
+        return xi, yi, zi, yawi, stamp_s
 
     def _scan_callback(self, msg: PointCloud2):
         """Parse PointCloud2 → (N, 3) float32 array and update BEV map."""
@@ -719,6 +824,10 @@ class VLMNavigatorNode(Node):
 
     def _camera_callback(self, msg: Image):
         """Decode incoming sensor_msgs/Image and keep projected RGB for frontier birth."""
+        now = time.time()
+        if self.camera_hz > 0.0 and (now - self._last_camera_process_time) < 1.0 / self.camera_hz:
+            return
+        self._last_camera_process_time = now
         self.latest_rgb_stamp_s = float(msg.header.stamp.sec) + float(msg.header.stamp.nanosec) * 1e-9
         try:
             n = msg.width * msg.height
@@ -908,9 +1017,6 @@ class VLMNavigatorNode(Node):
         hfov = math.radians(float(self.camera_project_hfov_deg))
         crop_heading = heading_override if heading_override is not None else self._compute_camera_crop_heading()
         self._last_projected_crop_heading = float(crop_heading)
-        # Image longitude increases to the right; ROS yaw is CCW.
-        # camera_heading_sign controls frame convention, camera_heading_gain
-        # controls how much heading is applied for the current panorama source.
         yaw = (
             float(self.camera_heading_gain) * float(self.camera_heading_sign) * crop_heading
             + math.radians(float(self.camera_yaw_offset_deg))
@@ -922,19 +1028,21 @@ class VLMNavigatorNode(Node):
         vfov = 2.0 * math.atan(math.tan(hfov * 0.5) * (out_h / max(float(out_w), 1.0)))
         fy = cy / max(math.tan(vfov * 0.5), 1e-6)
 
-        uu, vv = np.meshgrid(np.arange(out_w, dtype=np.float32),
-                             np.arange(out_h, dtype=np.float32))
-        x = np.ones_like(uu, dtype=np.float32)  # forward
-        y = (uu - cx) / fx                      # right
-        z = -(vv - cy) / fy                     # up
+        cache_key = (out_w, out_h, self.camera_project_hfov_deg, w_in, h_in)
+        if self._pano_base_maps is None or self._pano_base_maps[0] != cache_key:
+            uu, vv = np.meshgrid(np.arange(out_w, dtype=np.float32),
+                                 np.arange(out_h, dtype=np.float32))
+            xr = np.ones_like(uu, dtype=np.float32)
+            yr = (uu - cx) / fx
+            zr = -(vv - cy) / fy
+            lon_rel = np.arctan2(yr, xr)
+            lat = np.arctan2(zr, np.sqrt(xr * xr + yr * yr))
+            base_map_x = ((lon_rel / (2.0 * np.pi)) + 0.5) * (w_in - 1.0)
+            map_y = (0.5 - (lat / np.pi)) * (h_in - 1.0)
+            self._pano_base_maps = (cache_key, base_map_x, map_y)
 
-        lon_rel = np.arctan2(y, x)  # [-pi, pi]
-        lat = np.arctan2(z, np.sqrt(x * x + y * y))  # [-pi/2, pi/2]
-        lon = lon_rel + yaw
-        lon = (lon + np.pi) % (2.0 * np.pi) - np.pi
-
-        map_x = ((lon / (2.0 * np.pi)) + 0.5) * (w_in - 1.0)
-        map_y = (0.5 - (lat / np.pi)) * (h_in - 1.0)
+        base_map_x, map_y = self._pano_base_maps[1], self._pano_base_maps[2]
+        map_x = base_map_x + float(yaw) / (2.0 * math.pi) * (w_in - 1.0)
 
         projected = cv2.remap(
             pano_rgb, map_x.astype(np.float32), map_y.astype(np.float32),
@@ -982,7 +1090,7 @@ class VLMNavigatorNode(Node):
         self.last_camera_heading_rad = smoothed
         return smoothed
 
-    def _compute_camera_crop_heading(self) -> float:
+    def _compute_camera_crop_heading(self, yaw_override: float = None) -> float:
         """
         Compute panorama crop heading with initial-relative preference and fallback.
 
@@ -990,6 +1098,10 @@ class VLMNavigatorNode(Node):
           1) relative yaw from odometry quaternion (if valid),
           2) motion direction from pose delta (only when yaw invalid),
           3) hold previous heading.
+
+        yaw_override: if provided, use this yaw instead of self.latest_yaw.
+          Pass det_yaw when computing bearing for a historical detection so that
+          the crop heading is consistent with the pose at image capture time.
         """
         now_s = self.get_clock().now().nanoseconds / 1e9
         use_rel = bool(self.camera_heading_use_initial_relative)
@@ -1000,12 +1112,13 @@ class VLMNavigatorNode(Node):
 
         source = 'hold'
         heading = float(self.last_camera_heading_rad)
-        latest_yaw_valid = self.latest_yaw is not None and np.isfinite(self.latest_yaw)
+        yaw_to_use = yaw_override if yaw_override is not None else self.latest_yaw
+        latest_yaw_valid = yaw_to_use is not None and np.isfinite(yaw_to_use)
 
         # Yaw-first policy: if odometry yaw is finite, always drive crop heading
         # so turn-in-place rotates the egocentric crop correctly.
         if latest_yaw_valid:
-            yaw_abs = float(self.latest_yaw)
+            yaw_abs = float(yaw_to_use)
             self._last_reliable_yaw_abs = yaw_abs
             if use_rel and self.initial_yaw is not None:
                 heading = self._wrap_to_pi(yaw_abs - float(self.initial_yaw))
@@ -1043,7 +1156,8 @@ class VLMNavigatorNode(Node):
                 f'gain={float(self.camera_heading_gain):.2f} '
                 f'offset_deg={float(self.camera_yaw_offset_deg):.1f}'
             )
-        if self.latest_pose_x is not None and self.latest_pose_y is not None:
+        # Only update prev pose when using current state (not historical override).
+        if yaw_override is None and self.latest_pose_x is not None and self.latest_pose_y is not None:
             self._prev_pose_xy = (float(self.latest_pose_x), float(self.latest_pose_y))
         return heading
 
@@ -1140,7 +1254,11 @@ class VLMNavigatorNode(Node):
                 pass  # Never let birth RGB update crash the debug timer
 
     def _stop_cmd_vel_timer_callback(self):
-        """20 Hz timer: while stop-hold is active, keep publishing cmd_vel=0."""
+        """20 Hz timer: drive initial spin; while stop-hold is active, keep publishing cmd_vel=0."""
+        # Initial 360° spin takes priority over stop-hold.
+        if self._initial_spin_active:
+            self.cmd_vel_pub.publish(self._build_spin_cmd_vel_msg(self._initial_spin_angular_vel))
+            return
         now = time.monotonic()
         hold_wp_pause = now < float(self._hold_after_wp_reached_until_s)
         if self._hold_position_after_success or self._stop_cmd_vel_count > 0 or hold_wp_pause:
@@ -1171,6 +1289,19 @@ class VLMNavigatorNode(Node):
         msg.twist.angular.z = 0.0
         return msg
 
+    def _build_spin_cmd_vel_msg(self, angular_z: float) -> TwistStamped:
+        """Build a pure-rotation TwistStamped command (in-place spin)."""
+        msg = TwistStamped()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = 'vehicle'
+        msg.twist.linear.x = 0.0
+        msg.twist.linear.y = 0.0
+        msg.twist.linear.z = 0.0
+        msg.twist.angular.x = 0.0
+        msg.twist.angular.y = 0.0
+        msg.twist.angular.z = float(angular_z)
+        return msg
+
     def _publish_safety_stop(self, level: int):
         """Publish /stop command for pathFollower safety stop."""
         stop_msg = Int8()
@@ -1179,6 +1310,9 @@ class VLMNavigatorNode(Node):
 
     def _run_vlm_step(self):
         """Core step wrapper with re-entry guard."""
+        if self._initial_spin_active:
+            self.get_logger().debug('Skip VLM step: initial 360° spin in progress.')
+            return
         if self._running_vlm_step:
             self.get_logger().debug('Skip VLM step: previous step still running.')
             return
@@ -1187,13 +1321,6 @@ class VLMNavigatorNode(Node):
             self._run_vlm_step_once()
         finally:
             self._running_vlm_step = False
-
-        # Drain at most one queued detection interrupt after current run.
-        if self._pending_detection_interrupt:
-            self._pending_detection_interrupt = False
-            if self._can_trigger_detection_interrupt():
-                self.get_logger().info('Running queued VLM interrupt from detection change.')
-                self._run_vlm_step()
 
     def _run_vlm_step_once(self):
         """Core step: BEV → frontiers → VLM → waypoint."""
@@ -1354,11 +1481,20 @@ class VLMNavigatorNode(Node):
         # Publish as Pose2D to /way_point_with_heading so waypoint_converter
         # can apply traversability adjustment before forwarding to local_planner.
         # theta=0 means no heading preference at arrival.
-        wp_msg = Pose2D()
-        wp_msg.x = float(wx)
-        wp_msg.y = float(wy)
-        wp_msg.theta = 0.0
-        self.way_point_pub.publish(wp_msg)
+        # wp_msg = Pose2D()
+        # wp_msg.x = float(wx)
+        # wp_msg.y = float(wy)
+        # wp_msg.theta = 0.0
+        # # self.way_point_pub.publish(wp_msg)
+
+        fake_wp_msg = PointStamped()
+        fake_wp_msg.header.stamp = self.get_clock().now().to_msg()
+        fake_wp_msg.header.frame_id = 'map'
+        fake_wp_msg.point.x = float(wx)
+        fake_wp_msg.point.y = float(wy)
+        fake_wp_msg.point.z = 0.0
+        self.fake_way_point_pub.publish(fake_wp_msg)
+
         self._hold_after_wp_reached_until_s = 0.0
 
         self.current_wp_x = wx
@@ -1490,11 +1626,21 @@ class VLMNavigatorNode(Node):
         self._hold_position_after_success = True
         if self.latest_pose_x is not None:
             # Primary stop path: reset waypoint_converter's internal waypoint source.
-            stop_pose = Pose2D()
-            stop_pose.x = float(self.latest_pose_x)
-            stop_pose.y = float(self.latest_pose_y)
-            stop_pose.theta = 0.0
-            self.way_point_pub.publish(stop_pose)
+            # stop_pose = Pose2D()
+            # stop_pose.x = float(self.latest_pose_x)
+            # stop_pose.y = float(self.latest_pose_y)
+            # stop_pose.theta = 0.0
+            # self.way_point_pub.publish(stop_pose)
+
+
+            fake_wp_msg = PointStamped()
+            fake_wp_msg.header.stamp = self.get_clock().now().to_msg()
+            fake_wp_msg.header.frame_id = 'map'
+            fake_wp_msg.point.x = float(self.latest_pose_x)
+            fake_wp_msg.point.y = float(self.latest_pose_y)
+            fake_wp_msg.point.z = 0.0
+            self.fake_way_point_pub.publish(fake_wp_msg)
+
             self.get_logger().info('Published stop Pose2D to /way_point_with_heading.')
         self._stop_cmd_vel_count = 0
 
@@ -1995,53 +2141,39 @@ class VLMNavigatorNode(Node):
             and not self._hold_position_after_success
         )
 
-    def _request_detection_interrupt(self, reason: str):
-        """No-cooldown detection interrupt: run now or queue one immediate retry."""
-        if not self._can_trigger_detection_interrupt():
-            return
-        if self._running_vlm_step:
-            self._pending_detection_interrupt = True
-            self.get_logger().info(f'Detection changed ({reason}); queued VLM interrupt.')
-            return
-        self.get_logger().info(f'Detection changed ({reason}); running immediate VLM interrupt.')
-        self._run_vlm_step()
-
     def _raycast_obstacle_along_bearing(self, bearing_world: float,
-                                         max_range_m: float = None,
                                          origin_x: float = None,
                                          origin_y: float = None) -> Tuple[float, float, bool]:
         """Cast a ray on the global BEV obstacle map from robot position along bearing.
 
         Returns (world_x, world_y, hit) where hit is True if an obstacle was found.
-        If no obstacle is found, returns the point at max_range along the bearing.
+        The ray travels until it exits the map; if no obstacle is encountered the
+        target is considered invalid (hit=False).
         origin_x/y default to latest_pose_x/y when not provided.
         """
-        if max_range_m is None:
-            max_range_m = float(self.mapper.cfg.range_max)
         res = float(self.mapper.cfg.resolution)
         threshold = float(self.mapper.cfg.map_pred_threshold)
         rx = float(origin_x) if origin_x is not None else float(self.latest_pose_x)
         ry = float(origin_y) if origin_y is not None else float(self.latest_pose_y)
         cos_b = math.cos(bearing_world)
         sin_b = math.sin(bearing_world)
-        min_dist = max(0.3, float(self.mapper.cfg.range_min))
 
         if self.mapper.full_map is not None:
-            n_steps = int(max_range_m / res)
-            start_step = int(min_dist / res)
-            for i in range(start_step, n_steps + 1):
+            n = self.mapper.global_cells
+            start_step = int(0.3 / res)
+            max_steps = int(self.mapper.cfg.map_size * 1.42 / res)
+            for i in range(start_step, max_steps + 1):
                 d = i * res
                 wx = rx + d * cos_b
                 wy = ry + d * sin_b
                 gc = int((wx - self.mapper.map_origin_x) / res)
                 gr = int((wy - self.mapper.map_origin_y) / res)
-                if 0 <= gc < self.mapper.global_cells and 0 <= gr < self.mapper.global_cells:
-                    if self.mapper.full_map[0, gr, gc] >= threshold:
-                        return (wx, wy, True)
+                if not (0 <= gc < n and 0 <= gr < n):
+                    break
+                if self.mapper.full_map[0, gr, gc] >= threshold:
+                    return (wx, wy, True)
 
-        wx_far = rx + max_range_m * cos_b
-        wy_far = ry + max_range_m * sin_b
-        return (wx_far, wy_far, False)
+        return (rx, ry, False)
 
     def _update_target_state(self):
         """Update target_found and reproject target BEV position.
@@ -2121,12 +2253,30 @@ class VLMNavigatorNode(Node):
 
         # Use the pose at image capture time, not the current pose.
         det_stamp = self.latest_detection.get('stamp', None)
+        now_wall = self.get_clock().now().nanoseconds / 1e9
         if det_stamp is not None:
-            det_pose_x, det_pose_y, det_pose_z, det_yaw = self._lookup_pose_at(float(det_stamp))
+            det_pose_x, det_pose_y, det_pose_z, det_yaw, matched_stamp = self._lookup_pose_at(float(det_stamp))
+            self.get_logger().warn(
+                f'[target_localize] STAMP ALIGNMENT '
+                f'detection_stamp={float(det_stamp):.6f} '
+                f'matched_pose_stamp={matched_stamp:.6f} '
+                f'stamp_delta={abs(float(det_stamp) - matched_stamp) * 1000:.1f}ms '
+                f'now={now_wall:.6f} '
+                f'age_since_detection={(now_wall - float(det_stamp)) * 1000:.0f}ms | '
+                f'det_pose=({det_pose_x:.3f}, {det_pose_y:.3f}, {det_pose_z:.3f}) '
+                f'det_yaw={math.degrees(det_yaw):.1f}deg | '
+                f'current_pose=({self.latest_pose_x:.3f}, {self.latest_pose_y:.3f}) '
+                f'current_yaw={math.degrees(self.latest_yaw):.1f}deg '
+                f'pose_history_len={len(self._pose_history)}'
+            )
         else:
             det_pose_x, det_pose_y = self.latest_pose_x, self.latest_pose_y
             det_pose_z = self.latest_pose_z
             det_yaw = self.latest_yaw
+            self.get_logger().warn(
+                f'[target_localize] STAMP ALIGNMENT no detection stamp — falling back to latest pose '
+                f'pose=({det_pose_x:.3f}, {det_pose_y:.3f}) yaw={math.degrees(det_yaw):.1f}deg'
+            )
 
         x1, _y1, x2, _y2 = [float(v) for v in bbox]
         cx_img = (float(self.camera_project_width) - 1.0) * 0.5
@@ -2136,7 +2286,10 @@ class VLMNavigatorNode(Node):
 
         theta_img = math.atan((u_det - cx_img) / fx)
 
-        crop_heading = float(self._compute_camera_crop_heading())
+        # Pass det_yaw so crop_heading is computed from the historical robot yaw
+        # (at image capture time), not the current yaw — keeps proj_yaw and
+        # robot_yaw on the same temporal reference.
+        crop_heading = float(self._compute_camera_crop_heading(yaw_override=det_yaw))
         proj_yaw = (
             float(self.camera_heading_gain) * float(self.camera_heading_sign)
             * crop_heading
@@ -2154,6 +2307,14 @@ class VLMNavigatorNode(Node):
             bearing_world, origin_x=det_pose_x, origin_y=det_pose_y,
         )
         self._target_raycast_hit = raycast_hit
+
+        if not raycast_hit:
+            self._file_logger.info(
+                f'[target_state] SKIP — no obstacle along bearing '
+                f'{math.degrees(bearing_world):.1f}deg; target not locked'
+            )
+            return
+
         wz = float(det_pose_z) if det_pose_z is not None else 0.0
         raycast_dist = math.sqrt((wx - float(det_pose_x))**2 + (wy - float(det_pose_y))**2)
 

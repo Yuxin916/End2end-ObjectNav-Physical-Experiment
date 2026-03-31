@@ -86,20 +86,6 @@ def generate_launch_description():
         parameters=[
             # Load defaults from YAML
             LaunchConfiguration('config_file'),
-            # Override select params via launch arguments (takes precedence).
-            {
-                'checkpoint': LaunchConfiguration('checkpoint'),
-                'template': LaunchConfiguration('template'),
-                'device': LaunchConfiguration('device'),
-                'inference_interval': LaunchConfiguration('inference_interval'),
-                'pad2square': LaunchConfiguration('pad2square'),
-                'normalize_type': LaunchConfiguration('normalize_type'),
-                'vln_repo_path': LaunchConfiguration('vln_repo_path'),
-                'target_detection_topic': LaunchConfiguration('target_detection_topic'),
-                'target_confidence_threshold': LaunchConfiguration('target_confidence_threshold'),
-                'target_require_sam2': LaunchConfiguration('target_require_sam2'),
-                'bev_only': LaunchConfiguration('bev_only'),
-            },
         ],
         # Remappings if topic names differ
         remappings=[

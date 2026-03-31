@@ -104,7 +104,7 @@ vlm_navigator:
     # Excludes floor returns from the obstacle map.
     # Tune for robot: Go2 sensor is ~0.3–0.5 m above floor → 0.1 m min excludes floor well.
     # G1 sensor is ~1.0 m above floor → 0.1 m min may miss low furniture (try -0.3 to -0.5).
-    obstacle_height_min: 0.1
+    obstacle_height_min: -0.6
 
     # Points above (robot_z + obstacle_height_max) are NOT counted as obstacles.
     # Excludes ceiling and high mounted objects.
@@ -207,7 +207,7 @@ vlm_navigator:
     # When reached, vlm_navigator marks current goal success, publishes /vlm_target_reached=true,
     # clears internal object_goal, and waits for the next /object_goal command.
     # Set <= 0 to reuse goal_reached_threshold.
-    target_reached_threshold: 0.5
+    target_reached_threshold: 1.0
 
     # After a non-target waypoint is reached, hold cmd_vel=0 for this duration
     # while VLM inference runs and before the next waypoint is issued.
