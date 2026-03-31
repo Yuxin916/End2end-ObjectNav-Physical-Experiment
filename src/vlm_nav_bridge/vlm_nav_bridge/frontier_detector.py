@@ -32,8 +32,7 @@ class FrontierConfig:
     dbscan_eps_m: float = 0.3        # DBSCAN clustering radius in metres (matches training eps=0.3)
     min_separation_m: float = 1.0    # merge frontiers closer than this (metres)
     resolution: float = 0.05         # m/cell  (used for distance conversion)
-    crop_radius: int = 150           # cells in local crop
-    output_size: int = 448           # pixels in local BEV image
+    output_size: int = 448           # cells = pixels (1:1, no resize)
     # Corner suppression: occ is dilated by this kernel before masking frontiers.
     # A larger kernel causes dilated walls to overlap at corners, eliminating
     # spurious frontier points trapped between two walls.
@@ -48,7 +47,6 @@ class FrontierDetector:
         self.cfg = cfg
         self._min_dist_cells = cfg.min_distance_m / cfg.resolution
         self._dbscan_eps_cells = int(math.ceil(cfg.dbscan_eps_m / cfg.resolution))
-        self._px_per_cell = cfg.output_size / (2.0 * cfg.crop_radius)
 
     def extract_from_global(
         self,
@@ -57,36 +55,28 @@ class FrontierDetector:
         robot_g_col: int,
         robot_x: float,
         robot_y: float,
-        crop_radius: int = None,
         output_size: int = None,
     ) -> np.ndarray:
         """
         Extract frontier centres from the **global** BEV map and return
-        positions in local 448×448 pixel coordinates.
-
-        Matches training code: findContours on global explored mask, remove
-        occupied pixels, distance filter, DBSCAN-like clustering via
-        dilate + connected-components, one centroid per cluster.
+        positions in local pixel coordinates (1 cell = 1 pixel).
 
         Parameters
         ----------
         full_map : (4, H, W) float32 — global map from LidarBEVMapper
         robot_g_row, robot_g_col : robot position in global grid cells
         robot_x, robot_y : robot world position (metres) for local-pixel conversion
-        crop_radius, output_size : override cfg defaults if needed
+        output_size : override cfg default if needed
 
         Returns
         -------
-        frontiers : (K, 2) float32 array of (row, col) in local 448×448 pixels,
+        frontiers : (K, 2) float32 array of (row, col) in local pixels,
                     sorted by distance from robot.  K ≤ cfg.top_k.  May be empty.
         """
         cfg = self.cfg
-        if crop_radius is None:
-            crop_radius = cfg.crop_radius
         if output_size is None:
             output_size = cfg.output_size
         border = cfg.clear_border_px
-        px_per_cell = output_size / (2.0 * crop_radius)
         centre = output_size / 2.0
 
         n = full_map.shape[1]
@@ -177,13 +167,13 @@ class FrontierDetector:
         if not cluster_centers_global:
             return np.empty((0, 2), dtype=np.float32)
 
-        # ---- 6. Convert global cell → local 448×448 pixel ----------------
+        # ---- 6. Convert global cell → local pixel (1 cell = 1 pixel) ------
         local_centers = []
         for gr, gc in cluster_centers_global:
             dcol = gc - robot_g_col
             drow = gr - robot_g_row
-            lp_col = centre + dcol * px_per_cell
-            lp_row = centre - drow * px_per_cell
+            lp_col = centre + dcol
+            lp_row = centre - drow
 
             if border <= lp_row < output_size - border and border <= lp_col < output_size - border:
                 dist = math.sqrt(dcol ** 2 + drow ** 2) * cfg.resolution
@@ -199,8 +189,8 @@ class FrontierDetector:
         for lp_row, lp_col, dist in local_centers:
             too_close = False
             for kr, kc, _ in kept:
-                gr_diff = (lp_row - kr) / px_per_cell
-                gc_diff = (lp_col - kc) / px_per_cell
+                gr_diff = lp_row - kr
+                gc_diff = lp_col - kc
                 if math.sqrt(gr_diff ** 2 + gc_diff ** 2) < min_sep_cells:
                     too_close = True
                     break
@@ -242,8 +232,7 @@ class FrontierDetector:
             frontier_map, connectivity=8
         )
 
-        cell_per_px = (2.0 * cfg.crop_radius) / cfg.output_size
-        min_dist_px = (cfg.min_distance_m / cfg.resolution) / cell_per_px
+        min_dist_px = cfg.min_distance_m / cfg.resolution
         valid = []
         for label in range(1, num_labels):
             area = stats[label, cv2.CC_STAT_AREA]

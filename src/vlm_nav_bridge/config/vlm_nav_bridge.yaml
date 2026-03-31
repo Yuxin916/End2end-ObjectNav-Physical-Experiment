@@ -140,13 +140,10 @@ vlm_navigator:
     # 1 = no dilation. Tune to match training data appearance (try 3–5).
     obstacle_render_dilate_ksize: 3
 
-    # Half-width of the local BEV crop around the robot, in cells.
-    # crop = robot_cell ± 150 → 300×300 cells → resized to output_size.
-    # mp3d parity: 150 cells (= 7.5 m radius). Do NOT change.
-    crop_radius: 150
-
-    # Output BEV image size in pixels (both width and height).
-    # mp3d parity: 448×448. Must match InternVL ViT input size.
+    # Local BEV crop size in cells (= pixels, 1:1 mapping, no resize).
+    # crop = robot_cell ± (output_size/2) → 448×448 cells.
+    # At 0.05 m/cell this covers ±11.2 m around the robot.
+    # Must match InternVL ViT input size.
     output_size: 448
 
 
@@ -175,8 +172,8 @@ vlm_navigator:
 
     # Minimum frontier cluster area in pixels.
     # Clusters smaller than this are discarded as noise.
-    # At 448×448 with crop_radius=150, 1 pixel ≈ (300/448)×0.05 ≈ 0.034 m.
-    # Default 4 pixels keeps clusters ≥ ~0.14 m wide. Increase if too many tiny frontiers.
+    # At 448×448 with 1 cell = 1 pixel, 1 pixel = 0.05 m.
+    # Default 4 pixels keeps clusters ≥ ~0.20 m wide. Increase if too many tiny frontiers.
     frontier_min_area: 4
 
     # Frontier pixels within this many pixels of the image border are discarded.

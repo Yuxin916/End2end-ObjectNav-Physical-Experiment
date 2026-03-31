@@ -16,8 +16,7 @@ Global map layout (matches VLN training parameters exactly):
     Ch 3 – trajectory : all robot positions (accumulates over time)
 
 Local BEV image for VLM input:
-  - Crop ±crop_radius cells around robot (default 150 → 300×300 cells)
-  - Resize to output_size × output_size pixels (default 448×448)
+  - Crop ±(output_size/2) cells around robot (448×448 cells, 1 cell = 1 pixel)
   - Channels 0 & 1 thresholded → grayscale image
     free/explored → white (255), obstacle → black (0), unknown → grey (127)
   - Agent arrow, trajectory, frontier dots, FOV triangle rendered on top
@@ -70,8 +69,7 @@ class BEVMapperConfig:
     obstacle_render_dilate_ksize: int = 1
 
     # Local crop / output
-    crop_radius: int = 150           # cells
-    output_size: int = 448           # pixels
+    output_size: int = 448           # cells = pixels (1:1, no resize)
 
     # Visualisation colours (BGR)
     gray_unknown: int = 127
@@ -390,46 +388,30 @@ class LidarBEVMapper:
         self._prev_g_col = cc
 
     def _extract_local_map(self):
-        """Crop ±crop_radius cells around robot and resize to output_size."""
-        cr = self.cfg.crop_radius
+        """Crop ±(output_size/2) cells around robot — 1 cell = 1 pixel, no resize."""
         out = self.cfg.output_size
+        half = out // 2
         rc, cc = self.robot_g_row, self.robot_g_col
         n = self.global_cells
 
-        # Compute source window (may be smaller than 2*cr if near map edge)
-        r0 = max(0, rc - cr)
-        r1 = min(n, rc + cr)
-        c0 = max(0, cc - cr)
-        c1 = min(n, cc + cr)
+        r0 = max(0, rc - half)
+        r1 = min(n, rc + half)
+        c0 = max(0, cc - half)
+        c1 = min(n, cc + half)
 
-        # Slices into the destination (full 2*cr × 2*cr canvas)
-        dr0 = cr - (rc - r0)   # top padding if near top edge
-        dc0 = cr - (cc - c0)
+        dr0 = half - (rc - r0)
+        dc0 = half - (cc - c0)
 
-        canvas = np.zeros((4, 2 * cr, 2 * cr), dtype=np.float32)
-        # Flip row axis: global map has g_row increasing northward (+Y), but BEV
-        # image convention (matching VLN training) has row 0 = north = top of image.
-        # Without this flip, south would appear at the top and waypoints get
-        # published with the wrong Y sign.
+        canvas = np.zeros((4, out, out), dtype=np.float32)
+        # Flip row axis: global map g_row increases northward (+Y), but BEV
+        # image convention has row 0 = north = top of image.
         src = self.full_map[:, r0:r1, c0:c1]
         canvas[:, dr0:dr0 + (r1 - r0), dc0:dc0 + (c1 - c0)] = src[:, ::-1, :]
 
-        # Resize each channel independently (nearest-neighbour to avoid blurring)
-        local = np.zeros((4, out, out), dtype=np.float32)
-        for ch in range(4):
-            local[ch] = cv2.resize(
-                canvas[ch], (out, out), interpolation=cv2.INTER_NEAREST
-            )
-
-        # Apply post-processing to the local crop only (not the global map).
-        # This mirrors post_process_map() from the VLN training pipeline so the
-        # VLM and frontier detector see the same processed representation used at
-        # training time, while preserving the raw accumulated counts in full_map.
-        local = self._post_process_local_map(local, out)
+        local = self._post_process_local_map(canvas, out)
 
         self.local_map = local
 
-        # Robot pixel position in the local crop (always centre)
         self.local_pixel_row = out / 2.0
         self.local_pixel_col = out / 2.0
 
@@ -494,70 +476,6 @@ class LidarBEVMapper:
         result[1] = exp_copy_1
         return result
 
-    def _post_process_full_map(self):
-        """Port of post_process_map() from mapping_utils.py (VLN_CL_CoTNav training).
-
-        NOTE: This method is kept for reference but is NO LONGER called automatically.
-        Post-processing is now applied to the local crop only (in _extract_local_map)
-        to avoid corrupting the globally accumulated obstacle/explored counts.
-        Call this manually if you need a fully post-processed global map snapshot.
-
-        Fills raycasting gaps via morphological close (dilate+erode, 3×3) on both
-        occ and exp channels, then removes explored blobs disconnected from the
-        robot's position via two connected-component passes.
-        """
-        k = np.ones((5, 5), np.uint8)
-        occ = self.full_map[0]  # (H, W) float32  — training: full_map[:, :, 0]
-        exp = self.full_map[1]  # (H, W) float32  — training: full_map[:, :, 1]
-
-        # Morphological close: dilate then erode fills gaps without expanding boundaries
-        occ = cv2.erode(cv2.dilate(occ.astype(np.uint8), k), k).astype(np.float32)
-        exp = cv2.erode(cv2.dilate(exp.astype(np.uint8), k), k).astype(np.float32)
-
-        exp[occ == 1] = 0.0
-
-        # Pass 1: keep only the explored component containing the robot
-        exp_binary = (exp > 0).astype(np.uint8)
-        num_labels, labels, _, _ = cv2.connectedComponentsWithStats(
-            exp_binary, connectivity=4
-        )
-        if num_labels > 1:
-            ry, rx = self.robot_g_row, self.robot_g_col
-            target = int(labels[ry, rx])
-            if target == 0:
-                min_dist, target = float('inf'), 1
-                for i in range(1, num_labels):
-                    ys, xs = np.where(labels == i)
-                    d = int(((xs - rx) ** 2 + (ys - ry) ** 2).min())
-                    if d < min_dist:
-                        min_dist, target = d, i
-            exp = (labels == target).astype(np.float32)
-
-        exp[occ == 1] = 1.0
-        self.full_map[1] = exp
-        exp_copy_1 = exp.copy()
-
-        # Pass 2: trim occ to cells connected to the explored region
-        exp_binary2 = (exp > 0).astype(np.uint8)
-        num_labels2, labels2, _, _ = cv2.connectedComponentsWithStats(
-            exp_binary2, connectivity=4
-        )
-        if num_labels2 > 1:
-            ry, rx = self.robot_g_row, self.robot_g_col
-            target2 = int(labels2[ry, rx])
-            if target2 == 0:
-                min_dist, target2 = float('inf'), 1
-                for i in range(1, num_labels2):
-                    ys, xs = np.where(labels2 == i)
-                    d = int(((xs - rx) ** 2 + (ys - ry) ** 2).min())
-                    if d < min_dist:
-                        min_dist, target2 = d, i
-            exp2 = (labels2 == target2).astype(np.float32)
-            occ[exp2 == 0] = 0.0
-            exp_copy_1[exp2 == 0] = 0.0
-
-        self.full_map[0] = occ
-        self.full_map[1] = exp_copy_1
 
     # ------------------------------------------------------------------
     # BEV image rendering for VLM input
@@ -609,8 +527,8 @@ class LidarBEVMapper:
         # arrow_color=(0,0,255) BGR = red in RGB output (matches VLN training convention).
         traj_mask = (self.local_map[3] > 0).astype(np.uint8)
         if traj_mask.any():
-            # Optionally dilate the rendered trail to close sub-pixel gaps after
-            # the 300→448 INTER_NEAREST resize (visual only, does not touch the map).
+            # Optionally dilate the rendered trail to fill single-cell gaps
+            # (visual only, does not touch the map).
             k = int(self.cfg.trail_erode_ksize)
             if k > 1:
                 traj_mask = cv2.dilate(traj_mask, np.ones((k, k), np.uint8))
@@ -749,11 +667,8 @@ class LidarBEVMapper:
         cr, cc = out // 2, out // 2
         cfg = self.cfg
 
-        # Scale vision_range (cells) to pixels in the local BEV crop.
-        # vision_range defines the explored radius and matches training convention.
-        # Do NOT use range_max here — that is a lidar filter, not a visibility radius.
-        max_depth_px = int(cfg.vision_range *
-                           (cfg.output_size / (2.0 * cfg.crop_radius)))
+        # vision_range is in cells; with 1 cell = 1 pixel, it maps directly to pixels.
+        max_depth_px = int(cfg.vision_range)
 
         half_a = math.radians(cfg.hfov_deg / 2.0)
         # Keep identical yaw convention as arrow and explored-wedge map update.

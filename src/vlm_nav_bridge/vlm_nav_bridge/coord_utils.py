@@ -2,16 +2,15 @@
 Coordinate conversion utilities between:
   - ROS map frame (metres, X east / Y north / Z up)
   - Global BEV grid  (integer cells, origin at map_origin_x/y)
-  - Local BEV image  (448×448 pixels, robot at centre pixel 224,224)
+  - Local BEV image  (output_size×output_size pixels, robot at centre)
 
 BEV layout (matches VLN_CL_CoTNav convention):
   - Rows increase downward  → corresponds to  -Y  in map frame
   - Cols increase rightward → corresponds to  +X  in map frame
   - The global map is axis-aligned with the ROS map frame (no rotation).
 
-Local crop parameters (from mp3d_val_evaluate_clean.yaml):
-  crop_radius  = 150 cells  (7.5 m at 0.05 m/cell)
-  output_size  = 448 pixels
+Local crop: ±(output_size/2) cells around the robot, 1 cell = 1 pixel (no resize).
+  output_size = 448 → crop is 448×448 cells = 22.4 m × 22.4 m at 0.05 m/cell.
 """
 
 import math
@@ -53,28 +52,24 @@ def global_cell_to_world(col: int, row: int,
 
 def local_pixel_to_world(pixel_row: float, pixel_col: float,
                           robot_x: float, robot_y: float,
-                          crop_radius: int = 150,
                           output_size: int = 448,
                           resolution: float = 0.05) -> tuple:
     """
-    Convert a pixel in the local 448×448 BEV image to world (x, y) in metres.
+    Convert a pixel in the local BEV image to world (x, y) in metres.
 
-    The local BEV is a window of ±crop_radius cells around the robot, resized
-    to output_size×output_size pixels.
+    The local BEV is a window of ±(output_size/2) cells around the robot,
+    with 1 cell = 1 pixel (no resize).
 
     Robot is at pixel centre (output_size/2, output_size/2).
-
-    cell_per_px = (2 * crop_radius) / output_size  ≈ 0.670 cells/pixel
 
     Convention (same as VLN training code):
       pixel_col offset → +X world
       pixel_row offset → -Y world  (rows increase downward = south)
     """
-    cell_per_px = (2.0 * crop_radius) / output_size
     centre = output_size / 2.0
 
-    dcol = (pixel_col - centre) * cell_per_px   # cells east (+X)
-    drow = (pixel_row - centre) * cell_per_px   # cells south (-Y)
+    dcol = pixel_col - centre   # cells east (+X)
+    drow = pixel_row - centre   # cells south (-Y)
 
     world_x = robot_x + dcol * resolution
     world_y = robot_y - drow * resolution        # minus: south → -Y
@@ -83,11 +78,9 @@ def local_pixel_to_world(pixel_row: float, pixel_col: float,
 
 def world_to_local_pixel(world_x: float, world_y: float,
                           robot_x: float, robot_y: float,
-                          crop_radius: int = 150,
                           output_size: int = 448,
                           resolution: float = 0.05) -> tuple:
     """Inverse of local_pixel_to_world.  Returns (pixel_row, pixel_col)."""
-    cell_per_px = (2.0 * crop_radius) / output_size
     centre = output_size / 2.0
 
     dx = world_x - robot_x
@@ -96,8 +89,8 @@ def world_to_local_pixel(world_x: float, world_y: float,
     dcol = dx / resolution        # cells east
     drow = -dy / resolution       # cells south (flip sign)
 
-    pixel_col = centre + dcol / cell_per_px
-    pixel_row = centre + drow / cell_per_px
+    pixel_col = centre + dcol
+    pixel_row = centre + drow
     return float(pixel_row), float(pixel_col)
 
 
@@ -107,7 +100,6 @@ def world_to_local_pixel(world_x: float, world_y: float,
 
 def global_cell_to_local_pixel(g_col: int, g_row: int,
                                 robot_g_col: int, robot_g_row: int,
-                                crop_radius: int = 150,
                                 output_size: int = 448) -> tuple:
     """
     Convert a global map cell to a pixel in the local BEV image.
@@ -118,14 +110,13 @@ def global_cell_to_local_pixel(g_col: int, g_row: int,
       - row increases downward   -> -Y
     Since global g_row increases northward (+Y), row offset is flipped here.
     """
-    px_per_cell = output_size / (2.0 * crop_radius)
     centre = output_size / 2.0
 
     dcol = g_col - robot_g_col
     drow = g_row - robot_g_row
 
-    pixel_col = centre + dcol * px_per_cell
-    pixel_row = centre - drow * px_per_cell
+    pixel_col = centre + dcol
+    pixel_row = centre - drow
     return float(pixel_row), float(pixel_col)
 
 

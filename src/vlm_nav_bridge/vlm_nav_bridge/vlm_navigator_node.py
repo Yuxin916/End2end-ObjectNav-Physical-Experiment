@@ -97,7 +97,6 @@ class VLMNavigatorNode(Node):
             map_pred_threshold=self.map_pred_threshold,
             exp_pred_threshold=self.exp_pred_threshold,
             explored_max_rays_per_scan=self.explored_max_rays_per_scan,
-            crop_radius=self.crop_radius,
             output_size=self.output_size,
             hfov_deg=self.hfov_deg,
             obstacle_render_dilate_ksize=self.obstacle_render_dilate_ksize,
@@ -114,7 +113,6 @@ class VLMNavigatorNode(Node):
             min_distance_m=self.frontier_min_distance_m,
             top_k=self.frontier_top_k,
             resolution=self.map_resolution,
-            crop_radius=self.crop_radius,
             output_size=self.output_size,
         )
         self.frontier_detector = FrontierDetector(frontier_cfg)
@@ -489,7 +487,6 @@ class VLMNavigatorNode(Node):
         self.declare_parameter('exp_pred_threshold', 1.0)
         self.declare_parameter('explored_max_rays_per_scan', 512)
         self.declare_parameter('obstacle_render_dilate_ksize', 1)
-        self.declare_parameter('crop_radius', 150)
         self.declare_parameter('output_size', 448)
 
         self.declare_parameter('frontier_exp_threshold', 0.1)
@@ -563,7 +560,6 @@ class VLMNavigatorNode(Node):
         self.exp_pred_threshold = g('exp_pred_threshold').value
         self.explored_max_rays_per_scan = g('explored_max_rays_per_scan').value
         self.obstacle_render_dilate_ksize = g('obstacle_render_dilate_ksize').value
-        self.crop_radius = g('crop_radius').value
         self.output_size = g('output_size').value
 
         self.frontier_exp_threshold = g('frontier_exp_threshold').value
@@ -1242,7 +1238,7 @@ class VLMNavigatorNode(Node):
                     wx, wy = local_pixel_to_world(
                         pixel_row=float(fr), pixel_col=float(fc),
                         robot_x=self.latest_pose_x, robot_y=self.latest_pose_y,
-                        crop_radius=self.crop_radius, output_size=self.output_size,
+                        output_size=self.output_size,
                         resolution=self.map_resolution,
                     )
                     key = (round(wx / _BIRTH_GRID_M), round(wy / _BIRTH_GRID_M))
@@ -1378,7 +1374,6 @@ class VLMNavigatorNode(Node):
                     pixel_col=float(fc),
                     robot_x=self.latest_pose_x,
                     robot_y=self.latest_pose_y,
-                    crop_radius=self.crop_radius,
                     output_size=self.output_size,
                     resolution=self.map_resolution,
                 )
@@ -1439,7 +1434,6 @@ class VLMNavigatorNode(Node):
                     pixel_col=float(target_pixel[1]),
                     robot_x=self.latest_pose_x,
                     robot_y=self.latest_pose_y,
-                    crop_radius=self.crop_radius,
                     output_size=self.output_size,
                     resolution=self.map_resolution,
                 )
@@ -1472,7 +1466,6 @@ class VLMNavigatorNode(Node):
                 pixel_col=float(sel_col),
                 robot_x=self.latest_pose_x,
                 robot_y=self.latest_pose_y,
-                crop_radius=self.crop_radius,
                 output_size=self.output_size,
                 resolution=self.map_resolution,
             )
@@ -1697,7 +1690,6 @@ class VLMNavigatorNode(Node):
                 world_y=float(self.current_wp_y),
                 robot_x=self.latest_pose_x,
                 robot_y=self.latest_pose_y,
-                crop_radius=self.crop_radius,
                 output_size=self.output_size,
                 resolution=self.map_resolution,
             )
@@ -1735,7 +1727,6 @@ class VLMNavigatorNode(Node):
             robot_g_col=self.mapper.robot_g_col,
             robot_x=float(self.latest_pose_x),
             robot_y=float(self.latest_pose_y),
-            crop_radius=self.crop_radius,
             output_size=self.output_size,
         )
 
@@ -1762,7 +1753,6 @@ class VLMNavigatorNode(Node):
                 pixel_col=float(fc),
                 robot_x=self.latest_pose_x,
                 robot_y=self.latest_pose_y,
-                crop_radius=self.crop_radius,
                 output_size=self.output_size,
                 resolution=self.map_resolution,
             )
@@ -1798,7 +1788,6 @@ class VLMNavigatorNode(Node):
                 pixel_col=float(adj_c),
                 robot_x=self.latest_pose_x,
                 robot_y=self.latest_pose_y,
-                crop_radius=self.crop_radius,
                 output_size=self.output_size,
                 resolution=self.map_resolution,
             )
@@ -1821,7 +1810,6 @@ class VLMNavigatorNode(Node):
                 pixel_col=float(pc),
                 robot_x=self.latest_pose_x,
                 robot_y=self.latest_pose_y,
-                crop_radius=self.crop_radius,
                 output_size=self.output_size,
                 resolution=self.map_resolution,
             )
@@ -2025,7 +2013,6 @@ class VLMNavigatorNode(Node):
             world_y=cand_wy,
             robot_x=rx,
             robot_y=ry,
-            crop_radius=self.crop_radius,
             output_size=self.output_size,
             resolution=self.map_resolution,
         )
@@ -2052,7 +2039,6 @@ class VLMNavigatorNode(Node):
         snap_dist_m = (
             math.sqrt(float((snap_r - rr) ** 2 + (snap_c - cc) ** 2))
             * float(self.map_resolution)
-            * (2.0 * float(self.crop_radius) / float(self.output_size))
         )
         if snap_dist_m > float(self.target_screen_standoff_max_snap_m):
             return None
@@ -2061,7 +2047,6 @@ class VLMNavigatorNode(Node):
             pixel_col=float(snap_c),
             robot_x=rx,
             robot_y=ry,
-            crop_radius=self.crop_radius,
             output_size=self.output_size,
             resolution=self.map_resolution,
         )
@@ -2202,7 +2187,7 @@ class VLMNavigatorNode(Node):
             pr, pc = world_to_local_pixel(
                 world_x=wx, world_y=wy,
                 robot_x=self.latest_pose_x, robot_y=self.latest_pose_y,
-                crop_radius=self.crop_radius, output_size=self.output_size,
+                output_size=self.output_size,
                 resolution=self.map_resolution,
             )
             in_local = (0.0 <= pr < float(self.output_size)) and (0.0 <= pc < float(self.output_size))
@@ -2329,7 +2314,7 @@ class VLMNavigatorNode(Node):
         pr, pc = world_to_local_pixel(
             world_x=wx, world_y=wy,
             robot_x=det_pose_x, robot_y=det_pose_y,
-            crop_radius=self.crop_radius, output_size=self.output_size,
+            output_size=self.output_size,
             resolution=self.map_resolution,
         )
         in_local = (0.0 <= pr < float(self.output_size)) and (0.0 <= pc < float(self.output_size))
