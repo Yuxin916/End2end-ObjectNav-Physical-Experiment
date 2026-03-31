@@ -81,17 +81,58 @@ def _translate_objnav(object_goal: str, scene_mode: str = "unity"):
         else:
             target = goal
 
-        if target in ("bathtub", "shower"):
+        if target == "bathtub" or target == "shower":
             target_list = ["bathtub", "shower"]
+        elif target == "sofa" or target == "couch":
+            target_list = ["sofa", "couch"]
+        elif target == "bed":
+            target_list = ["bed", "mattress"]
+        elif target == "potted_plant":
+            target_list = ["potted_plant"]
+        elif target == "chair":
+            target_list = ["chair", "bench"]  # only for hm3d
+        elif target == "tv_monitor":
+            target_list = ["tv_monitor", "ceiling_mounted_tv"]
+        elif target == "toilet":
+            target_list = ["toilet"]
         else:
             target_list = [target]
 
-        if target in ["chair", "bench", "stool", "desk", "couch"]:
-            confusing_target_list = ["chair", "bench", "stool", "desk", "couch"]
+        if target in ["chair", "bench", "stool", "desk"]:
+            confusing_target_list = [
+                "chair", "bench", "stool", "desk", "couch", "sofa", "basket", "weight_bench",
+                "ladder", "bed"
+            ]
         elif target in ["dresser", "cabinet", "counter"]:
             confusing_target_list = ["dresser", "cabinet", "counter"]
+        elif target in ["sofa", "couch"]:
+            confusing_target_list = ["sofa", "couch", "chair", "desk", "bed", "armchair"]
+        elif target in ["potted_plant"]:
+            confusing_target_list = [
+                "potted_plant", "lamp", "lighting", "picture", "trashcan", "shadow", "mirror",
+                "reflection", "desk", "teapot", "pot", "tv_monitor", "table_lamp",
+                "empty_vase", "clock"
+            ]
+        elif target in ["bed"]:
+            confusing_target_list = [
+                "bed", "couch", "cushion", "desk", "table", "counter", "cabinet", "sofa",
+                "chair", "mattress"
+            ]
+        elif target in ["toilet"]:
+            confusing_target_list = [
+                "toilet", "trashcan", "door_handle", "bathtub", "shower", "ottoman",
+                "nightstand", "desk", "chair", "stool", "couch", "sofa", "cabinet", "bench",
+                "bed", "bath_side_table"
+            ]
+        elif target in ["tv_monitor"]:
+            confusing_target_list = [
+                "tv_monitor", "ceiling_mounted_tv", "mirror", "picture_frame", "frame_art",
+                "mirror_frame", "oven", "microwave", "wall", "picture", "fireplace", "vase",
+                "desk", "table", "chair", "lamp", "refrigerator", "cabinet", "monitor"
+            ]
         else:
             confusing_target_list = target_list
+
         return target, target_list, confusing_target_list
 
     # Real-world mode: conservative mapping to avoid over-aggressive relabeling.
@@ -189,7 +230,7 @@ class SAM2DetectorNode(Node):
     # ------------------------------------------------------------------
 
     def _declare_parameters(self):
-        self.declare_parameter('inference_hz', 2.0)
+        self.declare_parameter('inference_hz', 1.0)
         self.declare_parameter('device', 'cuda:0')
         self.declare_parameter('camera_topic', '/egocentric_rgb')
         self.declare_parameter('vln_repo_path', '/home/tsaisplus/projects/VLN_CL_CoTNav')
@@ -244,9 +285,9 @@ class SAM2DetectorNode(Node):
         self.get_logger().info('Loading GroundingDINO + SAM (mp3d style, may take ~30 s) …')
         try:
             self._ensure_vln_imports()
-            from scripts.cv_utils.constants import categories
+            from scripts.cv_utils.constants import real_world_categories
             from scripts.cv_utils.image_perceiver import MMDINOSAM_Perceiver
-            classes = [obj['name'] for obj in categories]
+            classes = [obj['name'] for obj in real_world_categories]
             self._dino_sam_perceiver = MMDINOSAM_Perceiver(
                 classes=classes,
                 no_gpt_seg=True,
@@ -258,7 +299,7 @@ class SAM2DetectorNode(Node):
                 use_temporal_filter=self.use_temporal_filter,
                 nms_threshold=self.nms_threshold,
             )
-            self._dino_sam_perceiver.classes_to_id = {obj['name']: obj['id'] for obj in categories}
+            self._dino_sam_perceiver.classes_to_id = {obj['name']: obj['id'] for obj in real_world_categories}
             self.get_logger().info('GroundingDINO + SAM (mp3d style) ready.')
             self._model_loaded = True
         except ModuleNotFoundError as e:
@@ -381,6 +422,10 @@ class SAM2DetectorNode(Node):
             )
             return
 
+        self.get_logger().warn(
+            f'now time = {now:.3f}, latest image stamp = {image_stamp_s:.3f}, frame age = {frame_age:.3f}s'
+        )
+
         self._last_inference_time = now
 
         # Snapshot the image stamp before inference (it must not change mid-call).
@@ -425,9 +470,10 @@ class SAM2DetectorNode(Node):
         self.detection_pub.publish(String(data=payload))
 
         if detections:
-            self.get_logger().debug(
+            self.get_logger().warn(
                 f'Published {len(detections)} detections for goal="{self.object_goal}" '
                 f'frame_age={frame_age:.3f}s'
+                f'detection used time {time.time() - now:.3f}s'
             )
 
         self._publish_debug(rgb, detections, snap_stamp_sec, snap_stamp_nanosec)

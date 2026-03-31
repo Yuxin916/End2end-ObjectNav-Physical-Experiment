@@ -34,6 +34,11 @@ class FrontierConfig:
     resolution: float = 0.05         # m/cell  (used for distance conversion)
     crop_radius: int = 150           # cells in local crop
     output_size: int = 448           # pixels in local BEV image
+    # Corner suppression: occ is dilated by this kernel before masking frontiers.
+    # A larger kernel causes dilated walls to overlap at corners, eliminating
+    # spurious frontier points trapped between two walls.
+    # 9 cells × 0.05 m = 0.45 m effective wall expansion per side.
+    corner_suppress_ksize: int = 9
 
 
 class FrontierDetector:
@@ -108,20 +113,22 @@ class FrontierDetector:
                         min_d, target = d, i
             exp = (exp_labels == target).astype(np.uint8)
 
+        # Restore occ cells as explored — mirrors training post_process_map:
+        # exp[occ==1] = 1 ensures obstacle boundaries are included in the exp
+        # contour, so frontier pixels appear at the explored/unexplored edge
+        # around obstacles rather than only at open free-space boundaries.
+        exp[occ == 1] = 1
+
         # ---- 2. Contour-based frontier boundary (matches training) --------
         contours, _ = cv2.findContours(exp, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
         exp_border = np.zeros_like(exp)
         cv2.drawContours(exp_border, contours, -1, 1, 1)
 
-        frontier_map = ((exp_border > 0) & (occ == 0)).astype(np.uint8)
-
-        # A true frontier must border UNEXPLORED space (not just explored/obstacle).
-        # This removes inner-contour pixels around obstacle holes, which are surrounded
-        # by explored+obstacle cells and would otherwise bridge separate frontier segments
-        # into one giant connected component.
-        unexplored = ((exp == 0) & (occ == 0)).astype(np.uint8)
-        unexplored_dilated = cv2.dilate(unexplored, np.ones((3, 3), np.uint8))
-        frontier_map = frontier_map & unexplored_dilated
+        # Use a larger dilation for frontier masking so walls expanded from
+        # both sides of a corner overlap → corner frontiers are suppressed.
+        ks = max(3, cfg.corner_suppress_ksize | 1)  # ensure odd
+        occ_dil = cv2.dilate(occ, np.ones((ks, ks), np.uint8))
+        frontier_map = ((exp_border > 0) & (occ_dil == 0)).astype(np.uint8)
 
         if frontier_map.sum() == 0:
             return np.empty((0, 2), dtype=np.float32)

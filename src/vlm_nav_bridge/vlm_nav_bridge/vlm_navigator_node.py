@@ -154,6 +154,9 @@ class VLMNavigatorNode(Node):
         self._last_reliable_yaw_abs: Optional[float] = None
         self._prev_pose_xy: Optional[Tuple[float, float]] = None
         self._last_heading_debug_log_s: float = 0.0
+        # Pose history for temporal-aligned target localization.
+        # Each entry: (stamp_s, x, y, z, yaw). 10 s window at ~50 Hz ≈ 500 entries max.
+        self._pose_history: deque = deque()
 
         self.object_goal: str = ''
 
@@ -468,7 +471,7 @@ class VLMNavigatorNode(Node):
         self.declare_parameter('frontier_close_explore_ksize', 5)
         self.declare_parameter('frontier_min_area', 4)
         self.declare_parameter('frontier_clear_border_px', 2)
-        self.declare_parameter('frontier_min_distance_m', 0.7)
+        self.declare_parameter('frontier_min_distance_m', 0.8)
         self.declare_parameter('frontier_top_k', 5)
         self.declare_parameter('goal_reached_threshold', 0.5)
         # If <= 0, fallback to goal_reached_threshold.
@@ -618,6 +621,13 @@ class VLMNavigatorNode(Node):
         self.latest_pose_y = p.y
         self.latest_pose_z = p.z
         self.latest_yaw = quaternion_to_yaw(q.x, q.y, q.z, q.w)
+        self._pose_history.append((
+            self.latest_pose_stamp_s,
+            float(p.x), float(p.y), float(p.z),
+            float(self.latest_yaw),
+        ))
+        while self._pose_history and self.latest_pose_stamp_s - self._pose_history[0][0] > 10.0:
+            self._pose_history.popleft()
         if self.initial_yaw is None and np.isfinite(self.latest_yaw):
             self.initial_yaw = float(self.latest_yaw)
             self._last_reliable_yaw_abs = float(self.latest_yaw)
@@ -678,6 +688,15 @@ class VLMNavigatorNode(Node):
                 self.current_wp_y = None
                 self.current_wp_is_target = False
                 self._run_vlm_step()
+
+    def _lookup_pose_at(self, stamp_s: float):
+        """Return (x, y, z, yaw) from pose history closest to stamp_s.
+        Falls back to latest pose if history is empty or stamp is out of range."""
+        if not self._pose_history:
+            return self.latest_pose_x, self.latest_pose_y, self.latest_pose_z, self.latest_yaw
+        best = min(self._pose_history, key=lambda e: abs(e[0] - stamp_s))
+        _, x, y, z, yaw = best
+        return x, y, z, yaw
 
     def _scan_callback(self, msg: PointCloud2):
         """Parse PointCloud2 → (N, 3) float32 array and update BEV map."""
@@ -764,7 +783,6 @@ class VLMNavigatorNode(Node):
             f'conf_thr={float(self.target_confidence_threshold):.2f}'
         )
         best = None
-        best_stamp = None
         best_conf = -1.0
         for i, det in enumerate(detections):
             if not isinstance(det, dict):
@@ -800,10 +818,12 @@ class VLMNavigatorNode(Node):
                     f'norm_label="{norm_label}" norm_goal="{norm_goal}"'
                 )
                 continue
+            det_stamp = det.get('stamp', data.get('stamp', None) if isinstance(data, dict) else None)
             candidate = {
                 'label': label,
                 'confidence': conf,
                 'bbox': [float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])],
+                'stamp': float(det_stamp) if det_stamp is not None else None,
             }
             self._file_logger.info(
                 f'[det_cb] det[{i}] ACCEPTED: label="{label}" conf={conf:.3f} '
@@ -813,7 +833,6 @@ class VLMNavigatorNode(Node):
             if conf > best_conf:
                 best_conf = conf
                 best = candidate
-                best_stamp = det.get('stamp', data.get('stamp', None) if isinstance(data, dict) else None)
 
         buf_before = len(self.target_detection_buffer)
         self.latest_detection = best
@@ -1345,8 +1364,7 @@ class VLMNavigatorNode(Node):
         self.current_wp_x = wx
         self.current_wp_y = wy
         _is_target_selection = bool(target_pixel is not None and idx == len(frontiers))
-        _raycast_hit = getattr(self, '_target_raycast_hit', False)
-        self.current_wp_is_target = _is_target_selection and _raycast_hit
+        self.current_wp_is_target = _is_target_selection
 
         # Re-render BEV with selected frontier highlighted
         bev_rgb_sel = self.mapper.render_local_bev(
@@ -1456,6 +1474,10 @@ class VLMNavigatorNode(Node):
 
     def _mark_target_goal_success(self):
         """Mark current object goal as reached"""
+        self.get_logger().warn(
+            f'TARGET REACHED: goal="{self.object_goal}" '
+            f'pos=({self.latest_pose_x:.2f}, {self.latest_pose_y:.2f}). Stopping.'
+        )
         done_msg = Bool()
         done_msg.data = True
         self.target_reached_pub.publish(done_msg)
@@ -1985,18 +2007,21 @@ class VLMNavigatorNode(Node):
         self._run_vlm_step()
 
     def _raycast_obstacle_along_bearing(self, bearing_world: float,
-                                         max_range_m: float = None) -> Tuple[float, float, bool]:
+                                         max_range_m: float = None,
+                                         origin_x: float = None,
+                                         origin_y: float = None) -> Tuple[float, float, bool]:
         """Cast a ray on the global BEV obstacle map from robot position along bearing.
 
         Returns (world_x, world_y, hit) where hit is True if an obstacle was found.
         If no obstacle is found, returns the point at max_range along the bearing.
+        origin_x/y default to latest_pose_x/y when not provided.
         """
         if max_range_m is None:
             max_range_m = float(self.mapper.cfg.range_max)
         res = float(self.mapper.cfg.resolution)
         threshold = float(self.mapper.cfg.map_pred_threshold)
-        rx = float(self.latest_pose_x)
-        ry = float(self.latest_pose_y)
+        rx = float(origin_x) if origin_x is not None else float(self.latest_pose_x)
+        ry = float(origin_y) if origin_y is not None else float(self.latest_pose_y)
         cos_b = math.cos(bearing_world)
         sin_b = math.sin(bearing_world)
         min_dist = max(0.3, float(self.mapper.cfg.range_min))
@@ -2094,7 +2119,16 @@ class VLMNavigatorNode(Node):
         if bbox is None or len(bbox) != 4:
             return
 
-        x1, y1, x2, y2 = [float(v) for v in bbox]
+        # Use the pose at image capture time, not the current pose.
+        det_stamp = self.latest_detection.get('stamp', None)
+        if det_stamp is not None:
+            det_pose_x, det_pose_y, det_pose_z, det_yaw = self._lookup_pose_at(float(det_stamp))
+        else:
+            det_pose_x, det_pose_y = self.latest_pose_x, self.latest_pose_y
+            det_pose_z = self.latest_pose_z
+            det_yaw = self.latest_yaw
+
+        x1, _y1, x2, _y2 = [float(v) for v in bbox]
         cx_img = (float(self.camera_project_width) - 1.0) * 0.5
         hfov = math.radians(float(self.camera_project_hfov_deg))
         fx = cx_img / max(math.tan(hfov * 0.5), 1e-6)
@@ -2110,16 +2144,18 @@ class VLMNavigatorNode(Node):
         )
         theta = theta_img + proj_yaw
 
-        robot_yaw = float(self.latest_yaw)
+        robot_yaw = float(det_yaw)
         # Pinhole: u > cx → theta_img > 0 = target to the **right** in the image.
         # In map frame (yaw ψ CCW from +X), “right of forward” is a **clockwise** turn:
         # unit direction (cos(ψ - θ), sin(ψ - θ)).  Using ψ + θ mirrors left/right and
         # places the BEV target dot on the opposite side of the FOV from DET_CENTER.
         bearing_world = robot_yaw - theta
-        wx, wy, raycast_hit = self._raycast_obstacle_along_bearing(bearing_world)
+        wx, wy, raycast_hit = self._raycast_obstacle_along_bearing(
+            bearing_world, origin_x=det_pose_x, origin_y=det_pose_y,
+        )
         self._target_raycast_hit = raycast_hit
-        wz = float(self.latest_pose_z) if self.latest_pose_z is not None else 0.0
-        raycast_dist = math.sqrt((wx - float(self.latest_pose_x))**2 + (wy - float(self.latest_pose_y))**2)
+        wz = float(det_pose_z) if det_pose_z is not None else 0.0
+        raycast_dist = math.sqrt((wx - float(det_pose_x))**2 + (wy - float(det_pose_y))**2)
 
         if self.target_birth_rgb is None and self.latest_rgb_pil is not None:
             self.target_birth_rgb = self.latest_rgb_pil
@@ -2127,7 +2163,7 @@ class VLMNavigatorNode(Node):
         # --- Convert world waypoint → local BEV pixel ---
         pr, pc = world_to_local_pixel(
             world_x=wx, world_y=wy,
-            robot_x=self.latest_pose_x, robot_y=self.latest_pose_y,
+            robot_x=det_pose_x, robot_y=det_pose_y,
             crop_radius=self.crop_radius, output_size=self.output_size,
             resolution=self.map_resolution,
         )

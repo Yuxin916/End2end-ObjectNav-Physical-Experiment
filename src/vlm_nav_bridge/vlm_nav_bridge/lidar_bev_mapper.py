@@ -53,7 +53,7 @@ class BEVMapperConfig:
     vision_range: int = 100         # cells (= 5 m at 0.05 m/cell)
 
     # Obstacle height range relative to robot z (metres)
-    obstacle_height_min: float = 0.1
+    obstacle_height_min: float = 0.0
     obstacle_height_max: float = 1.5
 
     # Lidar range filter (metres, 2-D distance from robot)
@@ -214,16 +214,22 @@ class LidarBEVMapper:
 
         pts = points_xyz.astype(np.float32)
 
-        # ---- 1. 2-D range filter (all points) ---------------------------
+        # ---- 1. Map bounds filter (all lidar points kept for occ/exp) ------
+        # Range filter removed: lidar depth is accurate, all returns are valid.
+        # Only discard points that fall outside the global map grid (handled
+        # in step 2). A minimal self-hit guard (< 0.1 m) avoids marking the
+        # robot's own body as obstacle.
         dx = pts[:, 0] - robot_x
         dy = pts[:, 1] - robot_y
         dist2d = np.sqrt(dx * dx + dy * dy)
-        range_mask = (dist2d >= self.cfg.range_min) & (dist2d <= self.cfg.range_max)
-        pts = pts[range_mask]
+        pts = pts[dist2d >= 0.1]
         if len(pts) == 0:
             self._update_agent_channels()
             self._extract_local_map()
             return
+        # Recompute dx/dy after filter
+        dx = pts[:, 0] - robot_x
+        dy = pts[:, 1] - robot_y
 
         # ---- 1b. Angular FOV filter — match training convention (forward camera only) ----
         if self.cfg.hfov_deg < 360.0:
@@ -251,12 +257,13 @@ class LidarBEVMapper:
         g_rows = g_rows[valid]
 
         # ---- 3. Occupancy channel (ch 0): obstacle-height points --------
+        # Binary set (matches training: full_map[..., 0] = 0/1, not counts).
         obs_mask = (
-            (pts[:, 2] > robot_z + self.cfg.obstacle_height_min) &
-            (pts[:, 2] < robot_z + self.cfg.obstacle_height_max)
+            (pts[:, 2] >= robot_z + self.cfg.obstacle_height_min) &
+            (pts[:, 2] <  robot_z + self.cfg.obstacle_height_max)
         )
         if obs_mask.any():
-            np.add.at(self.full_map[0], (g_rows[obs_mask], g_cols[obs_mask]), 1.0)
+            self.full_map[0, g_rows[obs_mask], g_cols[obs_mask]] = 1.0
 
         # ---- 4. Explored channel (ch 1) ----------------------------------
         # Raycast from robot cell to each lidar endpoint — stops at obstacles,
@@ -346,7 +353,8 @@ class LidarBEVMapper:
                 if row_lo <= rr <= row_hi and col_lo <= cc2 <= col_hi:
                     local_mask[rr - row_lo, cc2 - col_lo] = True
 
-        self.full_map[1, row_lo:row_hi + 1, col_lo:col_hi + 1][local_mask] += 1.0
+        # Binary set — matches training where exp channel stores 0/1, not counts.
+        self.full_map[1, row_lo:row_hi + 1, col_lo:col_hi + 1][local_mask] = 1.0
 
     def _update_agent_channels(self):
         """Reset ch 2 (agent_pos) and accumulate ch 3 (trajectory)."""
@@ -620,7 +628,7 @@ class LidarBEVMapper:
             tr, tc = int(target_position[0]), int(target_position[1])
             if 0 <= tr < out and 0 <= tc < out:
                 # orange in BGR
-                cv2.circle(img, (tc, tr), self.cfg.frontier_dot_radius + 2,
+                cv2.circle(img, (tc, tr), self.cfg.frontier_dot_radius,
                            (0, 111, 255), -1)
 
         # ---- Frontier dots -----------------------------------------------
@@ -644,12 +652,6 @@ class LidarBEVMapper:
                            color_bgr, -1)
                 cv2.circle(img, (fc, fr), self.cfg.frontier_dot_radius,
                            (255, 255, 255), self.cfg.frontier_width)
-                # cv2.putText(img, str(idx),
-                #             (fc + self.cfg.frontier_dot_radius + 2,
-                #              fr + self.cfg.frontier_dot_radius),
-                #             cv2.FONT_HERSHEY_SIMPLEX,
-                #             self.cfg.frontier_font_size,
-                #             (255, 255, 255), 1, cv2.LINE_AA)
 
         # ---- Agent arrow -------------------------------------------------
         img = self._draw_agent_arrow(img)
