@@ -195,6 +195,8 @@ class VLMNavigatorNode(Node):
         # Frontier birth RGB (dual-ViT templates)
         self.latest_rgb_pil: PILImage.Image = None
         self._last_camera_process_time: float = 0.0
+        # Rate-limit live BEV debug publish (frontier extraction is expensive)
+        self._last_live_bev_publish_time: float = 0.0
         # Precomputed base remap maps for panorama→pinhole (yaw-independent parts).
         # Keyed by (out_w, out_h, hfov_deg, w_in, h_in).  Per-frame cost = scalar add only.
         self._pano_base_maps: Optional[tuple] = None  # (key, base_map_x, map_y)
@@ -832,7 +834,10 @@ class VLMNavigatorNode(Node):
                 self.latest_pose_z,
                 self.latest_yaw,
             )
-            self._publish_live_bev_debug()
+            _now = time.time()
+            if _now - self._last_live_bev_publish_time >= 0.2:  # max 5 Hz
+                self._last_live_bev_publish_time = _now
+                self._publish_live_bev_debug()
 
     def _camera_callback(self, msg: Image):
         """Decode incoming sensor_msgs/Image and keep projected RGB for frontier birth."""

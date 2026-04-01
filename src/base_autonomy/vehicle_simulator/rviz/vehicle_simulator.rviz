@@ -441,7 +441,7 @@ Visualization Manager:
         Depth: 5
         Durability Policy: Volatile
         History Policy: Keep Last
-        Reliability Policy: Reliable
+        Reliability Policy: Best Effort
         Value: /vlm_bev_debug
       Value: false
       Visibility:
@@ -480,7 +480,7 @@ Visualization Manager:
         Depth: 5
         Durability Policy: Volatile
         History Policy: Keep Last
-        Reliability Policy: Reliable
+        Reliability Policy: Best Effort
         Value: /vlm_sam2_detection_debug
       Value: true
     - Class: rviz_default_plugins/Image
@@ -494,7 +494,7 @@ Visualization Manager:
         Depth: 5
         Durability Policy: Volatile
         History Policy: Keep Last
-        Reliability Policy: Reliable
+        Reliability Policy: Best Effort
         Value: /egocentric_rgb
       Value: true
     - Class: rviz_default_plugins/Image
@@ -508,7 +508,7 @@ Visualization Manager:
         Depth: 5
         Durability Policy: Volatile
         History Policy: Keep Last
-        Reliability Policy: Reliable
+        Reliability Policy: Best Effort
         Value: /fov
       Value: true
     - Class: rviz_default_plugins/Image
@@ -522,7 +522,7 @@ Visualization Manager:
         Depth: 5
         Durability Policy: Volatile
         History Policy: Keep Last
-        Reliability Policy: Reliable
+        Reliability Policy: Best Effort
         Value: /vlm_bev_debug
       Value: true
     - Class: rviz_default_plugins/Image
@@ -536,7 +536,7 @@ Visualization Manager:
         Depth: 5
         Durability Policy: Volatile
         History Policy: Keep Last
-        Reliability Policy: Reliable
+        Reliability Policy: Best Effort
         Value: /frontier_rgb_debug
       Value: false
     - Class: rviz_default_plugins/Image
@@ -550,7 +550,7 @@ Visualization Manager:
         Depth: 5
         Durability Policy: Volatile
         History Policy: Keep Last
-        Reliability Policy: Reliable
+        Reliability Policy: Best Effort
         Value: /vlm_sam2_segmentation_debug
       Value: true
   Enabled: true

@@ -22,25 +22,24 @@ rm -rf "./debug_images"
 # create new detached session
 tmux new-session -d -s "$SESSION_NAME" -c "$WORKDIR"
 
-# create 4 panes total
-tmux split-window -h -t "$SESSION_NAME":0 -c "$WORKDIR"
-tmux split-window -v -t "$SESSION_NAME":0.0 -c "$WORKDIR"
-tmux split-window -v -t "$SESSION_NAME":0.1 -c "$WORKDIR"
-tmux select-layout -t "$SESSION_NAME":0 tiled
+# create 6 panes total (2x3 tiled)
+# apply tiled after each split to keep panes large enough for the next split
+for i in $(seq 1 5); do
+    tmux split-window -t "$SESSION_NAME":0.0 -c "$WORKDIR"
+    tmux select-layout -t "$SESSION_NAME":0 tiled
+done
 
-# common pre-build setup
-PREBUILD_SETUP="cd \"$WORKDIR\" && conda deactivate && source .venv/bin/activate && source /opt/ros/jazzy/setup.zsh"
+# setup for all panes
+FULL_SETUP="cd \"$WORKDIR\" && conda deactivate && source .venv/bin/activate && source /opt/ros/jazzy/setup.zsh && source install/setup.zsh && source ../../360_camera/install/setup.zsh"
 
-# full post-build setup
-FULL_SETUP="cd \"$WORKDIR\" && conda deactivate && source .venv/bin/activate && source /opt/ros/jazzy/setup.zsh && source install/setup.zsh"
-
-# commands to auto-run after build
-CMD_PANE0="ROS_DOMAIN_ID=1 ROBOT_CONFIG_PATH='omniDir' ./system_simulation.sh"
+# commands to run
+CMD_PANE0="ROS_DOMAIN_ID=1 ROBOT_CONFIG_PATH='mechanum_drive' ./system_real_robot.sh"
 CMD_PANE1="ROS_DOMAIN_ID=1 ros2 launch vlm_nav_bridge vlm_nav_bridge.launch.py"
 CMD_PANE2="ROS_DOMAIN_ID=1 ros2 launch sam2_detector sam2_detector.launch.py"
+CMD_PANE3="ROS_DOMAIN_ID=1 ros2 launch receive_theta receive_theta_sensorpod.launch"
 
-# send full setup to all 4 panes
-for pane in 0 1 2 3; do
+# send full setup to all 6 panes
+for pane in 0 1 2 3 4 5; do
     tmux send-keys -t "$SESSION_NAME":0.$pane "$FULL_SETUP" C-m
 done
 
@@ -51,7 +50,9 @@ sleep 5
 tmux send-keys -t "$SESSION_NAME":0.0 "$CMD_PANE0" C-m
 tmux send-keys -t "$SESSION_NAME":0.1 "$CMD_PANE1" C-m
 tmux send-keys -t "$SESSION_NAME":0.2 "$CMD_PANE2" C-m
-tmux send-keys -t "$SESSION_NAME":0.3 "echo 'Environment ready in pane 3'" C-m
+tmux send-keys -t "$SESSION_NAME":0.3 "$CMD_PANE3" C-m
+tmux send-keys -t "$SESSION_NAME":0.4 "echo 'Environment ready in pane 4'" C-m
+tmux send-keys -t "$SESSION_NAME":0.5 "echo 'Environment ready in pane 5'" C-m
 
 # attach
 tmux attach -t "$SESSION_NAME"
