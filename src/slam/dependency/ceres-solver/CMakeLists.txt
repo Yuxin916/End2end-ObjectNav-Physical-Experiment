@@ -248,8 +248,8 @@ if (USE_CUDA)
         "find_dependency(CUDAToolkit ${CUDAToolkit_VERSION})")
       enable_language(CUDA)
       if (CMAKE_VERSION VERSION_GREATER_EQUAL "3.18")
-        # Support Maxwell, Pascal, Volta, Turing, and Ampere GPUs.
-        set(CMAKE_CUDA_ARCHITECTURES "50;60;70;80")
+        # CUDA 13.1 supports sm_75+ only (Pascal/Volta removed). Support Turing, Ampere, Ada.
+        set(CMAKE_CUDA_ARCHITECTURES "75;80;86;89")
         message("-- Setting CUDA Architecture to ${CMAKE_CUDA_ARCHITECTURES}")
       endif()
       list(APPEND CERES_CUDA_LIBRARIES
