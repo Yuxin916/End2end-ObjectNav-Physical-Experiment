@@ -182,10 +182,12 @@ class VLMNavigatorNode(Node):
         self._last_detection_signature: Optional[Tuple[Any, ...]] = None
         self._pending_detection_interrupt: bool = False
 
-        # Initial 360° spin state: robot spins in place once at node startup
-        # (triggered on the first pose received), accumulating odometry rotation
-        # until 2π is reached before VLM navigation begins.
-        self._initial_spin_active: bool = True   # armed; activates on first pose
+        # Initial 360° spin state: arm at startup, but do not actually rotate
+        # until the core launch stack has produced real data and settled.
+        self._initial_spin_active: bool = False
+        self._initial_spin_completed: bool = False
+        self._initial_spin_ready_since_s: Optional[float] = None
+        self._last_initial_spin_wait_log_s: float = 0.0
         self._initial_spin_accumulated_rad: float = 0.0
         self._initial_spin_prev_yaw: Optional[float] = None
         self._initial_spin_angular_vel: float = 6  # rad/s (CCW)
@@ -528,6 +530,7 @@ class VLMNavigatorNode(Node):
         self.declare_parameter('target_screen_standoff_m', 0.6)
         self.declare_parameter('target_screen_standoff_max_snap_m', 1.5)
         self.declare_parameter('max_sensor_skew_sec', 0.5)
+        self.declare_parameter('initial_spin_startup_wait_sec', 3.0)
         self.declare_parameter('write_visualize', True)
         self.declare_parameter('bev_only', False)
         self.declare_parameter('debug_save_dir', '')
@@ -599,6 +602,7 @@ class VLMNavigatorNode(Node):
         self.target_screen_standoff_m = g('target_screen_standoff_m').value
         self.target_screen_standoff_max_snap_m = g('target_screen_standoff_max_snap_m').value
         self.max_sensor_skew_sec = g('max_sensor_skew_sec').value
+        self.initial_spin_startup_wait_sec = float(g('initial_spin_startup_wait_sec').value)
         self.write_visualize = g('write_visualize').value
         self.bev_only = g('bev_only').value
         self.debug_save_dir = g('debug_save_dir').value.strip()
@@ -657,10 +661,6 @@ class VLMNavigatorNode(Node):
             self._last_reliable_yaw_abs = float(self.latest_yaw)
             self.last_camera_heading_rad = 0.0
             self.last_camera_heading_source = 'yaw'
-            # Seed the spin tracker on first valid yaw.
-            if self._initial_spin_active and self._initial_spin_prev_yaw is None:
-                self._initial_spin_prev_yaw = float(self.latest_yaw)
-                self.get_logger().info('Starting initial 360° spin.')
         self._pose_received = True
 
         # Accumulate rotation for the initial 360° spin.
@@ -671,6 +671,8 @@ class VLMNavigatorNode(Node):
             self._initial_spin_accumulated_rad += abs(diff)
             if self._initial_spin_accumulated_rad >= 2 * math.pi:
                 self._initial_spin_active = False
+                self._initial_spin_completed = True
+                self._initial_spin_ready_since_s = None
                 self._initial_spin_accumulated_rad = 0.0
                 self._initial_spin_prev_yaw = None
                 self.get_logger().info(
@@ -1254,8 +1256,57 @@ class VLMNavigatorNode(Node):
             except Exception:
                 pass  # Never let birth RGB update crash the debug timer
 
+    def _initial_spin_startup_pending_reasons(self) -> list[str]:
+        reasons = []
+        if not self._pose_received or self.initial_yaw is None or not np.isfinite(self.initial_yaw):
+            reasons.append('pose')
+        if not self._scan_received:
+            reasons.append('scan')
+        if self.latest_rgb_pil is None:
+            reasons.append('camera')
+        if not self.bev_only and not self._model_loaded:
+            reasons.append('vlm_model')
+        if self.egocentric_rgb_pub.get_subscription_count() <= 0:
+            reasons.append('sam2_subscriber')
+        return reasons
+
+    def _maybe_activate_initial_spin(self):
+        if self._initial_spin_completed:
+            return
+        if self._initial_spin_active:
+            return
+
+        now = time.monotonic()
+        pending_reasons = self._initial_spin_startup_pending_reasons()
+        if pending_reasons:
+            self._initial_spin_ready_since_s = None
+            if now - self._last_initial_spin_wait_log_s >= 2.0:
+                self.get_logger().info(
+                    'Holding initial 360° spin until startup is ready: '
+                    + ', '.join(pending_reasons)
+                )
+                self._last_initial_spin_wait_log_s = now
+            return
+
+        if self._initial_spin_ready_since_s is None:
+            self._initial_spin_ready_since_s = now
+            self.get_logger().info(
+                f'Initial 360° spin prerequisites satisfied. '
+                f'Waiting {self.initial_spin_startup_wait_sec:.1f}s for launch settle.'
+            )
+            return
+
+        if now - self._initial_spin_ready_since_s < self.initial_spin_startup_wait_sec:
+            return
+
+        self._initial_spin_active = True
+        self._initial_spin_accumulated_rad = 0.0
+        self._initial_spin_prev_yaw = float(self.latest_yaw)
+        self.get_logger().info('Starting initial 360° spin.')
+
     def _stop_cmd_vel_timer_callback(self):
         """20 Hz timer: drive initial spin; while stop-hold is active, keep publishing cmd_vel=0."""
+        self._maybe_activate_initial_spin()
         # Initial 360° spin takes priority over stop-hold.
         if self._initial_spin_active:
             self.cmd_vel_pub.publish(self._build_spin_cmd_vel_msg(self._initial_spin_angular_vel))
