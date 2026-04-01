@@ -228,6 +228,14 @@ class VLMNavigatorNode(Node):
             history=HistoryPolicy.KEEP_LAST,
             depth=10,
         )
+        # BEST_EFFORT / sensor-data QoS for camera image topics.
+        # Prevents RELIABLE shared-memory backpressure from slow subscribers
+        # (e.g. sam2_detector running at 1 Hz) from stalling delivery to RViz.
+        sensor_qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+        )
         # ------------------------------------------------------------------
         # Subscriptions
         # ------------------------------------------------------------------
@@ -259,7 +267,7 @@ class VLMNavigatorNode(Node):
         # Camera image for frontier birth RGB (dual-ViT templates)
         self.create_subscription(
             Image, self.camera_topic,
-            self._camera_callback, default_qos
+            self._camera_callback, sensor_qos
         )
         # Track waypoint_converter's adjusted goal so distance checks use the
         # actual navigation target rather than the raw frontier position.
@@ -830,6 +838,7 @@ class VLMNavigatorNode(Node):
             n = msg.width * msg.height
             if n == 0:
                 return
+            _t0 = time.time()
             raw = bytes(msg.data)
             if msg.encoding == 'rgb8':
                 arr = np.frombuffer(raw, dtype=np.uint8).reshape(msg.height, msg.width, 3)
@@ -841,6 +850,7 @@ class VLMNavigatorNode(Node):
                 arr = np.stack([arr, arr, arr], axis=-1)
             else:
                 return
+            _t1 = time.time()
             panoramic_rgb = arr.copy()
             if self.camera_is_panorama:
                 self.latest_panoramic_arr = panoramic_rgb  # store raw panoramic for per-frontier crop
@@ -848,17 +858,33 @@ class VLMNavigatorNode(Node):
             else:
                 # Pinhole camera path: no panorama crop heading term.
                 self._last_projected_crop_heading = 0.0
+            _t2 = time.time()
             self.latest_rgb_pil = PILImage.fromarray(arr)
+            _t3 = time.time()
             if self.write_visualize:
                 self._publish_rgb_image(self.panoramic_pub, panoramic_rgb, frame_id='camera')
                 self._publish_rgb_image(self.rgb_pub, arr, frame_id='camera')
+            _t4 = time.time()
             # Publish clean image to /egocentric_rgb (SAM2 detector input).
             self._publish_rgb_image(self.egocentric_rgb_pub, arr, frame_id='camera')
+            _t5 = time.time()
             # Annotated overlay goes to a separate debug-only topic.
             ego_dbg = arr.copy()
             self._draw_target_points_on_egocentric(ego_dbg)
+            _t6 = time.time()
             self._publish_rgb_image(self.egocentric_rgb_debug_pub, ego_dbg, frame_id='camera')
             self._cache_debug_image('egocentric_rgb', ego_dbg)
+            _t7 = time.time()
+            self.get_logger().warn(
+                f'[cam_timing ms] decode={(_t1-_t0)*1e3:.1f}'
+                f' project={(_t2-_t1)*1e3:.1f}'
+                f' pil={(_t3-_t2)*1e3:.1f}'
+                f' pub_vis={(_t4-_t3)*1e3:.1f}'
+                f' pub_ego={(_t5-_t4)*1e3:.1f}'
+                f' draw_pts={(_t6-_t5)*1e3:.1f}'
+                f' pub_dbg+cache={(_t7-_t6)*1e3:.1f}'
+                f' total={(_t7-_t0)*1e3:.1f}'
+            )
         except Exception as e:
             self.get_logger().warn(f'Camera callback error: {e}')
 

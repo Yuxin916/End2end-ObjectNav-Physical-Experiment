@@ -83,8 +83,15 @@ class SAM2DetectorNode(Node):
             history=HistoryPolicy.KEEP_LAST,
             depth=5,
         )
+        # BEST_EFFORT for camera: avoids RELIABLE shared-memory backpressure that
+        # delays delivery to all subscribers (including RViz) when this node is busy.
+        camera_qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+        )
 
-        self.create_subscription(Image, self.camera_topic, self._camera_callback, qos)
+        self.create_subscription(Image, self.camera_topic, self._camera_callback, camera_qos)
         self.create_subscription(String, '/object_goal', self._goal_callback, qos)
 
         self.goal_pub = self.create_publisher(String, '/object_goal', qos)
@@ -238,8 +245,11 @@ class SAM2DetectorNode(Node):
         snap_stamp_nanosec = int(self.latest_rgb_stamp_nanosec)
         snap_stamp_s = float(snap_stamp_sec) + float(snap_stamp_nanosec) / 1e9
 
+        _t0 = time.time()
         rgb = self.latest_rgb.copy()
+        _t1 = time.time()
         all_detections = self._perceiver.perceive(rgb)
+        _t2 = time.time()
         goal_detections = [d for d in all_detections if d['label'] == self.object_goal]
 
         json_detections = []
@@ -269,17 +279,26 @@ class SAM2DetectorNode(Node):
             'image_frame_id': self.latest_rgb_frame_id,
             'detections': json_detections,
         })
+        _t3 = time.time()
         self.detection_pub.publish(String(data=payload))
+        _t4 = time.time()
 
-        if goal_detections:
-            self.get_logger().warn(
-                f'Published {len(goal_detections)} detections for goal="{self.object_goal}" '
-                f'frame_age={frame_age:.3f}s  '
-                f'inference={time.time() - now:.3f}s'
-            )
+        self.get_logger().warn(
+            f'[yolo_timing ms] copy={(_t1-_t0)*1e3:.1f}'
+            f' perceive={(_t2-_t1)*1e3:.1f}'
+            f' serialize={(_t3-_t2)*1e3:.1f}'
+            f' publish={(_t4-_t3)*1e3:.1f}'
+            f' total={(_t4-_t0)*1e3:.1f}'
+            f' n_all={len(all_detections)} n_goal={len(goal_detections)}'
+            f' goal="{self.object_goal}" frame_age={frame_age:.3f}s'
+        )
 
         # Debug images show ALL detections; goal-matching ones are highlighted via label text.
+        _t5 = time.time()
         self._publish_debug(rgb, all_detections, snap_stamp_sec, snap_stamp_nanosec)
+        _t6 = time.time()
+        if _t6 - _t5 > 0.005:
+            self.get_logger().warn(f'[yolo_timing ms] publish_debug={(_t6-_t5)*1e3:.1f}')
 
     # ------------------------------------------------------------------
     # Debug image
