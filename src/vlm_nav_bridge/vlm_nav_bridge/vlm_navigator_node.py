@@ -222,20 +222,24 @@ class VLMNavigatorNode(Node):
         # ------------------------------------------------------------------
         # QoS
         # ------------------------------------------------------------------
-        # Use ROS 2 default (RELIABLE) to match vehicleSimulator and SLAM publishers
+        # RELIABLE for control/navigation topics that must not be dropped.
         default_qos = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
             history=HistoryPolicy.KEEP_LAST,
             depth=10,
         )
-        # BEST_EFFORT / sensor-data QoS for camera image topics.
-        # Prevents RELIABLE shared-memory backpressure from slow subscribers
-        # (e.g. sam2_detector running at 1 Hz) from stalling delivery to RViz.
+        # BEST_EFFORT for all image/debug topics.
+        # RELIABLE image publishers build a retransmission backlog when RViz
+        # (remote laptop) is slow. With SingleThreadedExecutor this backlog
+        # serialises ALL callbacks, causing artificial latency even when
+        # CPU/GPU are underutilised.  depth=1 drops stale frames immediately.
         sensor_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
             history=HistoryPolicy.KEEP_LAST,
             depth=1,
         )
+        # Alias for clarity — image debug topics use sensor_qos.
+        image_qos = sensor_qos
         # ------------------------------------------------------------------
         # Subscriptions
         # ------------------------------------------------------------------
@@ -256,13 +260,14 @@ class VLMNavigatorNode(Node):
             self._target_detection_callback, default_qos
         )
         # Direct detector debug stream passthrough (standalone detector node).
+        # Must use sensor_qos (BEST_EFFORT) to match sam2_detector's publisher QoS.
         self.create_subscription(
             Image, '/sam2_detection_debug',
-            self._detector_detection_debug_callback, default_qos
+            self._detector_detection_debug_callback, sensor_qos
         )
         self.create_subscription(
             Image, '/sam2_segmentation_debug',
-            self._detector_segmentation_debug_callback, default_qos
+            self._detector_segmentation_debug_callback, sensor_qos
         )
         # Camera image for frontier birth RGB (dual-ViT templates)
         self.create_subscription(
@@ -292,56 +297,56 @@ class VLMNavigatorNode(Node):
             PointStamped, '/way_point', default_qos
         )
         self.bev_debug_pub = self.create_publisher(
-            Image, '/vlm_bev_debug', default_qos
+            Image, '/vlm_bev_debug', image_qos
         )
         # Training-aligned debug topic names (folder-style names from data generation).
         self.rgb_pub = self.create_publisher(
-            Image, '/rgb', default_qos
+            Image, '/rgb', image_qos
         )
         self.panoramic_pub = self.create_publisher(
-            Image, '/panoramic', default_qos
+            Image, '/panoramic', image_qos
         )
         self.full_occupancy_explore_pub = self.create_publisher(
-            Image, '/full_occupancy_explore', default_qos
+            Image, '/full_occupancy_explore', image_qos
         )
         self.local_occupancy_explore_pub = self.create_publisher(
-            Image, '/local_occupancy_explore', default_qos
+            Image, '/local_occupancy_explore', image_qos
         )
         self.full_occupancy_explore_frontier_pub = self.create_publisher(
-            Image, '/full_occupancy_explore_frontier', default_qos
+            Image, '/full_occupancy_explore_frontier', image_qos
         )
         self.full_occupancy_explore_frontier_gt_pub = self.create_publisher(
-            Image, '/full_occupancy_explore_frontier_gt', default_qos
+            Image, '/full_occupancy_explore_frontier_gt', image_qos
         )
         self.local_occupancy_explore_frontier_pub = self.create_publisher(
-            Image, '/local_occupancy_explore_frontier', default_qos
+            Image, '/local_occupancy_explore_frontier', image_qos
         )
         self.local_occupancy_explore_frontier_gt_pub = self.create_publisher(
-            Image, '/local_occupancy_explore_frontier_gt', default_qos
+            Image, '/local_occupancy_explore_frontier_gt', image_qos
         )
         self.fov_pub = self.create_publisher(
-            Image, '/fov', default_qos
+            Image, '/fov', image_qos
         )
         self.combined_pub = self.create_publisher(
-            Image, '/combined', default_qos
+            Image, '/combined', image_qos
         )
         self.egocentric_rgb_pub = self.create_publisher(
-            Image, '/egocentric_rgb', default_qos
+            Image, '/egocentric_rgb', image_qos
         )
         self.egocentric_rgb_debug_pub = self.create_publisher(
-            Image, '/egocentric_rgb_debug', default_qos
+            Image, '/egocentric_rgb_debug', image_qos
         )
         self.frontier_rgb_debug_pub = self.create_publisher(
-            Image, '/frontier_rgb_debug', default_qos
+            Image, '/frontier_rgb_debug', image_qos
         )
         self.sam2_detection_debug_pub = self.create_publisher(
-            Image, '/vlm_sam2_detection_debug', default_qos
+            Image, '/vlm_sam2_detection_debug', image_qos
         )
         self.sam2_segmentation_debug_pub = self.create_publisher(
-            Image, '/vlm_sam2_segmentation_debug', default_qos
+            Image, '/vlm_sam2_segmentation_debug', image_qos
         )
         self.target_debug_pub = self.create_publisher(
-            Image, '/vlm_target_debug', default_qos
+            Image, '/vlm_target_debug', image_qos
         )
         self.target_marker_pub = self.create_publisher(
             PointStamped, '/vlm_target_marker', default_qos
@@ -376,8 +381,10 @@ class VLMNavigatorNode(Node):
         # Low-rate goal rebroadcast timer for startup race robustness.
         self.create_timer(0.25, self._goal_rebroadcast_timer_callback)
         # Always-on visual debug publisher (independent from VLM decision timing).
+        # 4 Hz is sufficient for RViz; 20 Hz caused full frontier extraction +
+        # BEV render to compete with pose/scan callbacks on the single thread.
         self.live_debug_timer = self.create_timer(
-            0.05, self._live_debug_timer_callback
+            0.25, self._live_debug_timer_callback
         )
         # High-rate stop timer (20 Hz): publishes cmd_vel=0 after goal success to
         # override local_planner regardless of joySpeed/speedHandler state.
@@ -1237,6 +1244,17 @@ class VLMNavigatorNode(Node):
     def _live_debug_timer_callback(self):
         """Continuously publish BEV/FOV debug streams for RVIZ."""
         if not self._pose_received:
+            return
+        # Skip heavy BEV rendering when no one is subscribed — avoids wasting
+        # CPU on frontier extraction and image serialisation at 4 Hz when RViz
+        # is not connected.
+        _has_subscribers = (
+            self.fov_pub.get_subscription_count() > 0 or
+            self.bev_debug_pub.get_subscription_count() > 0 or
+            self.frontier_rgb_debug_pub.get_subscription_count() > 0 or
+            bool(self.debug_save_dir)
+        )
+        if not _has_subscribers:
             return
         if self.mapper.local_map is None and self.mapper.is_initialised:
             # Rebuild local crop from latest pose even if no fresh lidar callback arrived.

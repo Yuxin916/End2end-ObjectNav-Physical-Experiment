@@ -90,14 +90,22 @@ class SAM2DetectorNode(Node):
             history=HistoryPolicy.KEEP_LAST,
             depth=1,
         )
+        # BEST_EFFORT for debug images: RViz on a remote laptop cannot consume
+        # at full rate; RELIABLE + depth would cause DDS retransmission backpressure
+        # that blocks all callbacks on the single executor thread.
+        image_qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+        )
 
         self.create_subscription(Image, self.camera_topic, self._camera_callback, camera_qos)
         self.create_subscription(String, '/object_goal', self._goal_callback, qos)
 
         self.goal_pub = self.create_publisher(String, '/object_goal', qos)
         self.detection_pub = self.create_publisher(String, '/target_detection', qos)
-        self.debug_detection_pub = self.create_publisher(Image, '/sam2_detection_debug', qos)
-        self.debug_segmentation_pub = self.create_publisher(Image, '/sam2_segmentation_debug', qos)
+        self.debug_detection_pub = self.create_publisher(Image, '/sam2_detection_debug', image_qos)
+        self.debug_segmentation_pub = self.create_publisher(Image, '/sam2_segmentation_debug', image_qos)
 
         # Deferred model load (fires once 3 s after startup)
         self._load_timer = self.create_timer(3.0, self._load_model_once)
@@ -354,7 +362,7 @@ class SAM2DetectorNode(Node):
             msg.encoding = 'rgb8'
             msg.is_bigendian = False
             msg.step = msg.width * 3
-            msg.data = img.astype(np.uint8).flatten().tolist()
+            msg.data = np.ascontiguousarray(img, dtype=np.uint8).tobytes()
             return msg
 
         self.debug_detection_pub.publish(_to_msg(det_img))
