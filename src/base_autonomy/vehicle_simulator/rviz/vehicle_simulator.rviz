@@ -4,7 +4,6 @@ Panels:
     Name: Displays
     Property Tree Widget:
       Expanded:
-        - /Waypoint1
         - /Waypoint_real1
       Splitter Ratio: 0.729411780834198
     Tree Height: 362
@@ -414,7 +413,7 @@ Visualization Manager:
       Enabled: true
       Invert Rainbow: false
       Max Color: 255; 255; 255
-      Max Intensity: 0
+      Max Intensity: 18.22114372253418
       Min Color: 0; 0; 0
       Min Intensity: 0
       Name: Trajectory
@@ -576,16 +575,16 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 57.684226989746094
+      Distance: 71.31712341308594
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: 11.866491317749023
-        Y: 13.182287216186523
-        Z: 2.3185391426086426
+        X: 3.345141649246216
+        Y: 5.1259636878967285
+        Z: 2.310506820678711
       Focal Shape Fixed Size: false
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false

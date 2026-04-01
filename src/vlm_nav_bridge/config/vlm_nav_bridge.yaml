@@ -13,7 +13,7 @@ vlm_navigator:
 
     # Path to InternVL checkpoint directory (contains pytorch_model*.bin + config.json).
     # PosD is the best-performing deployable template (dual-ViT, angular soft CE training).
-    checkpoint: "../checkpoints/a100_dualvit_llm-64_mlp-train-patch-24576-acc1_BEVftFOV_FrontierRGB_PosD/checkpoints"
+    checkpoint: "../all_log/experiments/prompt_revision/a100_dualvit_llm-64_mlp-train-patch-32768-acc1_BEVftFOV_FrontierRGB_PosD__FRONTIER_PIXEL_NUMBER_ONLY/checkpoints"
 
     # Prompt template — must match the checkpoint.
     # Single-ViT templates (no camera required):
@@ -33,7 +33,7 @@ vlm_navigator:
     # Seconds between VLM inference calls (wall-clock timer).
     # Also re-triggers early when the robot reaches the current waypoint.
     # Lower = more responsive, higher = less GPU load.
-    inference_interval: 30.0
+    inference_interval: 20.0
 
     # Beam search width used by InternVL generation.
     # MP3D default is 1 (greedy-like).

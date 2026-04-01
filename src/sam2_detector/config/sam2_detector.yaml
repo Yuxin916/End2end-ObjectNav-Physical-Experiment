@@ -1,41 +1,23 @@
 sam2_detector:
   ros__parameters:
-    # Single detector pipeline: GroundingDINO + SAM (mp3d_traj_sam parity).
-    vln_repo_path: "../"  # relative to sam2_detector package; used for InternVL imports
-    scene_mode: "unity"   # unity | real_world (controls goal translation rule set)
+    # YOLOE TensorRT backend.
+    # Path to the engine file, relative to vln_repo_path.
+    yoloe_engine_path: "checkpoints/yoloe-11l-real_world.engine"
 
+    # Root of the VLN_CL_CoTNav repo (used to resolve yoloe_engine_path).
+    vln_repo_path: "../"
 
-    # params to MMDINOSAM_Perceiver constructor
-    # Minimum GroundingDINO box confidence to keep a detection.
-    # Fix 2: raised from 0.3 → 0.40 to reduce false positives when robot moves.
-    box_threshold:  0.40
-    # Minimum GroundingDINO token (phrase) confidence threshold.
-    # Fix 2: raised from 0.3 → 0.35.
-    text_threshold: 0.35
-    # Fix 2: reduced buffer/min_hits so stale frames expire faster.
-    temporal_buffer_size: 3
-    temporal_min_hits: 2
-    use_temporal_filter: True
-    nms_threshold: 0.5
-    # Fix 1: flush temporal tracker when robot moves this far (m) or turns this much (deg).
-    movement_flush_dist_m: 0.3
-    movement_flush_turn_deg: 20.0
+    # Scene mode (kept for compatibility; no longer affects goal translation).
+    scene_mode: "real_world"
 
+    # Minimum YOLOE confidence to keep a detection.
+    box_threshold: 0.3
 
-    # ==========================================================================
-    # Runtime
-    # ==========================================================================
-
-    # Maximum detection frequency (Hz). Caps GPU load; does not affect the
-    # VLM bridge directly since it reads the latest /target_detection message.
-    # 2.0 Hz is sufficient for 5-second VLM inference cycles.
-    # maximum 2 detections per second
+    # Maximum detection frequency (Hz).
     inference_hz: 1.0
 
-    # GPU device for SAM / GroundingDINO inference.
-    # Can be different from vlm_nav_bridge device if multi-GPU available.
+    # GPU device for YOLOE inference.
     device: "cuda:0"
 
     # ROS topic supplying the egocentric RGB image for detection.
-    # This is the projected pinhole view published by vlm_nav_bridge (/egocentric_rgb).
     camera_topic: "/egocentric_rgb"
