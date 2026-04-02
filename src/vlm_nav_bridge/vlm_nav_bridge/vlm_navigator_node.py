@@ -310,9 +310,6 @@ class VLMNavigatorNode(Node):
         self.full_occupancy_explore_pub = self.create_publisher(
             Image, '/full_occupancy_explore', image_qos
         )
-        self.local_occupancy_explore_pub = self.create_publisher(
-            Image, '/local_occupancy_explore', image_qos
-        )
         self.full_occupancy_explore_frontier_pub = self.create_publisher(
             Image, '/full_occupancy_explore_frontier', image_qos
         )
@@ -327,9 +324,6 @@ class VLMNavigatorNode(Node):
         )
         self.fov_pub = self.create_publisher(
             Image, '/fov', image_qos
-        )
-        self.combined_pub = self.create_publisher(
-            Image, '/combined', image_qos
         )
         self.egocentric_rgb_pub = self.create_publisher(
             Image, '/egocentric_rgb', image_qos
@@ -1917,62 +1911,7 @@ class VLMNavigatorNode(Node):
             cells.append([gr, gc])
         return np.array(cells, dtype=np.int32)
 
-    @staticmethod
-    def _build_combined_visualization(images):
-        valid = [im for im in images if im is not None]
-        if not valid:
-            return None
-        h, w = valid[0].shape[:2]
-        norm = []
-        for im in images:
-            if im is None:
-                norm.append(np.zeros((h, w, 3), dtype=np.uint8))
-            elif im.shape[:2] != (h, w):
-                norm.append(cv2.resize(im, (w, h), interpolation=cv2.INTER_NEAREST))
-            else:
-                norm.append(im)
-        return np.vstack([np.hstack([norm[0], norm[1]]), np.hstack([norm[2], norm[3]])])
-
-    @staticmethod
-    def _build_labeled_combined_visualization(bev_rgb, rgb_preprocessed, dino_bbox_rgb, sam_mask_rgb):
-        """Build requested 2x2 combined panel for RVIZ."""
-        def _to_rgb_uint8(img):
-            if img is None:
-                return None
-            arr = np.asarray(img)
-            if arr.dtype != np.uint8:
-                arr = np.clip(arr, 0, 255).astype(np.uint8)
-            if arr.ndim == 2:
-                arr = np.stack([arr, arr, arr], axis=-1)
-            return arr
-
-        panels = [
-            ("BEV Selected Frontier", _to_rgb_uint8(bev_rgb)),
-            ("RGB Preprocessed", _to_rgb_uint8(rgb_preprocessed)),
-            ("GroundingDINO BBox", _to_rgb_uint8(dino_bbox_rgb)),
-            ("SAM Mask Overlay", _to_rgb_uint8(sam_mask_rgb)),
-        ]
-        valid = [img for _, img in panels if img is not None]
-        if not valid:
-            return None
-        h, w = valid[0].shape[:2]
-        out_panels = []
-        for title, panel in panels:
-            if panel is None:
-                panel = np.zeros((h, w, 3), dtype=np.uint8)
-            elif panel.shape[:2] != (h, w):
-                panel = cv2.resize(panel, (w, h), interpolation=cv2.INTER_NEAREST)
-            cv2.rectangle(panel, (0, 0), (w - 1, 24), (0, 0, 0), -1)
-            cv2.putText(panel, title, (8, 17), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
-            out_panels.append(panel)
-        return np.vstack([np.hstack([out_panels[0], out_panels[1]]), np.hstack([out_panels[2], out_panels[3]])])
-
     def _publish_visual_debug_maps(self, frontiers, target_pixel, selected_idx: Optional[int] = None):
-        local_occ = self.mapper.render_local_bev(
-            frontier_centers_2d=None,
-            target_position=None,
-            draw_fov=False,
-        )
         local_frontier = self.mapper.render_local_bev(
             frontier_centers_2d=frontiers if len(frontiers) > 0 else None,
             target_position=target_pixel,
@@ -2011,27 +1950,12 @@ class VLMNavigatorNode(Node):
             target_cell=global_target,
         )
 
-        self._publish_rgb_image(self.local_occupancy_explore_pub, local_occ, frame_id='map')
         self._publish_rgb_image(self.local_occupancy_explore_frontier_pub, local_frontier, frame_id='map')
         self._publish_rgb_image(self.local_occupancy_explore_frontier_gt_pub, local_frontier_gt, frame_id='map')
         self._publish_rgb_image(self.fov_pub, fov_img, frame_id='map')
         self._publish_rgb_image(self.full_occupancy_explore_pub, full_occ, frame_id='map')
         self._publish_rgb_image(self.full_occupancy_explore_frontier_pub, full_frontier, frame_id='map')
         self._publish_rgb_image(self.full_occupancy_explore_frontier_gt_pub, full_frontier_gt, frame_id='map')
-
-        combined_map_only = self._build_combined_visualization([local_occ, local_frontier, fov_img, full_frontier])
-        rgb_preprocessed = np.array(self.latest_rgb_pil.convert('RGB')) if self.latest_rgb_pil is not None else None
-        selected_bev = fov_img
-        requested_combined = self._build_labeled_combined_visualization(
-            selected_bev,
-            rgb_preprocessed,
-            self.latest_detection_overlay_rgb,
-            self.latest_mask_overlay_rgb,
-        )
-        if requested_combined is not None:
-            self._publish_rgb_image(self.combined_pub, requested_combined, frame_id='map')
-        elif combined_map_only is not None:
-            self._publish_rgb_image(self.combined_pub, combined_map_only, frame_id='map')
 
     @staticmethod
     def _build_frontier_rgb_mosaic(frontier_rgb_images, tile_w: int = 320, tile_h: int = 240, target_last: bool = False):

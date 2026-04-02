@@ -59,7 +59,7 @@ vlm_navigator:
     normalize_type: "imagenet"
 
     # If true, publish intermediate debug images to training-aligned topic names
-    # (/rgb, /panoramic, /full_occupancy_explore, /local_occupancy_explore, etc.)
+    # (/rgb, /panoramic, /full_occupancy_explore, etc.)
     # for offline analysis. Set false to reduce bandwidth in deployment.
     write_visualize: false
 
