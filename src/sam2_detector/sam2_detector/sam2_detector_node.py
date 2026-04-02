@@ -86,7 +86,7 @@ class SAM2DetectorNode(Node):
         # BEST_EFFORT for camera: avoids RELIABLE shared-memory backpressure that
         # delays delivery to all subscribers (including RViz) when this node is busy.
         camera_qos = QoSProfile(
-            reliability=ReliabilityPolicy.BEST_EFFORT,
+            reliability=ReliabilityPolicy.RELIABLE,
             history=HistoryPolicy.KEEP_LAST,
             depth=1,
         )
@@ -94,7 +94,7 @@ class SAM2DetectorNode(Node):
         # at full rate; RELIABLE + depth would cause DDS retransmission backpressure
         # that blocks all callbacks on the single executor thread.
         image_qos = QoSProfile(
-            reliability=ReliabilityPolicy.BEST_EFFORT,
+            reliability=ReliabilityPolicy.RELIABLE,
             history=HistoryPolicy.KEEP_LAST,
             depth=1,
         )

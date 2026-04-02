@@ -193,7 +193,6 @@ class VLMNavigatorNode(Node):
 
         # Frontier birth RGB (dual-ViT templates)
         self.latest_rgb_pil: PILImage.Image = None
-        self._last_camera_process_time: float = 0.0
         # Rate-limit live BEV debug publish (frontier extraction is expensive)
         self._last_live_bev_publish_time: float = 0.0
         # Precomputed base remap maps for panorama→pinhole (yaw-independent parts).
@@ -235,7 +234,7 @@ class VLMNavigatorNode(Node):
         # serialises ALL callbacks, causing artificial latency even when
         # CPU/GPU are underutilised.  depth=1 drops stale frames immediately.
         sensor_qos = QoSProfile(
-            reliability=ReliabilityPolicy.BEST_EFFORT,
+            reliability=ReliabilityPolicy.RELIABLE,
             history=HistoryPolicy.KEEP_LAST,
             depth=1,
         )
@@ -512,7 +511,6 @@ class VLMNavigatorNode(Node):
         self.declare_parameter('waypoint_reached_pause_sec', 2.0)
         self.declare_parameter('waypoint_frame', 'map')
         self.declare_parameter('camera_topic', '/camera/image')
-        self.declare_parameter('camera_hz', 0.0)
         self.declare_parameter('camera_is_panorama', True)
         self.declare_parameter('camera_project_width', 640)
         self.declare_parameter('camera_project_height', 480)
@@ -584,7 +582,6 @@ class VLMNavigatorNode(Node):
         self.waypoint_reached_pause_sec = g('waypoint_reached_pause_sec').value
         self.waypoint_frame = g('waypoint_frame').value
         self.camera_topic = g('camera_topic').value
-        self.camera_hz = float(g('camera_hz').value)
         self.camera_is_panorama = g('camera_is_panorama').value
         self.camera_project_width = g('camera_project_width').value
         self.camera_project_height = g('camera_project_height').value
@@ -831,10 +828,6 @@ class VLMNavigatorNode(Node):
 
     def _camera_callback(self, msg: Image):
         """Decode incoming sensor_msgs/Image and keep projected RGB for frontier birth."""
-        now = time.time()
-        if self.camera_hz > 0.0 and (now - self._last_camera_process_time) < 1.0 / self.camera_hz:
-            return
-        self._last_camera_process_time = now
         self.latest_rgb_stamp_s = float(msg.header.stamp.sec) + float(msg.header.stamp.nanosec) * 1e-9
         try:
             n = msg.width * msg.height
@@ -861,28 +854,27 @@ class VLMNavigatorNode(Node):
                 # Pinhole camera path: no panorama crop heading term.
                 self._last_projected_crop_heading = 0.0
             _t2 = time.time()
-            self.latest_rgb_pil = PILImage.fromarray(arr)
+            # Publish SAM2 input immediately after decode/project (before PIL / RViz / debug).
+            self._publish_rgb_image(self.egocentric_rgb_pub, arr, frame_id='camera')
             _t3 = time.time()
+            self.latest_rgb_pil = PILImage.fromarray(arr)
+            _t4 = time.time()
             if self.write_visualize:
                 self._publish_rgb_image(self.panoramic_pub, panoramic_rgb, frame_id='camera')
                 self._publish_rgb_image(self.rgb_pub, arr, frame_id='camera')
-            _t4 = time.time()
-            # Publish clean image to /egocentric_rgb (SAM2 detector input).
-            self._publish_rgb_image(self.egocentric_rgb_pub, arr, frame_id='camera')
             _t5 = time.time()
-            # Annotated overlay goes to a separate debug-only topic.
             ego_dbg = arr.copy()
             self._draw_target_points_on_egocentric(ego_dbg)
             _t6 = time.time()
             self._publish_rgb_image(self.egocentric_rgb_debug_pub, ego_dbg, frame_id='camera')
             self._cache_debug_image('egocentric_rgb', ego_dbg)
             _t7 = time.time()
-            self.get_logger().warn(
+            self.get_logger().debug(
                 f'[cam_timing ms] decode={(_t1-_t0)*1e3:.1f}'
                 f' project={(_t2-_t1)*1e3:.1f}'
-                f' pil={(_t3-_t2)*1e3:.1f}'
-                f' pub_vis={(_t4-_t3)*1e3:.1f}'
-                f' pub_ego={(_t5-_t4)*1e3:.1f}'
+                f' pub_ego={(_t3-_t2)*1e3:.1f}'
+                f' pil={(_t4-_t3)*1e3:.1f}'
+                f' pub_vis={(_t5-_t4)*1e3:.1f}'
                 f' draw_pts={(_t6-_t5)*1e3:.1f}'
                 f' pub_dbg+cache={(_t7-_t6)*1e3:.1f}'
                 f' total={(_t7-_t0)*1e3:.1f}'
