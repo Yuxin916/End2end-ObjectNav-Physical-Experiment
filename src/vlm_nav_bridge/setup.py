@@ -3,11 +3,19 @@ import os
 from glob import glob
 
 package_name = 'vlm_nav_bridge'
+package_files = []
+
+for root, _, files in os.walk(os.path.join(package_name, 'helper')):
+    for filename in files:
+        package_files.append(os.path.relpath(os.path.join(root, filename), package_name))
 
 setup(
     name=package_name,
     version='0.1.0',
     packages=find_packages(exclude=['test']),
+    package_data={
+        package_name: package_files,
+    },
     data_files=[
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
