@@ -27,3 +27,5 @@ src/base_autonomy/vehicle_simulator/log/*
 !readme.txt
 .venv/
 .codex
+saved_unity_demo/
+.idea/
