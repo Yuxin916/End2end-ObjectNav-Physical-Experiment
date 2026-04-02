@@ -40,7 +40,7 @@ done
 FULL_SETUP="cd \"$WORKDIR\""
 
 # commands to run
-CMD_PANE0="ROBOT_CONFIG_PATH='mechanum_drive' ./system_simulation.sh"
+CMD_PANE0="./system_simulation.sh"
 CMD_PANE1="ros2 launch vlm_nav_bridge vlm_nav_bridge.launch.py"
 CMD_PANE2="ros2 launch sam2_detector sam2_detector.launch.py"
 
