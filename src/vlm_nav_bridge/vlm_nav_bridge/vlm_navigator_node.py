@@ -518,7 +518,7 @@ class VLMNavigatorNode(Node):
         self.declare_parameter('waypoint_reached_pause_sec', 2.0)
         self.declare_parameter('waypoint_frame', 'map')
         self.declare_parameter('camera_topic', '/camera/image')
-        self.declare_parameter('camera_hz', 5.0)
+        self.declare_parameter('camera_hz', 0.0)
         self.declare_parameter('camera_is_panorama', True)
         self.declare_parameter('camera_project_width', 640)
         self.declare_parameter('camera_project_height', 480)

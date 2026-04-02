@@ -36,12 +36,13 @@ for i in $(seq 1 5); do
 done
 
 # setup for all panes
-FULL_SETUP="cd \"$WORKDIR\" && conda deactivate && source .venv/bin/activate && source /opt/ros/jazzy/setup.zsh && source install/setup.zsh"
+# tmux starts interactive zsh shells, so ~/.zshrc already handles venv + ROS sourcing.
+FULL_SETUP="cd \"$WORKDIR\""
 
 # commands to run
-CMD_PANE0="ROS_DOMAIN_ID=1 ROBOT_CONFIG_PATH='mechanum_drive' ./system_simulation.sh"
-CMD_PANE1="ROS_DOMAIN_ID=1 ros2 launch vlm_nav_bridge vlm_nav_bridge.launch.py"
-CMD_PANE2="ROS_DOMAIN_ID=1 ros2 launch sam2_detector sam2_detector.launch.py"
+CMD_PANE0="ROBOT_CONFIG_PATH='mechanum_drive' ./system_simulation.sh"
+CMD_PANE1="ros2 launch vlm_nav_bridge vlm_nav_bridge.launch.py"
+CMD_PANE2="ros2 launch sam2_detector sam2_detector.launch.py"
 
 # send full setup to all 6 panes
 for pane in 0 1 2 3 4 5; do
