@@ -56,7 +56,6 @@ def generate_launch_description():
   start_endpoint = Node(
     package='ros_tcp_endpoint',
     executable='default_server_endpoint',
-    name='endpoint',
     # output='screen',
     parameters=[{
   		"ROS_IP": "0.0.0.0",

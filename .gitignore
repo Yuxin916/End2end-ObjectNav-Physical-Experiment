@@ -26,4 +26,4 @@ src/base_autonomy/vehicle_simulator/log/*
 
 !readme.txt
 .venv/
-.venv/
+.codex
