@@ -21,7 +21,7 @@ import importlib
 
 from rclpy.node import Node
 from rclpy.parameter import Parameter
-from rclpy.executors import MultiThreadedExecutor
+from rclpy.executors import MultiThreadedExecutor, SingleThreadedExecutor
 from rclpy.serialization import deserialize_message
 
 from .tcp_sender import UnityTcpSender
@@ -150,7 +150,10 @@ class TcpServer(Node):
             + len(self.unity_services_table.keys())
             + 1
         )
-        executor = MultiThreadedExecutor(num_threads)
+        if num_threads <= 1:
+            executor = SingleThreadedExecutor()
+        else:
+            executor = MultiThreadedExecutor(num_threads)
 
         executor.add_node(self)
 

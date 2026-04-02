@@ -1,0 +1,340 @@
+vlm_navigator:
+  ros__parameters:
+
+    # ==========================================================================
+    # VLM Model
+    # These parameters select the checkpoint and inference settings.
+    # They map to VLMConfig in vlm_interface.py.
+    # ==========================================================================
+
+    # Path to InternVL checkpoint directory (contains pytorch_model*.bin + config.json).
+    # Relative paths are resolved from the repo root.
+    # PosD is the best-performing deployable template (dual-ViT, angular soft CE training).
+    checkpoint: "../checkpoints/PosD/checkpoints"
+
+    # Prompt template — must match the checkpoint.
+    # Single-ViT templates (no camera required):
+    #   BEVftFOV_Pos__FRONTIER_PIXEL_NUMBER_ONLY(_STRATEGY2)
+    #   BEVftFOV_Sem_Pos__FRONTIER_PIXEL_NUMBER_ONLY_STRATEGY2
+    #   BEVftFOV_Sem_DualPos__FRONTIER_PIXEL_NUMBER_ONLY(_STRATEGY2)
+    # Dual-ViT templates (require /camera/image):
+    #   BEVftFOV_FrontierRGB_PosA__FRONTIER_PIXEL_NUMBER_ONLY_STRATEGY2  (coords in text)
+    #   BEVftFOV_FrontierRGB_PosB__FRONTIER_PIXEL_NUMBER_ONLY_STRATEGY2  (embeddings only)
+    #   BEVftFOV_FrontierRGB_PosC__FRONTIER_PIXEL_NUMBER_ONLY_STRATEGY2  (pairwise spatial)
+    #   BEVftFOV_FrontierRGB_PosD__FRONTIER_PIXEL_NUMBER_ONLY_STRATEGY2  (PosC + angular soft CE, best SR)
+    template: "BEVftFOV_FrontierRGB_PosD__FRONTIER_PIXEL_NUMBER_ONLY_STRATEGY2"
+
+    # GPU device for VLM inference. Use "cpu" for testing without GPU.
+    device: "cuda:0"
+
+    # Seconds between VLM inference calls (wall-clock timer).
+    # Also re-triggers early when the robot reaches the current waypoint.
+    # Lower = more responsive, higher = less GPU load.
+    inference_interval: 20.0
+
+    # Beam search width used by InternVL generation.
+    # MP3D default is 1 (greedy-like).
+    num_beams: 1
+
+    # Max token budget for the VLM's frontier index response.
+    max_new_tokens: 32
+
+    # Minimum generated token count.
+    # MP3D default is 1 for index-only answers.
+    min_new_tokens: 1
+
+    # Sampling temperature. MP3D default is 0.0 (deterministic).
+    # If >0, VLMInterface automatically enables sampling.
+    temperature: 0.0
+
+    # Whether to use multinomial sampling (true) or greedy decoding (false).
+    # Keep false for deterministic deployment.
+    do_sample: false
+
+    # Pad BEV/ego images to square before encoding.
+    # Must match training config (true for all current checkpoints).
+    pad2square: true
+
+    # Image normalisation type. Must match training config (imagenet for all current checkpoints).
+    normalize_type: "imagenet"
+
+    # If true, publish intermediate debug images to training-aligned topic names
+    # (/rgb, /panoramic, /full_occupancy_explore, /local_occupancy_explore, etc.)
+    # for offline analysis. Set false to reduce bandwidth in deployment.
+    write_visualize: false
+
+    # If true, skip VLM model loading — only BEV map and frontier visualization run.
+    # Useful for debugging the occupancy map without occupying GPU memory.
+    # Override at launch: ros2 launch vlm_nav_bridge vlm_nav_bridge.launch.py bev_only:=true
+    bev_only: false
+
+
+    # ==========================================================================
+    # BEV Map
+    # These parameters control how lidar point clouds are accumulated into the
+    # global occupancy map.  They must match VLN training parameters exactly
+    # to avoid distribution shift.  Equivalent: BEV_Map.__init__() in mapping.py
+    # ==========================================================================
+
+    # Camera horizontal FOV (full angle, degrees).
+    # Controls angular filtering of lidar points used for occupancy/explored updates.
+    # mp3d parity: 79° (RGB-D camera FOV in Habitat/MP3D scenes).
+    # Physical robot: set to actual camera HFOV. Use 360 to mark a full disk
+    # (equivalent to using all lidar returns as "explored").
+    hfov_deg: 79.0
+
+    # Metres per grid cell. Do NOT change — must match training (mp3d parity: 0.05).
+    map_resolution: 0.05
+
+    # Total global map side length in metres (map_size / resolution = 1344 cells).
+    # 67.2 m covers a typical indoor floor. Increase for very large buildings
+    # but the robot's start position is the centre so ±33.6 m is available.
+    map_size: 67.2
+
+    # Explored update radius in cells (= 5 m at 0.05 m/cell).
+    # Ray-casting only updates cells within this radius around the robot.
+    # mp3d parity: 100 cells (5 m depth range of RGB-D camera in Habitat).
+    # Do NOT change — affects where frontier boundaries appear.
+    vision_range: 100
+
+    # Points above (robot_z + obstacle_height_min) are counted as obstacles.
+    # Excludes floor returns from the obstacle map.
+    # Tune for robot: Go2 sensor is ~0.3–0.5 m above floor → 0.1 m min excludes floor well.
+    # G1 sensor is ~1.0 m above floor → 0.1 m min may miss low furniture (try -0.3 to -0.5).
+    obstacle_height_min: -0.6
+
+    # Points above (robot_z + obstacle_height_max) are NOT counted as obstacles.
+    # Excludes ceiling and high mounted objects.
+    # 1.5 m covers head-height obstacles. Increase for tall furniture/doors if needed.
+    obstacle_height_max: 1.5
+
+    # Minimum 2-D lidar range (metres) — points closer than this are ignored.
+    # Eliminates body self-reflection and near-field noise.
+    # mp3d parity: 0.5 m (Habitat min depth clip).
+    range_min: 0.5
+
+    # Maximum 2-D lidar range (metres) — points farther than this are ignored.
+    # mp3d parity: 5.0 m (Habitat max depth range for obstacle mapping).
+    # Do NOT increase beyond 5.0 — the VLM was trained with this horizon.
+    range_max: 5.0
+
+    # Hit-count threshold to classify a cell as occupied (obstacle) in the map.
+    # 1.0 = any single lidar return marks the cell as an obstacle.
+    # Increase (e.g. 3.0) to suppress spurious single-point returns from dust/rain.
+    map_pred_threshold: 1.0
+
+    # Sweep-count threshold to classify a cell as explored.
+    # 1.0 = first time a ray-traversed cell is observed it is marked explored.
+    exp_pred_threshold: 1.0
+
+    # Upper bound on unique endpoint rays traced per scan (performance guard).
+    # Increase for denser point clouds if explored map looks too sparse.
+    explored_max_rays_per_scan: 512
+
+    # Visual dilation of obstacle pixels in the rendered BEV image (render only,
+    # does NOT affect map data or frontier detection).
+    # Thickens sparse LiDAR wall returns to look like solid walls.
+    # 1 = no dilation. Tune to match training data appearance (try 3–5).
+    obstacle_render_dilate_ksize: 3
+
+    # Local BEV crop size in cells (= pixels, 1:1 mapping, no resize).
+    # crop = robot_cell ± (output_size/2) → 448×448 cells.
+    # At 0.05 m/cell this covers ±11.2 m around the robot.
+    # Must match InternVL ViT input size.
+    output_size: 448
+
+
+    # ==========================================================================
+    # Frontier Extraction
+    # These parameters filter which explored-boundary pixels become navigation
+    # candidates.  Equivalent: BEV_Map.frontiers_extraction() in mapping.py.
+    # ==========================================================================
+
+    # Threshold on the explored channel (local_map[1]) to consider a cell "explored".
+    # 0.1 means any cell with ≥ 0.1 accumulated sweep counts is explored.
+    # Since counts are integers ≥ 1, any swept cell qualifies. Rarely needs tuning.
+    frontier_exp_threshold: 0.1
+
+    # Dilation kernel size applied to obstacle cells before subtracting from frontier
+    # boundary.  1 = no dilation (matches training).  Training used no dilation
+    # because frontier validity was checked via Habitat navmesh; for physical robot
+    # set to 3 if frontiers appear behind thin walls, but keep low to avoid flicker.
+    frontier_dilate_wall_ksize: 1
+
+    # Morphological closing kernel size applied to the explored mask inside
+    # the frontier detector.  1 = no closing (recommended: _post_process_local_map
+    # already applies dilate+erode with 5×5 before frontier extraction runs;
+    # applying a second close causes instability / flashing).
+    frontier_close_explore_ksize: 1
+
+    # Minimum frontier cluster area in pixels.
+    # Clusters smaller than this are discarded as noise.
+    # At 448×448 with 1 cell = 1 pixel, 1 pixel = 0.05 m.
+    # Default 4 pixels keeps clusters ≥ ~0.20 m wide. Increase if too many tiny frontiers.
+    frontier_min_area: 4
+
+    # Frontier pixels within this many pixels of the image border are discarded.
+    # Prevents navigating to the very edge of the observable area.
+    frontier_clear_border_px: 2
+
+    # Frontiers closer than this distance to the robot (metres) are discarded.
+    # Prevents the robot from selecting a frontier that is already behind it
+    # or within its own footprint.
+    # Tune for robot footprint: Go2 ~0.5 m, G1 ~0.5 m. Default 0.7 m adds margin.
+    frontier_min_distance_m: 0.7
+
+    # Maximum number of frontier candidates passed to the VLM.
+    # Sorted by distance (nearest first), top-K kept.
+    # Training used up to 32 candidates. Set to a large number to return all frontiers.
+    frontier_top_k: 32
+
+
+    # ==========================================================================
+    # Navigation
+    # ==========================================================================
+
+    # Distance threshold (metres) to declare the current waypoint "reached".
+    # When robot_distance < threshold, the VLM inference timer re-triggers early.
+    goal_reached_threshold: 0.5
+
+    # Distance threshold (metres) to declare a TARGET waypoint reached.
+    # When reached, vlm_navigator marks current goal success, publishes /vlm_target_reached=true,
+    # clears internal object_goal, and waits for the next /object_goal command.
+    # Set <= 0 to reuse goal_reached_threshold.
+    target_reached_threshold: 1.0
+
+    # After a non-target waypoint is reached, hold cmd_vel=0 for this duration
+    # while VLM inference runs and before the next waypoint is issued.
+    waypoint_reached_pause_sec: 2.0
+
+    # TF frame for published waypoints. Must match local_planner's expected frame.
+    waypoint_frame: "map"
+
+    # ROS topic supplying egocentric camera images for dual-ViT frontier birth RGB.
+    # For simulation: /camera/image (Unity sim panoramic topic).
+    # For physical robot: the camera driver topic (e.g. /camera/color/image_raw).
+    camera_topic: "/camera/image"
+
+    # If true, treat the camera image as an equirectangular panorama (360°) and
+    # project it to a pinhole view before using it as frontier birth RGB.
+    # Set false if the camera already outputs a pinhole image.
+    camera_is_panorama: true
+
+    # Projected pinhole image width (pixels).  Used when camera_is_panorama=true.
+    camera_project_width: 640
+
+    # Projected pinhole image height (pixels).  Used when camera_is_panorama=true.
+    camera_project_height: 480
+
+    # HFOV for the projected pinhole view (degrees). Should match hfov_deg for consistency.
+    camera_project_hfov_deg: 79.0
+
+    # Yaw offset between panorama centre and robot forward direction (degrees).
+    # 0 = panorama centre is robot forward. Adjust if camera is mounted offset.
+    camera_yaw_offset_deg: 0.0
+
+    # Sign mapping between crop heading and panorama longitude direction.
+    # -1.0 is typical when ROS yaw is CCW but panorama x-axis increases rightward.
+    # Set to +1.0 if your egocentric crop rotates in the opposite direction.
+    camera_heading_sign: -1.0
+
+    # How strongly heading is applied to panorama crop.
+    # 1.0: full heading compensation (for world-aligned panoramas).
+    # 0.5: half compensation (use when a 360deg robot turn appears as ~2 crop turns).
+    # 0.0: no extra heading rotation (for body-aligned panoramas; often correct on real robot).
+    # If you observe 180deg robot turn causing near full-cycle crop repeat, try 0.0.
+    camera_heading_gain: 0.0
+
+    # If true, panorama crop heading uses yaw relative to episode start yaw.
+    # This keeps the egocentric crop aligned to initial-heading reference (heading=0 at start).
+    camera_heading_use_initial_relative: true
+
+    # Legacy yaw-jump threshold parameter (kept for compatibility).
+    # Current behavior is yaw-first: finite odometry yaw always drives crop heading.
+    camera_heading_yaw_jump_threshold_deg: 45.0
+
+    # Minimum translation (metres) required when using motion-direction fallback.
+    # Motion fallback is used only when yaw is invalid/unavailable.
+    # If movement is smaller than this, last heading is held to avoid jitter.
+    camera_heading_motion_min_displacement_m: 0.05
+
+    # Crop-heading smoothing factor in [0, 1). 0 = no smoothing, larger = smoother/slower.
+    camera_heading_smoothing_alpha: 0.0
+
+    # Low-rate debug log interval for crop heading diagnostics.
+    # Set <= 0 to disable periodic heading debug logs.
+    camera_heading_debug_log_interval_sec: 2.0
+
+
+    # ==========================================================================
+    # Target Detection (external detector integration)
+    # Target detections are consumed from an external node (e.g. sam2_detector)
+    # via a JSON topic.  When a target is confirmed it is appended as an extra
+    # candidate after the frontier list; the VLM can select it to navigate directly
+    # to the target object.
+    # ==========================================================================
+
+    # ROS topic publishing JSON target detections: {"detections": [{...}]}.
+    # Produced by sam2_detector node (standalone GroundingDINO + SAM detector).
+    target_detection_topic: "/target_detection"
+
+    # Minimum detection confidence to accept a target detection.
+    # GroundingDINO scores are roughly in [0.3, 0.9]. 0.30 is permissive;
+    # raise to 0.5 for fewer false positives in cluttered scenes.
+    # Fix 2: raised from 0.30 → 0.40 to match box_threshold increase in sam2_detector.yaml.
+    target_confidence_threshold: 0.40
+
+    # Size of the temporal detection buffer (number of recent frames).
+    # A detection is only confirmed if ≥ target_temporal_min_hits frames
+    # within this buffer contain valid detections.
+    # [DIAG] lowered to 1 to bypass temporal gate during stamp-fix validation
+    target_temporal_buffer_size: 3
+
+    # Minimum confirmed detections in the buffer to accept the target.
+    # 2-of-3 (default) requires two consecutive detections — suppresses single spurious hits.
+    # Set to 1 for faster target response (at cost of more false positives).
+    # [DIAG] lowered to 1 — any single hit becomes a valid detection
+    target_temporal_min_hits: 2
+
+    # Label matching mode: "exact" (case-sensitive) or "normalized" (alphanumeric only).
+    # "normalized" converts "tv_monitor" → "tvmonitor" for robust string matching.
+    target_match_label_mode: "normalized"
+
+    # If true, only accept detections with source tag "sam2" (from the SAM2 backend).
+    # false (default) accepts both dino_sam_mp3d and sam2 detections.
+    target_require_sam2: false
+
+    # Time-to-live for a target detection (seconds).
+    # If no new detection arrives within this window, the target state is cleared.
+    # Prevents navigating to stale target positions after the object moves out of view.
+    target_state_ttl_sec: 3.0
+
+
+
+    # ==========================================================================
+    # Diagnostics
+    # ==========================================================================
+
+    # Maximum allowed age difference between pose, lidar scan, and camera timestamps (seconds).
+    # If any two sensors differ by more than this, a WARN is logged.
+    # Not a hard block — navigation continues.  Tighten for high-speed robots.
+    max_sensor_skew_sec: 0.5
+
+    # NOTE: Visualization appearance (arrow size/color, trail color, frontier dot radius,
+    # FOV overlay alpha) is hardcoded in BEVMapperConfig defaults in lidar_bev_mapper.py
+    # and cannot be changed via this config file.
+
+
+    # ==========================================================================
+    # Debug Image Saving
+    # ==========================================================================
+
+    # Absolute path to directory where debug images are saved.
+    # Subdirectories are created automatically for each topic:
+    #   fov/, vlm_bev_debug/, frontier_rgb_debug/,
+    #   sam2_detection_debug/, sam2_segmentation_debug/
+    # Leave empty ("") to disable image saving entirely.
+    debug_save_dir: ""
+
+    # How often to write images to disk (seconds). Default 1.0 = 1 Hz.
+    debug_save_interval_sec: 1.0

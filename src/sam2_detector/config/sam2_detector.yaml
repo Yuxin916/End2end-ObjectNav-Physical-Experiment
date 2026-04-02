@@ -1,0 +1,20 @@
+sam2_detector:
+  ros__parameters:
+    # YOLOE TensorRT backend.
+    # Path to the engine file. Relative paths are resolved from the repo root.
+    yoloe_engine_path: "../checkpoints/yoloe-11l-real_world.engine"
+
+    # Scene mode (kept for compatibility; no longer affects goal translation).
+    scene_mode: "real_world"
+
+    # Minimum YOLOE confidence to keep a detection.
+    box_threshold: 0.3
+
+    # Maximum detection frequency (Hz).
+    inference_hz: 1.0
+
+    # GPU device for YOLOE inference.
+    device: "cuda:0"
+
+    # ROS topic supplying the egocentric RGB image for detection.
+    camera_topic: "/egocentric_rgb"
