@@ -1,6 +1,6 @@
 name: domain_bridge
-from_domain: 0
-to_domain: 1
+from_domain: 79
+to_domain: 80
 topics:
   camera/image/compressed:
     type: sensor_msgs/msg/CompressedImage
@@ -12,8 +12,13 @@ topics:
     type: tf2_msgs/msg/TFMessage
   tf_static:
     type: tf2_msgs/msg/TFMessage
+  way_point_reached:
+    type: std_msgs/msg/Float32
   way_point:
     type: geometry_msgs/msg/PointStamped
+    reversed: True
+  stop:
+    type: std_msgs/msg/Int8
     reversed: True
   goal_point:
     type: geometry_msgs/msg/PointStamped
