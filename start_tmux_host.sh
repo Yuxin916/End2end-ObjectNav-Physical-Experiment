@@ -63,7 +63,7 @@ tmux send-keys -t "$SESSION_NAME":0.3 "ros2 launch sam2_detector sam2_detector.l
 
 # Pane 4: RViz visualization (base station config)
 tmux send-keys -t "$SESSION_NAME":0.4 \
-    "source ./install/setup.bash && ros2 run rviz2 rviz2 -d ./base_station/base_station.rviz" C-m
+    "source ./install/setup.bash && ros2 run rviz2 rviz2 -d src/base_autonomy/vehicle_simulator/rviz/vehicle_simulator.rviz" C-m
 
 # Panes 5-6: free for manual commands (e.g., publishing /object_goal)
 tmux send-keys -t "$SESSION_NAME":0.5 "echo 'Host environment ready in pane 5'" C-m
