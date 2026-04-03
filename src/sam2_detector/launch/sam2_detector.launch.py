@@ -22,7 +22,7 @@ def generate_launch_description():
 
     # Precedence: launch arguments below override config-file defaults.
     args = [
-        DeclareLaunchArgument('inference_hz', default_value='2.0',
+        DeclareLaunchArgument('inference_hz', default_value='1.0',
                               description='Maximum inference rate (Hz)'),
         DeclareLaunchArgument('device', default_value='cuda:0',
                               description='Torch device for GroundingDINO + SAM'),

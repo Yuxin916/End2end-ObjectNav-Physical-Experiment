@@ -330,14 +330,13 @@ class VLMNavigatorNode(Node):
         # Low-rate goal rebroadcast timer for startup race robustness.
         self.create_timer(0.25, self._goal_rebroadcast_timer_callback)
         # Always-on visual debug publisher (independent from VLM decision timing).
-        # 4 Hz is sufficient for RViz; 20 Hz caused full frontier extraction +
-        # BEV render to compete with pose/scan callbacks on the single thread.
+        # 1 Hz is sufficient for routine RViz monitoring and reduces CPU/bandwidth.
         self.live_debug_timer = self.create_timer(
-            0.25, self._live_debug_timer_callback
+            1.0, self._live_debug_timer_callback
         )
-        # High-rate stop timer (20 Hz): publishes cmd_vel=0 after goal success to
+        # Stop timer (10 Hz): publishes cmd_vel=0 after goal success to
         # override local_planner regardless of joySpeed/speedHandler state.
-        self.create_timer(0.05, self._stop_cmd_vel_timer_callback)
+        self.create_timer(0.1, self._stop_cmd_vel_timer_callback)
 
         # ------------------------------------------------------------------
         # Debug image saving
@@ -632,7 +631,6 @@ class VLMNavigatorNode(Node):
                 self.latest_pose_z,
                 self.latest_yaw,
             )
-            self._publish_live_bev_debug()
 
         # Check if current waypoint reached → retrigger VLM or mark success.
         if self.current_wp_x is not None:
@@ -797,11 +795,16 @@ class VLMNavigatorNode(Node):
                 self._publish_rgb_image(self.panoramic_pub, panoramic_rgb, frame_id='camera')
                 self._publish_rgb_image(self.rgb_pub, arr, frame_id='camera')
             _t5 = time.time()
-            ego_dbg = arr.copy()
-            self._draw_target_points_on_egocentric(ego_dbg)
+            _has_ego_dbg_sub = self.egocentric_rgb_debug_pub.get_subscription_count() > 0
+            if _has_ego_dbg_sub:
+                ego_dbg = arr.copy()
+                self._draw_target_points_on_egocentric(ego_dbg)
+                self._publish_rgb_image(self.egocentric_rgb_debug_pub, ego_dbg, frame_id='camera')
+                self._cache_debug_image('egocentric_rgb', ego_dbg)
+            else:
+                # Keep timing breakdown stable when debug stream is disabled.
+                ego_dbg = None
             _t6 = time.time()
-            self._publish_rgb_image(self.egocentric_rgb_debug_pub, ego_dbg, frame_id='camera')
-            self._cache_debug_image('egocentric_rgb', ego_dbg)
             _t7 = time.time()
             self.get_logger().debug(
                 f'[cam_timing ms] decode={(_t1-_t0)*1e3:.1f}'
@@ -809,8 +812,8 @@ class VLMNavigatorNode(Node):
                 f' pub_ego={(_t3-_t2)*1e3:.1f}'
                 f' pil={(_t4-_t3)*1e3:.1f}'
                 f' pub_vis={(_t5-_t4)*1e3:.1f}'
-                f' draw_pts={(_t6-_t5)*1e3:.1f}'
-                f' pub_dbg+cache={(_t7-_t6)*1e3:.1f}'
+                f' draw+pub_dbg={(_t6-_t5)*1e3:.1f}'
+                f' post_dbg={(_t7-_t6)*1e3:.1f}'
                 f' total={(_t7-_t0)*1e3:.1f}'
             )
         except Exception as e:
@@ -1182,7 +1185,7 @@ class VLMNavigatorNode(Node):
                 pass  # Never let birth RGB update crash the debug timer
 
     def _stop_cmd_vel_timer_callback(self):
-        """20 Hz timer: keep publishing cmd_vel=0 during stop-hold."""
+        """10 Hz timer: keep publishing cmd_vel=0 during stop-hold."""
         now = time.monotonic()
         hold_wp_pause = now < float(self._hold_after_wp_reached_until_s)
         if self._hold_position_after_success or self._stop_cmd_vel_count > 0 or hold_wp_pause:

@@ -86,8 +86,10 @@ class SAM2DetectorNode(Node):
         # Main inference timer
         interval = 1.0 / max(0.1, float(self.inference_hz))
         self.create_timer(interval, self._inference_callback)
-        # Low-rate goal rebroadcast timer for startup race robustness.
-        self.create_timer(0.25, self._goal_rebroadcast_timer_callback)
+        # Optional low-rate goal rebroadcast timer for startup race robustness.
+        # Disabled by default to reduce duplicate /object_goal traffic.
+        if self.enable_goal_rebroadcast:
+            self.create_timer(0.25, self._goal_rebroadcast_timer_callback)
 
         self.get_logger().info(
             f'SAM2DetectorNode (YOLOE backend) started.  '
@@ -108,6 +110,7 @@ class SAM2DetectorNode(Node):
         self.declare_parameter('scene_mode', 'real_world')
         self.declare_parameter('box_threshold', 0.3)
         self.declare_parameter('yoloe_engine_path', '../checkpoints/yoloe-11l-real_world.engine')
+        self.declare_parameter('enable_goal_rebroadcast', False)
 
     def _load_parameters(self):
         g = self.get_parameter
@@ -117,6 +120,7 @@ class SAM2DetectorNode(Node):
         self.camera_topic = g('camera_topic').value
         self.scene_mode = str(g('scene_mode').value).strip().lower()
         self.yoloe_engine_path = g('yoloe_engine_path').value
+        self.enable_goal_rebroadcast = bool(g('enable_goal_rebroadcast').value)
 
     # ------------------------------------------------------------------
     # Deferred model loading
@@ -151,7 +155,7 @@ class SAM2DetectorNode(Node):
 
     def _goal_callback(self, msg: String):
         new_goal = msg.data.strip()
-        if new_goal != self.object_goal and new_goal:
+        if self.enable_goal_rebroadcast and new_goal != self.object_goal and new_goal:
             self._goal_rebroadcast_value = new_goal
             self._goal_rebroadcast_remaining = 4
         self.object_goal = new_goal
