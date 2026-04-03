@@ -1060,7 +1060,7 @@ class VLMNavigatorNode(Node):
                 # Release hold-stop only when a new non-empty goal is commanded.
                 if self._hold_position_after_success:
                     self._hold_position_after_success = False
-                    self._publish_safety_stop(0)
+                    # self._publish_safety_stop(0)
                     self.get_logger().info('Received new goal; released stop hold (/stop=0).')
                 # Rebroadcast the received goal a few times to help peer nodes
                 # catch it if they missed the initial one-shot publication.
@@ -1478,8 +1478,8 @@ class VLMNavigatorNode(Node):
         self.target_reached_pub.publish(done_msg)
 
         # Hold-stop until a new non-empty goal arrives.
-        self._publish_safety_stop(2)
-        self.get_logger().info('Published /stop=2 (safety stop hold).')
+        # self._publish_safety_stop(2)
+        # self.get_logger().info('Published /stop=2 (safety stop hold).')
         self._hold_position_after_success = True
         if self.latest_pose_x is not None:
             # Primary stop path: reset waypoint_converter's internal waypoint source.
