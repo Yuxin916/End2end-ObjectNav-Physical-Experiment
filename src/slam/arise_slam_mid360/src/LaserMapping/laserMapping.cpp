@@ -876,11 +876,13 @@ namespace arise_slam {
                                 &laserCloudFullRes->points[i]);
         }
 
-        sensor_msgs::msg::PointCloud2 laserCloudFullRes3;
-        pcl::toROSMsg(*laserCloudFullRes, laserCloudFullRes3);
-        laserCloudFullRes3.header.stamp = rclcpp::Time(timeLaserOdometry*1e9);
-        laserCloudFullRes3.header.frame_id = WORLD_FRAME;
-        pubLaserCloudFullRes->publish(laserCloudFullRes3);
+        if (frameCount % 3 == 0) {
+            sensor_msgs::msg::PointCloud2 laserCloudFullRes3;
+            pcl::toROSMsg(*laserCloudFullRes, laserCloudFullRes3);
+            laserCloudFullRes3.header.stamp = rclcpp::Time(timeLaserOdometry*1e9);
+            laserCloudFullRes3.header.frame_id = WORLD_FRAME;
+            pubLaserCloudFullRes->publish(laserCloudFullRes3);
+        }
 
         laserCloudFullRes_rot->clear();
         laserCloudFullRes_rot->resize(laserCloudFullResNum);
