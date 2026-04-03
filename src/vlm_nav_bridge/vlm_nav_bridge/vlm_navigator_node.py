@@ -15,8 +15,6 @@ Publications
   /vlm_bev_debug     (sensor_msgs/Image)          – BEV visualisation for RVIZ
   /egocentric_rgb    (sensor_msgs/Image)          – projected camera view (640x480, HFOV 79)
   /frontier_rgb_debug (sensor_msgs/Image)         – tiled frontier birth RGB images
-  /vlm_sam2_detection_debug (sensor_msgs/Image)   – detector bbox visualization
-  /vlm_sam2_segmentation_debug (sensor_msgs/Image) – detector mask visualization
   /vlm_target_debug  (sensor_msgs/Image)          – egocentric target detection overlay
   /vlm_target_marker (geometry_msgs/PointStamped) – associated target position in map frame
 
@@ -45,7 +43,6 @@ import numpy as np
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
 from sensor_msgs.msg import PointCloud2, Image
 from nav_msgs.msg import Odometry
@@ -181,16 +178,6 @@ class VLMNavigatorNode(Node):
         self._last_detection_signature: Optional[Tuple[Any, ...]] = None
         self._pending_detection_interrupt: bool = False
 
-        # Initial 360° spin state: arm at startup, but do not actually rotate
-        # until the core launch stack has produced real data and settled.
-        self._initial_spin_active: bool = False
-        self._initial_spin_completed: bool = False
-        self._initial_spin_ready_since_s: Optional[float] = None
-        self._last_initial_spin_wait_log_s: float = 0.0
-        self._initial_spin_accumulated_rad: float = 0.0
-        self._initial_spin_prev_yaw: Optional[float] = None
-        self._initial_spin_angular_vel: float = 6  # rad/s (CCW)
-
         # Frontier birth RGB (dual-ViT templates)
         self.latest_rgb_pil: PILImage.Image = None
         # Rate-limit live BEV debug publish (frontier extraction is expensive)
@@ -215,77 +202,51 @@ class VLMNavigatorNode(Node):
         self.target_semantic: Optional[str] = None
         self._target_raycast_hit: bool = False
         self.target_confidence: float = 0.0
-        self.latest_detection_overlay_rgb: Optional[np.ndarray] = None
-        self.latest_mask_overlay_rgb: Optional[np.ndarray] = None
         self._last_projected_crop_heading: Optional[float] = None
 
-        # ------------------------------------------------------------------
-        # QoS
-        # ------------------------------------------------------------------
-        # RELIABLE for control/navigation topics that must not be dropped.
-        default_qos = QoSProfile(
-            reliability=ReliabilityPolicy.RELIABLE,
-            history=HistoryPolicy.KEEP_LAST,
-            depth=10,
-        )
-        # BEST_EFFORT for all image/debug topics.
-        # RELIABLE image publishers build a retransmission backlog when RViz
-        # (remote laptop) is slow. With SingleThreadedExecutor this backlog
-        # serialises ALL callbacks, causing artificial latency even when
-        # CPU/GPU are underutilised.  depth=1 drops stale frames immediately.
-        sensor_qos = QoSProfile(
-            reliability=ReliabilityPolicy.RELIABLE,
-            history=HistoryPolicy.KEEP_LAST,
-            depth=1,
-        )
-        # Alias for clarity — image debug topics use sensor_qos.
-        image_qos = sensor_qos
         # ------------------------------------------------------------------
         # Subscriptions
         # ------------------------------------------------------------------
         self.create_subscription(
             PointCloud2, '/registered_scan',
-            self._scan_callback, default_qos
+            self._scan_callback,
+            5
         )
         self.create_subscription(
             Odometry, '/state_estimation',
-            self._pose_callback, default_qos
+            self._pose_callback,
+            10
         )
         self.create_subscription(
             String, '/object_goal',
-            self._goal_callback, default_qos
+            self._goal_callback,
+            10
         )
         self.create_subscription(
             String, self.target_detection_topic,
-            self._target_detection_callback, default_qos
-        )
-        # Direct detector debug stream passthrough (standalone detector node).
-        # Must use sensor_qos (BEST_EFFORT) to match sam2_detector's publisher QoS.
-        self.create_subscription(
-            Image, '/sam2_detection_debug',
-            self._detector_detection_debug_callback, sensor_qos
-        )
-        self.create_subscription(
-            Image, '/sam2_segmentation_debug',
-            self._detector_segmentation_debug_callback, sensor_qos
+            self._target_detection_callback,
+            10
         )
         # Camera image for frontier birth RGB (dual-ViT templates)
         self.create_subscription(
             Image, self.camera_topic,
-            self._camera_callback, sensor_qos
+            self._camera_callback,
+            5
         )
         # Track waypoint_converter's adjusted goal so distance checks use the
         # actual navigation target rather than the raw frontier position.
         self.create_subscription(
             PointStamped, '/way_point',
-            self._converted_waypoint_callback, default_qos
+            self._converted_waypoint_callback,
+            10
         )
         # waypoint_converter publishes this when the adjusted waypoint is reached.
         # Use it as the primary trigger for the next VLM step (avoids the
         # frontier_min_distance / goal_reached_threshold mismatch entirely).
         self.create_subscription(
             Float32, '/way_point_reached',
-            self._waypoint_reached_callback, default_qos
+            self._waypoint_reached_callback,
+            10
         )
         # ------------------------------------------------------------------
         # Publications
@@ -294,76 +255,70 @@ class VLMNavigatorNode(Node):
         #     Pose2D, '/way_point_with_heading', default_qos
         # )
         self.fake_way_point_pub = self.create_publisher(
-            PointStamped, '/way_point', default_qos
+            PointStamped, '/way_point', 10
         )
         self.bev_debug_pub = self.create_publisher(
-            Image, '/vlm_bev_debug', image_qos
+            Image, '/vlm_bev_debug', 10
         )
         # Training-aligned debug topic names (folder-style names from data generation).
         self.rgb_pub = self.create_publisher(
-            Image, '/rgb', image_qos
+            Image, '/rgb', 10
         )
         self.panoramic_pub = self.create_publisher(
-            Image, '/panoramic', image_qos
+            Image, '/panoramic', 10
         )
         self.full_occupancy_explore_pub = self.create_publisher(
-            Image, '/full_occupancy_explore', image_qos
+            Image, '/full_occupancy_explore', 10
         )
         self.full_occupancy_explore_frontier_pub = self.create_publisher(
-            Image, '/full_occupancy_explore_frontier', image_qos
+            Image, '/full_occupancy_explore_frontier', 10
         )
         self.full_occupancy_explore_frontier_gt_pub = self.create_publisher(
-            Image, '/full_occupancy_explore_frontier_gt', image_qos
+            Image, '/full_occupancy_explore_frontier_gt', 10
         )
         self.local_occupancy_explore_frontier_pub = self.create_publisher(
-            Image, '/local_occupancy_explore_frontier', image_qos
+            Image, '/local_occupancy_explore_frontier', 10
         )
         self.local_occupancy_explore_frontier_gt_pub = self.create_publisher(
-            Image, '/local_occupancy_explore_frontier_gt', image_qos
+            Image, '/local_occupancy_explore_frontier_gt', 10
         )
         self.fov_pub = self.create_publisher(
-            Image, '/fov', image_qos
+            Image, '/fov', 10
         )
         self.egocentric_rgb_pub = self.create_publisher(
-            Image, '/egocentric_rgb', image_qos
+            Image, '/egocentric_rgb', 10
         )
         self.egocentric_rgb_debug_pub = self.create_publisher(
-            Image, '/egocentric_rgb_debug', image_qos
+            Image, '/egocentric_rgb_debug', 10
         )
         self.frontier_rgb_debug_pub = self.create_publisher(
-            Image, '/frontier_rgb_debug', image_qos
-        )
-        self.sam2_detection_debug_pub = self.create_publisher(
-            Image, '/vlm_sam2_detection_debug', image_qos
-        )
-        self.sam2_segmentation_debug_pub = self.create_publisher(
-            Image, '/vlm_sam2_segmentation_debug', image_qos
+            Image, '/frontier_rgb_debug', 10
         )
         self.target_debug_pub = self.create_publisher(
-            Image, '/vlm_target_debug', image_qos
+            Image, '/vlm_target_debug', 10
         )
         self.target_marker_pub = self.create_publisher(
-            PointStamped, '/vlm_target_marker', default_qos
+            PointStamped, '/vlm_target_marker', 10  
         )
         self.target_reached_pub = self.create_publisher(
-            Bool, '/vlm_target_reached', default_qos
+            Bool, '/vlm_target_reached', 10
         )
         self.goal_pub = self.create_publisher(
-            String, '/object_goal', default_qos
+            String, '/object_goal', 10
         )
         self.stop_pub = self.create_publisher(
-            Int8, '/stop', default_qos
+            Int8, '/stop', 10
         )
         # Direct stop publisher: bypasses waypoint_converter to ensure local_planner
         # receives the stop waypoint even if waypoint_converter has a timing race.
         self.stop_way_point_pub = self.create_publisher(
-            PointStamped, '/way_point', default_qos
+            PointStamped, '/way_point', 10
         )
         # cmd_vel publisher: used only on goal success to send zero velocity
         # directly, overriding local_planner regardless of joySpeed state.
         # local_planner/vehicle_simulator use TwistStamped on /cmd_vel.
         self.cmd_vel_pub = self.create_publisher(
-            TwistStamped, '/cmd_vel', default_qos
+            TwistStamped, '/cmd_vel', 10
         )
 
         # ------------------------------------------------------------------
@@ -392,8 +347,7 @@ class VLMNavigatorNode(Node):
         self._debug_save_counters: dict = {}
         if self.debug_save_dir:
             import os as _os
-            _slots = ('fov', 'vlm_bev_debug', 'egocentric_rgb', 'frontier_rgb_debug',
-                      'sam2_detection_debug', 'sam2_segmentation_debug')
+            _slots = ('fov', 'vlm_bev_debug', 'egocentric_rgb', 'frontier_rgb_debug')
             for _name in _slots:
                 _subdir = _os.path.join(self.debug_save_dir, _name)
                 _os.makedirs(_subdir, exist_ok=True)
@@ -536,7 +490,6 @@ class VLMNavigatorNode(Node):
         self.declare_parameter('target_screen_standoff_m', 0.6)
         self.declare_parameter('target_screen_standoff_max_snap_m', 1.5)
         self.declare_parameter('max_sensor_skew_sec', 0.5)
-        self.declare_parameter('initial_spin_startup_wait_sec', 3.0)
         self.declare_parameter('write_visualize', True)
         self.declare_parameter('bev_only', False)
         self.declare_parameter('debug_save_dir', '')
@@ -606,7 +559,6 @@ class VLMNavigatorNode(Node):
         self.target_screen_standoff_m = g('target_screen_standoff_m').value
         self.target_screen_standoff_max_snap_m = g('target_screen_standoff_max_snap_m').value
         self.max_sensor_skew_sec = g('max_sensor_skew_sec').value
-        self.initial_spin_startup_wait_sec = float(g('initial_spin_startup_wait_sec').value)
         self.write_visualize = g('write_visualize').value
         self.bev_only = g('bev_only').value
         self.debug_save_dir = g('debug_save_dir').value.strip()
@@ -666,24 +618,6 @@ class VLMNavigatorNode(Node):
             self.last_camera_heading_rad = 0.0
             self.last_camera_heading_source = 'yaw'
         self._pose_received = True
-
-        # Accumulate rotation for the initial 360° spin.
-        if self._initial_spin_active and self._initial_spin_prev_yaw is not None:
-            diff = self.latest_yaw - self._initial_spin_prev_yaw
-            # Normalise to [-π, π]
-            diff = (diff + math.pi) % (2 * math.pi) - math.pi
-            self._initial_spin_accumulated_rad += abs(diff)
-            if self._initial_spin_accumulated_rad >= 2 * math.pi:
-                self._initial_spin_active = False
-                self._initial_spin_completed = True
-                self._initial_spin_ready_since_s = None
-                self._initial_spin_accumulated_rad = 0.0
-                self._initial_spin_prev_yaw = None
-                self.get_logger().info(
-                    'Initial 360° spin complete. Handing over to VLM navigation.'
-                )
-        if self._initial_spin_active:
-            self._initial_spin_prev_yaw = float(self.latest_yaw)
 
         # Initialise mapper on first pose
         if not self.mapper.is_initialised:
@@ -972,46 +906,6 @@ class VLMNavigatorNode(Node):
         if best is not None:
             self.target_confidence = float(best['confidence'])
 
-    def _detector_detection_debug_callback(self, msg: Image):
-        """Forward detector bbox visualization with target projection overlays."""
-        arr = self._decode_ros_rgb_image(msg)
-        if arr is None:
-            self.sam2_detection_debug_pub.publish(msg)
-            return
-        arr = np.ascontiguousarray(arr).copy()
-        self._draw_target_points_on_egocentric(arr)
-        self.latest_detection_overlay_rgb = arr
-        self._publish_rgb_image(self.sam2_detection_debug_pub, arr, frame_id=msg.header.frame_id or 'camera')
-        self._cache_debug_image('sam2_detection_debug', self.latest_detection_overlay_rgb)
-
-    def _detector_segmentation_debug_callback(self, msg: Image):
-        """Forward detector segmentation visualization with target projection overlays."""
-        arr = self._decode_ros_rgb_image(msg)
-        if arr is None:
-            self.sam2_segmentation_debug_pub.publish(msg)
-            return
-        arr = np.ascontiguousarray(arr).copy()
-        self._draw_target_points_on_egocentric(arr)
-        self.latest_mask_overlay_rgb = arr
-        self._publish_rgb_image(self.sam2_segmentation_debug_pub, arr, frame_id=msg.header.frame_id or 'camera')
-        self._cache_debug_image('sam2_segmentation_debug', self.latest_mask_overlay_rgb)
-
-    def _decode_ros_rgb_image(self, msg: Image) -> Optional[np.ndarray]:
-        """Decode ROS Image to RGB numpy image (best-effort)."""
-        try:
-            raw = bytes(msg.data)
-            if msg.encoding == 'rgb8':
-                return np.frombuffer(raw, dtype=np.uint8).reshape(msg.height, msg.width, 3)
-            if msg.encoding in ('bgr8',):
-                arr = np.frombuffer(raw, dtype=np.uint8).reshape(msg.height, msg.width, 3)
-                return arr[:, :, ::-1].copy()
-            if msg.encoding == 'mono8':
-                arr = np.frombuffer(raw, dtype=np.uint8).reshape(msg.height, msg.width)
-                return np.stack([arr, arr, arr], axis=-1)
-        except Exception:
-            return None
-        return None
-
     def _project_panorama_to_pinhole(self, pano_rgb: np.ndarray,
                                       heading_override: Optional[float] = None) -> np.ndarray:
         """
@@ -1211,7 +1105,7 @@ class VLMNavigatorNode(Node):
             # Immediately trigger the first VLM inference when a new goal
             # arrives, then reset the timer so subsequent ticks are aligned
             # from this point (avoiding a redundant fire right after).
-            if new_goal and self._model_loaded and self._pose_received and not self._initial_spin_active:
+            if new_goal and self._model_loaded and self._pose_received:
                 self._run_vlm_step()
                 self.vlm_timer.reset()
 
@@ -1287,61 +1181,8 @@ class VLMNavigatorNode(Node):
             except Exception:
                 pass  # Never let birth RGB update crash the debug timer
 
-    def _initial_spin_startup_pending_reasons(self) -> list[str]:
-        reasons = []
-        if not self._pose_received or self.initial_yaw is None or not np.isfinite(self.initial_yaw):
-            reasons.append('pose')
-        if not self._scan_received:
-            reasons.append('scan')
-        if self.latest_rgb_pil is None:
-            reasons.append('camera')
-        if not self.bev_only and not self._model_loaded:
-            reasons.append('vlm_model')
-        if self.egocentric_rgb_pub.get_subscription_count() <= 0:
-            reasons.append('sam2_subscriber')
-        return reasons
-
-    def _maybe_activate_initial_spin(self):
-        if self._initial_spin_completed:
-            return
-        if self._initial_spin_active:
-            return
-
-        now = time.monotonic()
-        pending_reasons = self._initial_spin_startup_pending_reasons()
-        if pending_reasons:
-            self._initial_spin_ready_since_s = None
-            if now - self._last_initial_spin_wait_log_s >= 2.0:
-                self.get_logger().info(
-                    'Holding initial 360° spin until startup is ready: '
-                    + ', '.join(pending_reasons)
-                )
-                self._last_initial_spin_wait_log_s = now
-            return
-
-        if self._initial_spin_ready_since_s is None:
-            self._initial_spin_ready_since_s = now
-            self.get_logger().info(
-                f'Initial 360° spin prerequisites satisfied. '
-                f'Waiting {self.initial_spin_startup_wait_sec:.1f}s for launch settle.'
-            )
-            return
-
-        if now - self._initial_spin_ready_since_s < self.initial_spin_startup_wait_sec:
-            return
-
-        self._initial_spin_active = True
-        self._initial_spin_accumulated_rad = 0.0
-        self._initial_spin_prev_yaw = float(self.latest_yaw)
-        self.get_logger().info('Starting initial 360° spin.')
-
     def _stop_cmd_vel_timer_callback(self):
-        """20 Hz timer: drive initial spin; while stop-hold is active, keep publishing cmd_vel=0."""
-        self._maybe_activate_initial_spin()
-        # Initial 360° spin takes priority over stop-hold.
-        if self._initial_spin_active:
-            self.cmd_vel_pub.publish(self._build_spin_cmd_vel_msg(self._initial_spin_angular_vel))
-            return
+        """20 Hz timer: keep publishing cmd_vel=0 during stop-hold."""
         now = time.monotonic()
         hold_wp_pause = now < float(self._hold_after_wp_reached_until_s)
         if self._hold_position_after_success or self._stop_cmd_vel_count > 0 or hold_wp_pause:
@@ -1372,19 +1213,6 @@ class VLMNavigatorNode(Node):
         msg.twist.angular.z = 0.0
         return msg
 
-    def _build_spin_cmd_vel_msg(self, angular_z: float) -> TwistStamped:
-        """Build a pure-rotation TwistStamped command (in-place spin)."""
-        msg = TwistStamped()
-        msg.header.stamp = self.get_clock().now().to_msg()
-        msg.header.frame_id = 'vehicle'
-        msg.twist.linear.x = 0.0
-        msg.twist.linear.y = 0.0
-        msg.twist.linear.z = 0.0
-        msg.twist.angular.x = 0.0
-        msg.twist.angular.y = 0.0
-        msg.twist.angular.z = float(angular_z)
-        return msg
-
     def _publish_safety_stop(self, level: int):
         """Publish /stop command for pathFollower safety stop."""
         stop_msg = Int8()
@@ -1393,9 +1221,6 @@ class VLMNavigatorNode(Node):
 
     def _run_vlm_step(self):
         """Core step wrapper with re-entry guard."""
-        if self._initial_spin_active:
-            self.get_logger().debug('Skip VLM step: initial 360° spin in progress.')
-            return
         if self._running_vlm_step:
             self.get_logger().debug('Skip VLM step: previous step still running.')
             return

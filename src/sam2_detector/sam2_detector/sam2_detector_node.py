@@ -28,24 +28,19 @@ Publications
 ------------
   /target_detection         (std_msgs/String)    – JSON detection payload
   /sam2_detection_debug     (sensor_msgs/Image)  – bbox+label overlay
-  /sam2_segmentation_debug  (sensor_msgs/Image)  – mask+bbox+label overlay
 """
 
 import sys
 import json
 import time
 import logging
-from typing import List, Optional
+from typing import Optional
 from pathlib import Path
 
 import numpy as np
 import cv2
-
-import math
-
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
@@ -78,34 +73,12 @@ class SAM2DetectorNode(Node):
         self._goal_rebroadcast_value: str = ''
         self._goal_rebroadcast_remaining: int = 0
 
-        qos = QoSProfile(
-            reliability=ReliabilityPolicy.RELIABLE,
-            history=HistoryPolicy.KEEP_LAST,
-            depth=5,
-        )
-        # BEST_EFFORT for camera: avoids RELIABLE shared-memory backpressure that
-        # delays delivery to all subscribers (including RViz) when this node is busy.
-        camera_qos = QoSProfile(
-            reliability=ReliabilityPolicy.RELIABLE,
-            history=HistoryPolicy.KEEP_LAST,
-            depth=1,
-        )
-        # BEST_EFFORT for debug images: RViz on a remote laptop cannot consume
-        # at full rate; RELIABLE + depth would cause DDS retransmission backpressure
-        # that blocks all callbacks on the single executor thread.
-        image_qos = QoSProfile(
-            reliability=ReliabilityPolicy.RELIABLE,
-            history=HistoryPolicy.KEEP_LAST,
-            depth=1,
-        )
+        self.create_subscription(Image, self.camera_topic, self._camera_callback, 10)
+        self.create_subscription(String, '/object_goal', self._goal_callback, 10)
 
-        self.create_subscription(Image, self.camera_topic, self._camera_callback, camera_qos)
-        self.create_subscription(String, '/object_goal', self._goal_callback, qos)
-
-        self.goal_pub = self.create_publisher(String, '/object_goal', qos)
-        self.detection_pub = self.create_publisher(String, '/target_detection', qos)
-        self.debug_detection_pub = self.create_publisher(Image, '/sam2_detection_debug', image_qos)
-        self.debug_segmentation_pub = self.create_publisher(Image, '/sam2_segmentation_debug', image_qos)
+        self.goal_pub = self.create_publisher(String, '/object_goal', 10)
+        self.detection_pub = self.create_publisher(String, '/target_detection', 10)
+        self.debug_detection_pub = self.create_publisher(Image, '/sam2_detection_debug', 10)
 
         # Deferred model load (fires once 3 s after startup)
         self._load_timer = self.create_timer(3.0, self._load_model_once)
@@ -299,72 +272,41 @@ class SAM2DetectorNode(Node):
             f' goal="{self.object_goal}" frame_age={frame_age:.3f}s'
         )
 
-        # Debug images show ALL detections; goal-matching ones are highlighted via label text.
-        _t5 = time.time()
-        self._publish_debug(rgb, all_detections, snap_stamp_sec, snap_stamp_nanosec)
-        _t6 = time.time()
-        if _t6 - _t5 > 0.005:
-            self.get_logger().warn(f'[yolo_timing ms] publish_debug={(_t6-_t5)*1e3:.1f}')
+        self._publish_detection_debug(rgb, all_detections, snap_stamp_sec, snap_stamp_nanosec)
 
-    # ------------------------------------------------------------------
-    # Debug image
-    # ------------------------------------------------------------------
-
-    def _publish_debug(
+    def _publish_detection_debug(
         self,
         rgb: np.ndarray,
-        detections: List[dict],
+        detections: list[dict],
         stamp_sec: int = 0,
         stamp_nanosec: int = 0,
     ):
-        if (
-            not self.debug_detection_pub.get_subscription_count() and
-            not self.debug_segmentation_pub.get_subscription_count()
-        ):
+        if not self.debug_detection_pub.get_subscription_count():
             return
+
         det_img = rgb.copy()
-        seg_img = rgb.copy().astype(np.float32)
         for det in detections:
             x1, y1, x2, y2 = [int(v) for v in det['bbox']]
             label = det['label']
             conf = det['confidence']
-            poly = det.get('mask_polygon', [])
-            mask = det.get('mask')
 
             cv2.rectangle(det_img, (x1, y1), (x2, y2), (0, 255, 255), 2)
-            cv2.rectangle(seg_img, (x1, y1), (x2, y2), (0, 255, 255), 2)
             cv2.putText(
                 det_img, f'{label} {conf:.2f}',
                 (x1, max(14, y1 - 6)),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1, cv2.LINE_AA
             )
-            cv2.putText(
-                seg_img, f'{label} {conf:.2f}',
-                (x1, max(14, y1 - 6)),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1, cv2.LINE_AA
-            )
-            if mask is not None and np.any(mask):
-                seg_img[mask] = seg_img[mask] * 0.5 + np.array([0.0, 200.0, 200.0], dtype=np.float32) * 0.5
-            elif poly:
-                pts = np.array(poly, dtype=np.int32).reshape(-1, 1, 2)
-                cv2.fillPoly(seg_img, [pts], (0, 200, 200))
 
-        seg_img = np.clip(seg_img, 0, 255).astype(np.uint8)
-
-        def _to_msg(img: np.ndarray) -> Image:
-            msg = Image()
-            msg.header.stamp.sec = stamp_sec
-            msg.header.stamp.nanosec = stamp_nanosec
-            msg.header.frame_id = 'camera'
-            msg.height, msg.width = img.shape[:2]
-            msg.encoding = 'rgb8'
-            msg.is_bigendian = False
-            msg.step = msg.width * 3
-            msg.data = np.ascontiguousarray(img, dtype=np.uint8).tobytes()
-            return msg
-
-        self.debug_detection_pub.publish(_to_msg(det_img))
-        self.debug_segmentation_pub.publish(_to_msg(seg_img))
+        msg = Image()
+        msg.header.stamp.sec = stamp_sec
+        msg.header.stamp.nanosec = stamp_nanosec
+        msg.header.frame_id = 'camera'
+        msg.height, msg.width = det_img.shape[:2]
+        msg.encoding = 'rgb8'
+        msg.is_bigendian = False
+        msg.step = msg.width * 3
+        msg.data = np.ascontiguousarray(det_img, dtype=np.uint8).tobytes()
+        self.debug_detection_pub.publish(msg)
 
 
 # ---------------------------------------------------------------------------

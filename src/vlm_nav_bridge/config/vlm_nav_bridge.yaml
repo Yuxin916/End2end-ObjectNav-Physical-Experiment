@@ -331,8 +331,7 @@ vlm_navigator:
 
     # Absolute path to directory where debug images are saved.
     # Subdirectories are created automatically for each topic:
-    #   fov/, vlm_bev_debug/, frontier_rgb_debug/,
-    #   sam2_detection_debug/, sam2_segmentation_debug/
+    #   fov/, vlm_bev_debug/, egocentric_rgb/, frontier_rgb_debug/
     # Leave empty ("") to disable image saving entirely.
     debug_save_dir: ""
 
