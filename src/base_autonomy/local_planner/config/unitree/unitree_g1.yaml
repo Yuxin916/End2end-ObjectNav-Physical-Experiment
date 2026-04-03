@@ -1,0 +1,140 @@
+# Sensor mounting offsets (used for TF transforms)
+sensorMountingOffsets:
+  ros__parameters:
+    sensorOffsetX: 0.0
+    sensorOffsetY: 0.0
+    sensorOffsetZ: 0.0
+
+# SLAM sensor configuration
+feature_extraction_node:
+  ros__parameters:
+    lidar_flip: false
+    blindFront: 0.2
+    blindBack: -0.2
+    blindLeft: 0.3
+    blindRight: -0.3
+    blindDiskLow: -0.05
+    blindDiskHigh: 0.05
+    blindDiskRadius: 0.5
+
+imu_preintegration_node:
+  ros__parameters:
+    lidar_flip: false
+
+localPlanner:
+  ros__parameters:
+    # Sensor offset
+    sensorOffsetX: 0.0
+    sensorOffsetY: 0.0
+
+    # Vehicle dimensions
+    vehicleLength: 0.5
+    vehicleWidth: 0.5
+
+    # Driving mode
+    twoWayDrive: true
+
+    # Voxel / terrain
+    laserVoxelSize: 0.05
+    terrainVoxelSize: 0.2
+    useTerrainAnalysis: true
+    checkObstacle: true
+    checkRotObstacle: false
+
+    # Terrain / obstacle thresholds
+    obstacleHeightThre: 0.1
+    groundHeightThre: 0.05
+    costHeightThre1: 0.1
+    costHeightThre2: 0.05
+    useCost: false
+
+    # Path selection
+    slowPathNumThre: 5
+    slowGroupNumThre: 1
+    pointPerPathThre: 2
+    adjacentRange: 3.5
+    minRelZ: -0.4
+    maxRelZ: 0.3
+
+    # Speed limits
+    maxSpeed: 0.75
+    autonomySpeed: 0.75
+
+    # Direction / heading
+    dirWeight: 0.02
+    dirThre: 90.0
+    dirToVehicle: false
+
+    # Path planning
+    pathScale: 0.875
+    minPathScale: 0.675
+    pathScaleStep: 0.1
+    pathScaleBySpeed: true
+    minPathRange: 0.8
+    pathRangeStep: 0.6
+    pathRangeBySpeed: true
+    pathCropByGoal: true
+
+    # Joystick / autonomy
+    joyToCheckObstacleDelay: 5.0
+
+    # Goal tolerances
+    goalClearRange: 0.6
+    goalBehindRange: 0.8
+    goalReachedThreshold: 0.3
+    goalYawThreshold: 0.15
+
+    # Freeze behavior
+    freezeAng: 90.0
+    freezeTime: 0.0
+
+pathFollower:
+  ros__parameters:
+    # Sensor offset
+    sensorOffsetX: 0.0
+    sensorOffsetY: 0.0
+
+    # Serial / robot interface
+    serialPort: /dev/ttyACM0
+    baudrate: 115200
+    pubSkipNum: 1
+
+    # Driving mode
+    lookAheadDis: 0.5
+    maxSpeed: 0.75
+    maxAccel: 1.5
+    switchTimeThre: 1.0
+    omniDirDiffThre: 1.5
+    slowDwnDisThre: 0.875
+
+    # Inclination-based slowdown / stop
+    useInclRateToSlow: false
+    inclRateThre: 120.0
+    slowRate1: 0.25
+    slowRate2: 0.5
+    slowRate3: 0.75
+    slowTime1: 2.0
+    slowTime2: 2.0
+    useInclToStop: false
+    inclThre: 45.0
+    stopTime: 5.0
+
+    # Rotation behavior
+    noRotAtStop: false
+    noRotAtGoal: true
+
+    # Speed / autonomy
+    autonomySpeed: 0.75
+
+    # Yaw control
+    goalYawGain: 2.0
+    yawRateGain: 1.5
+    stopYawRateGain: 1.5
+    maxYawRate: 40.0
+    dirDiffThre: 0.4
+    stopDisThre: 0.4
+
+terrainAnalysis:
+  ros__parameters:
+    minDyObsVFOV: -55.0
+    maxDyObsVFOV: 10.0

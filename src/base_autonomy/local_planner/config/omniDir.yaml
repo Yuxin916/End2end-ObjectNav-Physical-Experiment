@@ -1,12 +1,136 @@
 localPlanner:
   ros__parameters:
+
+    # ===== Omni-specific =====
     omniDirGoalThre: 0.5
+
+    # ===== Sensor offset =====
+    sensorOffsetX: 0.0
+    sensorOffsetY: 0.0
+    cameraOffsetZ: 0.0
+
+    # ===== Vehicle =====
+    vehicleLength: 0.5
+    vehicleWidth: 0.5
+    twoWayDrive: true
+
+    # ===== Voxel / terrain =====
+    laserVoxelSize: 0.05
+    terrainVoxelSize: 0.2
+    useTerrainAnalysis: true
+    checkObstacle: true
+    checkRotObstacle: false
+
+    # ===== Terrain thresholds =====
+    obstacleHeightThre: 0.05
+    groundHeightThre: 0.05
+    costHeightThre1: 0.1
+    costHeightThre2: 0.05
+    useCost: false
+
+    # ===== Path filtering =====
+    slowPathNumThre: 5
+    slowGroupNumThre: 1
+    pointPerPathThre: 2
+    adjacentRange: 3.5
+
+    # ===== Height limits =====
+    minRelZ: -0.4
+    maxRelZ: 0.3
+
+    # ===== Speed =====
+    maxSpeed: 0.4
+    autonomySpeed: 0.4
+
+    # ===== Direction =====
+    dirWeight: 0.02
+    dirThre: 90.0
+    dirToVehicle: false
+
+    # ===== Path scaling =====
+    pathScale: 0.4
+    minPathScale: 0.675
+    pathScaleStep: 0.1
+    pathScaleBySpeed: true
+
+    minPathRange: 0.8
+    pathRangeStep: 0.6
+    pathRangeBySpeed: true
+
+    pathCropByGoal: true
+
+    # ===== Goal handling =====
+    goalClearRange: 0.35
+    goalBehindRange: 0.35
+
+    # ===== Joystick / timing =====
+    joyToCheckObstacleDelay: 5.0
+
+    # ===== Freeze =====
+    freezeAng: 90.0
+    freezeTime: 0.0
+
 
 pathFollower:
   ros__parameters:
+
+    # ===== Omni-specific =====
     omniDirGoalThre: 0.5
+
+    # ===== Sensor offset =====
+    sensorOffsetX: 0.0
+    sensorOffsetY: 0.0
+
+    # ===== Serial / robot =====
+    serialPort: /dev/ttyACM0
+    baudrate: 115200
+    pubSkipNum: 1
+
+    # ===== Driving =====
+    twoWayDrive: false
+    lookAheadDis: 0.5
+
+    # ===== Speed =====
+    maxSpeed: 0.4
+    autonomySpeed: 0.4
+    maxAccel: 2.0
+
+    # ===== Switching =====
+    switchTimeThre: 1.0
+
+    # ===== Omni turning =====
+    omniDirDiffThre: 1.5
+
+    # ===== Slow down =====
+    slowDwnDisThre: 0.875
+
+    # ===== Inclination =====
+    useInclRateToSlow: false
+    inclRateThre: 120.0
+
+    slowRate1: 0.25
+    slowRate2: 0.5
+    slowRate3: 0.75
+
+    slowTime1: 2.0
+    slowTime2: 2.0
+
+    useInclToStop: false
+    inclThre: 45.0
+    stopTime: 5.0
+
+    # ===== Rotation behavior =====
+    noRotAtStop: false
+    noRotAtGoal: true
+
+    # ===== Yaw control =====
     yawRateGain: 3.0
     stopYawRateGain: 3.0
     maxYawRate: 80.0
     dirDiffThre: 0.3
     stopDisThre: 0.1
+
+terrainAnalysis:
+  ros__parameters:
+    minDyObsVFOV: -30.0
+    maxDyObsVFOV: 35.0
