@@ -1,0 +1,38 @@
+# kill ros processes
+sudo pkill -9 -f '/opt/ros/.*\/lib\/|\/install\/.*\/lib\/|_ros2_daemon|^[[:space:]]*ros2$'
+
+
+# Remember to turn off the collision avoidance 
+
+
+
+source /opt/ros/jazzy/setup.bash
+
+source install/setup.sh
+
+
+
+# slow mode (joystick webrtc
+
+1. 
+export ROBOT_CONFIG_PATH="unitree/unitree_go2_slow"
+./system_real_robot.sh
+
+
+2. 
+ros2 launch unitree_webrtc_ros unitree_control.launch.py robot_ip:=192.168.12.1 connection_method:=LocalAP control_mode:=wireless_controller
+
+
+
+
+# fast mode (joystick webrtc
+1. 
+export ROBOT_CONFIG_PATH="unitree/unitree_go2_fast"
+./system_real_robot.sh
+
+
+2. 
+ros2 launch unitree_webrtc_ros unitree_control.launch.py robot_ip:=192.168.12.1 connection_method:=LocalAP 
+
+
+
