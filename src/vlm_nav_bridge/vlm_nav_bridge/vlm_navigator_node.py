@@ -46,7 +46,7 @@ from rclpy.node import Node
 
 from sensor_msgs.msg import PointCloud2, Image
 from nav_msgs.msg import Odometry
-from geometry_msgs.msg import PointStamped, Pose2D, TwistStamped
+from geometry_msgs.msg import PointStamped, Pose2D
 from std_msgs.msg import String, Bool, Int8, Float32
 
 import cv2
@@ -162,14 +162,9 @@ class VLMNavigatorNode(Node):
         self._pose_received = False
         self._scan_received = False
         self._running_vlm_step = False
-        # After goal success: 20 Hz timer publishes cmd_vel=0 + waypoint at robot pos
-        # for 3 s, dominating the waypoint_converter's 10 Hz republish.
-        self._stop_cmd_vel_count: int = 0
         # Hold-stop mode after goal success. While enabled, keep publishing stop
         # commands until a new non-empty /object_goal arrives.
         self._hold_position_after_success: bool = False
-        # Temporary pause after non-target waypoint reached.
-        self._hold_after_wp_reached_until_s: float = 0.0
         # Goal rebroadcast: improves delivery when one-shot /object_goal publish
         # is missed by one of the subscribers during startup races.
         self._goal_rebroadcast_value: str = ''
@@ -310,18 +305,6 @@ class VLMNavigatorNode(Node):
         self.stop_pub = self.create_publisher(
             Int8, '/stop', 10
         )
-        # Direct stop publisher: bypasses waypoint_converter to ensure local_planner
-        # receives the stop waypoint even if waypoint_converter has a timing race.
-        self.stop_way_point_pub = self.create_publisher(
-            PointStamped, '/way_point', 10
-        )
-        # cmd_vel publisher: used only on goal success to send zero velocity
-        # directly, overriding local_planner regardless of joySpeed state.
-        # local_planner/vehicle_simulator use TwistStamped on /cmd_vel.
-        self.cmd_vel_pub = self.create_publisher(
-            TwistStamped, '/cmd_vel', 10
-        )
-
         # ------------------------------------------------------------------
         # VLM inference timer
         # ------------------------------------------------------------------
@@ -335,10 +318,6 @@ class VLMNavigatorNode(Node):
         self.live_debug_timer = self.create_timer(
             1.0, self._live_debug_timer_callback
         )
-        # Stop timer (10 Hz): publishes cmd_vel=0 after goal success to
-        # override local_planner regardless of joySpeed/speedHandler state.
-        self.create_timer(0.1, self._stop_cmd_vel_timer_callback)
-
         # ------------------------------------------------------------------
         # Debug image saving
         # ------------------------------------------------------------------
@@ -462,7 +441,6 @@ class VLMNavigatorNode(Node):
         self.declare_parameter('goal_reached_threshold', 0.5)
         # If <= 0, fallback to goal_reached_threshold.
         self.declare_parameter('target_reached_threshold', 0.5)
-        self.declare_parameter('waypoint_reached_pause_sec', 2.0)
         self.declare_parameter('waypoint_frame', 'map')
         self.declare_parameter('camera_topic', '/camera/image')
         self.declare_parameter('camera_process_hz', 5.0)
@@ -533,7 +511,6 @@ class VLMNavigatorNode(Node):
         self.frontier_top_k = g('frontier_top_k').value
         self.goal_reached_threshold = g('goal_reached_threshold').value
         self.target_reached_threshold = g('target_reached_threshold').value
-        self.waypoint_reached_pause_sec = g('waypoint_reached_pause_sec').value
         self.waypoint_frame = g('waypoint_frame').value
         self.camera_topic = g('camera_topic').value
         self.camera_process_hz = float(g('camera_process_hz').value)
@@ -681,21 +658,13 @@ class VLMNavigatorNode(Node):
         """Common handler when a non-target waypoint is reached.
 
         Called from _pose_callback distance check (primary) or the legacy
-        _waypoint_reached_callback.  Clears the current waypoint, optionally
-        pauses, re-triggers VLM inference, and resets the VLM timer.
+        _waypoint_reached_callback. Clears the current waypoint, re-triggers
+        VLM inference, and resets the VLM timer.
         """
-        now = time.monotonic()
-
         self.current_wp_x = None
         self.current_wp_y = None
         self.current_wp_is_target = False
 
-        pause_s = max(0.0, float(self.waypoint_reached_pause_sec))
-        if pause_s > 0.0:
-            self._hold_after_wp_reached_until_s = max(
-                float(self._hold_after_wp_reached_until_s), now + pause_s
-            )
-            self.cmd_vel_pub.publish(self._build_zero_cmd_vel_msg())
         self.get_logger().info(
             f'Waypoint reached (dist={dist:.2f} m). Re-triggering VLM.'
         )
@@ -1091,10 +1060,8 @@ class VLMNavigatorNode(Node):
                 # Release hold-stop only when a new non-empty goal is commanded.
                 if self._hold_position_after_success:
                     self._hold_position_after_success = False
-                    self._stop_cmd_vel_count = 0
                     self._publish_safety_stop(0)
                     self.get_logger().info('Received new goal; released stop hold (/stop=0).')
-                self._hold_after_wp_reached_until_s = 0.0
                 # Rebroadcast the received goal a few times to help peer nodes
                 # catch it if they missed the initial one-shot publication.
                 self._goal_rebroadcast_value = new_goal
@@ -1193,15 +1160,6 @@ class VLMNavigatorNode(Node):
             except Exception:
                 pass  # Never let birth RGB update crash the debug timer
 
-    def _stop_cmd_vel_timer_callback(self):
-        """10 Hz timer: keep publishing cmd_vel=0 during stop-hold."""
-        now = time.monotonic()
-        hold_wp_pause = now < float(self._hold_after_wp_reached_until_s)
-        if self._hold_position_after_success or self._stop_cmd_vel_count > 0 or hold_wp_pause:
-            self.cmd_vel_pub.publish(self._build_zero_cmd_vel_msg())
-            if not self._hold_position_after_success and not hold_wp_pause:
-                self._stop_cmd_vel_count -= 1
-
     def _goal_rebroadcast_timer_callback(self):
         """Low-rate /object_goal rebroadcast to improve startup reliability."""
         if self._goal_rebroadcast_remaining <= 0:
@@ -1211,19 +1169,6 @@ class VLMNavigatorNode(Node):
             return
         self.goal_pub.publish(String(data=self._goal_rebroadcast_value))
         self._goal_rebroadcast_remaining -= 1
-
-    def _build_zero_cmd_vel_msg(self) -> TwistStamped:
-        """Build a zero-velocity TwistStamped command in vehicle frame."""
-        msg = TwistStamped()
-        msg.header.stamp = self.get_clock().now().to_msg()
-        msg.header.frame_id = 'vehicle'
-        msg.twist.linear.x = 0.0
-        msg.twist.linear.y = 0.0
-        msg.twist.linear.z = 0.0
-        msg.twist.angular.x = 0.0
-        msg.twist.angular.y = 0.0
-        msg.twist.angular.z = 0.0
-        return msg
 
     def _publish_safety_stop(self, level: int):
         """Publish /stop command for pathFollower safety stop."""
@@ -1412,8 +1357,6 @@ class VLMNavigatorNode(Node):
         fake_wp_msg.point.z = 0.0
         self.fake_way_point_pub.publish(fake_wp_msg)
 
-        self._hold_after_wp_reached_until_s = 0.0
-
         self.current_wp_x = wx
         self.current_wp_y = wy
         _is_target_selection = bool(target_pixel is not None and idx == len(frontiers))
@@ -1534,9 +1477,7 @@ class VLMNavigatorNode(Node):
         done_msg.data = True
         self.target_reached_pub.publish(done_msg)
 
-        # Stop immediately, then hold-stop until a new non-empty goal arrives.
-        self.cmd_vel_pub.publish(self._build_zero_cmd_vel_msg())  # immediate zero velocity
-        self.get_logger().info('Published zero TwistStamped on /cmd_vel (immediate stop).')
+        # Hold-stop until a new non-empty goal arrives.
         self._publish_safety_stop(2)
         self.get_logger().info('Published /stop=2 (safety stop hold).')
         self._hold_position_after_success = True
@@ -1558,8 +1499,6 @@ class VLMNavigatorNode(Node):
             self.fake_way_point_pub.publish(fake_wp_msg)
 
             self.get_logger().info('Published stop Pose2D to /way_point_with_heading.')
-        self._stop_cmd_vel_count = 0
-
         completed_goal = self.object_goal
         self.object_goal = ''
         self.current_wp_x = None
