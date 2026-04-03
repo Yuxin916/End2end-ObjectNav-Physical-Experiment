@@ -215,6 +215,11 @@ vlm_navigator:
     # For physical robot: the camera driver topic (e.g. /camera/color/image_raw).
     camera_topic: "/camera/image"
 
+    # Upper bound for camera callback processing/publish rate in vlm_navigator (Hz).
+    # Incoming camera messages above this rate are dropped early to keep only fresh frames.
+    # Lower this (e.g., 2.0~4.0) if you still see timestamp drift under load.
+    camera_process_hz: 5.0
+
     # If true, treat the camera image as an equirectangular panorama (360°) and
     # project it to a pinhole view before using it as frontier birth RGB.
     # Set false if the camera already outputs a pinhole image.

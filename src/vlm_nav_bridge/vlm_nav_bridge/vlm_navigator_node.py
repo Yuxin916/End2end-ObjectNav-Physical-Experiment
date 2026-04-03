@@ -180,6 +180,7 @@ class VLMNavigatorNode(Node):
 
         # Frontier birth RGB (dual-ViT templates)
         self.latest_rgb_pil: PILImage.Image = None
+        self._last_camera_process_time_s: float = 0.0
         # Rate-limit live BEV debug publish (frontier extraction is expensive)
         self._last_live_bev_publish_time: float = 0.0
         # Precomputed base remap maps for panorama→pinhole (yaw-independent parts).
@@ -231,7 +232,7 @@ class VLMNavigatorNode(Node):
         self.create_subscription(
             Image, self.camera_topic,
             self._camera_callback,
-            5
+            1
         )
         # Track waypoint_converter's adjusted goal so distance checks use the
         # actual navigation target rather than the raw frontier position.
@@ -464,6 +465,7 @@ class VLMNavigatorNode(Node):
         self.declare_parameter('waypoint_reached_pause_sec', 2.0)
         self.declare_parameter('waypoint_frame', 'map')
         self.declare_parameter('camera_topic', '/camera/image')
+        self.declare_parameter('camera_process_hz', 5.0)
         self.declare_parameter('camera_is_panorama', True)
         self.declare_parameter('camera_project_width', 640)
         self.declare_parameter('camera_project_height', 480)
@@ -534,6 +536,7 @@ class VLMNavigatorNode(Node):
         self.waypoint_reached_pause_sec = g('waypoint_reached_pause_sec').value
         self.waypoint_frame = g('waypoint_frame').value
         self.camera_topic = g('camera_topic').value
+        self.camera_process_hz = float(g('camera_process_hz').value)
         self.camera_is_panorama = g('camera_is_panorama').value
         self.camera_project_width = g('camera_project_width').value
         self.camera_project_height = g('camera_project_height').value
@@ -760,6 +763,12 @@ class VLMNavigatorNode(Node):
 
     def _camera_callback(self, msg: Image):
         """Decode incoming sensor_msgs/Image and keep projected RGB for frontier birth."""
+        # Throttle heavy camera decode/project path to avoid callback backlog drift.
+        now_mono = time.monotonic()
+        cam_hz = max(0.1, float(self.camera_process_hz))
+        if now_mono - float(self._last_camera_process_time_s) < (1.0 / cam_hz):
+            return
+        self._last_camera_process_time_s = now_mono
         self.latest_rgb_stamp_s = float(msg.header.stamp.sec) + float(msg.header.stamp.nanosec) * 1e-9
         try:
             n = msg.width * msg.height
