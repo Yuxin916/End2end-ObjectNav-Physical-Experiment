@@ -73,7 +73,8 @@ class SAM2DetectorNode(Node):
         self._goal_rebroadcast_value: str = ''
         self._goal_rebroadcast_remaining: int = 0
 
-        self.create_subscription(Image, self.camera_topic, self._camera_callback, 10)
+        # Keep only the newest camera frame to avoid backlog-induced localization drift.
+        self.create_subscription(Image, self.camera_topic, self._camera_callback, 1)
         self.create_subscription(String, '/object_goal', self._goal_callback, 10)
 
         self.goal_pub = self.create_publisher(String, '/object_goal', 10)
