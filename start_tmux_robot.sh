@@ -8,7 +8,7 @@ set -e
 
 SESSION_NAME="sagan_nav_robot"
 WORKDIR="./"
-ROBOT_CONFIG="unitree/unitree_go2_slow"
+ROBOT_CONFIG="${ROBOT_CONFIG:-unitree/unitree_go2_slow}"
 ROBOT_COMM_IFACE="${ROBOT_COMM_IFACE:-wlo1}"
 ROBOT_BRIDGE_CONFIG="${ROBOT_BRIDGE_CONFIG:-src/utilities/domain_bridge/config/domain_bridge_minimal.yaml}"
 ROBOT_ENABLE_BRIDGE="${ROBOT_ENABLE_BRIDGE:-1}"
