@@ -8,13 +8,10 @@ set -e
 SESSION_NAME="sagan_nav_host"
 WORKDIR="./"
 HOST_COMM_IFACE="${HOST_COMM_IFACE:-wlp131s0}"
-if ip link show "$HOST_COMM_IFACE" >/dev/null 2>&1; then
-    HOST_CYCLONEDDS_URI="<CycloneDDS><Domain><General><Interfaces><NetworkInterface name=\"${HOST_COMM_IFACE}\"/></Interfaces></General></Domain></CycloneDDS>"
-    SETUP_HOST_DDS="export CYCLONEDDS_URI='$HOST_CYCLONEDDS_URI'"
-else
-    echo "Warning: interface '$HOST_COMM_IFACE' not found; host panes will use default DDS interfaces."
-    SETUP_HOST_DDS="unset CYCLONEDDS_URI"
-fi
+USE_ZENOH="${USE_ZENOH:-0}"
+ZENOH_ROUTER_ENDPOINT="${ZENOH_ROUTER_ENDPOINT:-tcp/127.0.0.1:7447}"
+ZENOH_ROUTER_CHECK_ATTEMPTS="${ZENOH_ROUTER_CHECK_ATTEMPTS:-20}"
+ZENOH_OVERRIDE="mode=\"client\";connect/endpoints=[\"${ZENOH_ROUTER_ENDPOINT}\"]"
 
 # kill existing session if exists
 if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
@@ -34,9 +31,20 @@ for i in $(seq 1 3); do
     tmux select-layout -t "$SESSION_NAME":0 tiled
 done
 
-# ~/.zshrc handles venv + ROS sourcing.
-# All panes use Domain 80 on host side.
-SETUP_HOST="cd \"$WORKDIR\" && export ROS_DOMAIN_ID=80 && $SETUP_HOST_DDS"
+# Pane setup
+if [[ "$USE_ZENOH" == "1" ]]; then
+    SETUP_HOST="cd \"$WORKDIR\" && unset ROS_DOMAIN_ID && unset CYCLONEDDS_URI && export RMW_IMPLEMENTATION=rmw_zenoh_cpp && export ROS_LOCALHOST_ONLY=0 && export ZENOH_CONFIG_OVERRIDE='$ZENOH_OVERRIDE' && export ZENOH_ROUTER_CHECK_ATTEMPTS=$ZENOH_ROUTER_CHECK_ATTEMPTS"
+else
+    if ip link show "$HOST_COMM_IFACE" >/dev/null 2>&1; then
+        HOST_CYCLONEDDS_URI="<CycloneDDS><Domain><General><Interfaces><NetworkInterface name=\"${HOST_COMM_IFACE}\"/></Interfaces></General></Domain></CycloneDDS>"
+        SETUP_HOST_DDS="export CYCLONEDDS_URI='$HOST_CYCLONEDDS_URI'"
+    else
+        echo "Warning: interface '$HOST_COMM_IFACE' not found; host panes will use default DDS interfaces."
+        SETUP_HOST_DDS="unset CYCLONEDDS_URI"
+    fi
+    # DDS mode: host uses Domain 80
+    SETUP_HOST="cd \"$WORKDIR\" && export ROS_DOMAIN_ID=80 && $SETUP_HOST_DDS"
+fi
 
 # Panes 0-3: Domain 80
 for pane in 0 1 2 3; do

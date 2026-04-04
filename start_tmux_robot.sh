@@ -14,13 +14,10 @@ ROBOT_BRIDGE_CONFIG="${ROBOT_BRIDGE_CONFIG:-src/utilities/domain_bridge/config/d
 ROBOT_ENABLE_BRIDGE="${ROBOT_ENABLE_BRIDGE:-1}"
 ROBOT_BRIDGE_NICE="${ROBOT_BRIDGE_NICE:-15}"
 ROBOT_BRIDGE_CPU="${ROBOT_BRIDGE_CPU:-}"
-if ip link show "$ROBOT_COMM_IFACE" >/dev/null 2>&1; then
-    ROBOT_CYCLONEDDS_URI="<CycloneDDS><Domain><General><Interfaces><NetworkInterface name=\"${ROBOT_COMM_IFACE}\"/></Interfaces></General></Domain></CycloneDDS>"
-    SETUP_COMM_DDS="export CYCLONEDDS_URI='$ROBOT_CYCLONEDDS_URI'"
-else
-    echo "Warning: interface '$ROBOT_COMM_IFACE' not found; comm pane will use default DDS interfaces."
-    SETUP_COMM_DDS="unset CYCLONEDDS_URI"
-fi
+USE_ZENOH="${USE_ZENOH:-0}"
+ZENOH_ROUTER_ENDPOINT="${ZENOH_ROUTER_ENDPOINT:-tcp/192.168.8.147:7447}"
+ZENOH_ROUTER_CHECK_ATTEMPTS="${ZENOH_ROUTER_CHECK_ATTEMPTS:-20}"
+ZENOH_OVERRIDE="mode=\"client\";connect/endpoints=[\"${ZENOH_ROUTER_ENDPOINT}\"]"
 
 # kill existing session if exists
 if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
@@ -41,11 +38,25 @@ for i in $(seq 1 3); do
     tmux select-layout -t "$SESSION_NAME":0 tiled
 done
 
-# Pane-specific setup:
-# - Panes 0/1/3 keep default DDS selection to protect local SLAM/control timing.
-# - Pane 2 is communication-only and pins DDS to Wi-Fi interface.
-SETUP_LOCAL="cd \"$WORKDIR\" && unset CYCLONEDDS_URI && export ROS_DOMAIN_ID=79 && export ROBOT_CONFIG_PATH=$ROBOT_CONFIG"
-SETUP_COMM="cd \"$WORKDIR\" && unset ROS_DOMAIN_ID && $SETUP_COMM_DDS && export ROBOT_CONFIG_PATH=$ROBOT_CONFIG"
+# Pane-specific setup
+if [[ "$USE_ZENOH" == "1" ]]; then
+    # Zenoh mode: all panes connect to the same router endpoint.
+    SETUP_LOCAL="cd \"$WORKDIR\" && unset ROS_DOMAIN_ID && unset CYCLONEDDS_URI && export RMW_IMPLEMENTATION=rmw_zenoh_cpp && export ROS_LOCALHOST_ONLY=0 && export ZENOH_CONFIG_OVERRIDE='$ZENOH_OVERRIDE' && export ZENOH_ROUTER_CHECK_ATTEMPTS=$ZENOH_ROUTER_CHECK_ATTEMPTS && export ROBOT_CONFIG_PATH=$ROBOT_CONFIG"
+    SETUP_COMM="$SETUP_LOCAL"
+else
+    # DDS mode:
+    # - Panes 0/1/3 keep default DDS selection to protect local SLAM/control timing.
+    # - Pane 2 is communication-only and pins DDS to Wi-Fi interface.
+    if ip link show "$ROBOT_COMM_IFACE" >/dev/null 2>&1; then
+        ROBOT_CYCLONEDDS_URI="<CycloneDDS><Domain><General><Interfaces><NetworkInterface name=\"${ROBOT_COMM_IFACE}\"/></Interfaces></General></Domain></CycloneDDS>"
+        SETUP_COMM_DDS="export CYCLONEDDS_URI='$ROBOT_CYCLONEDDS_URI'"
+    else
+        echo "Warning: interface '$ROBOT_COMM_IFACE' not found; comm pane will use default DDS interfaces."
+        SETUP_COMM_DDS="unset CYCLONEDDS_URI"
+    fi
+    SETUP_LOCAL="cd \"$WORKDIR\" && unset CYCLONEDDS_URI && export ROS_DOMAIN_ID=79 && export ROBOT_CONFIG_PATH=$ROBOT_CONFIG"
+    SETUP_COMM="cd \"$WORKDIR\" && unset ROS_DOMAIN_ID && $SETUP_COMM_DDS && export ROBOT_CONFIG_PATH=$ROBOT_CONFIG"
+fi
 
 tmux send-keys -t "$SESSION_NAME":0.0 "$SETUP_LOCAL" C-m
 tmux send-keys -t "$SESSION_NAME":0.1 "$SETUP_LOCAL" C-m
