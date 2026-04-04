@@ -46,8 +46,8 @@ from rclpy.node import Node
 
 from sensor_msgs.msg import PointCloud2, Image
 from nav_msgs.msg import Odometry
-from geometry_msgs.msg import PointStamped, Pose2D
-from std_msgs.msg import String, Bool, Int8, Float32
+from geometry_msgs.msg import PointStamped
+from std_msgs.msg import String, Bool, Int8
 
 import cv2
 from PIL import Image as PILImage
@@ -229,27 +229,9 @@ class VLMNavigatorNode(Node):
             self._camera_callback,
             1
         )
-        # Track waypoint_converter's adjusted goal so distance checks use the
-        # actual navigation target rather than the raw frontier position.
-        self.create_subscription(
-            PointStamped, '/way_point',
-            self._converted_waypoint_callback,
-            10
-        )
-        # waypoint_converter publishes this when the adjusted waypoint is reached.
-        # Use it as the primary trigger for the next VLM step (avoids the
-        # frontier_min_distance / goal_reached_threshold mismatch entirely).
-        self.create_subscription(
-            Float32, '/way_point_reached',
-            self._waypoint_reached_callback,
-            10
-        )
         # ------------------------------------------------------------------
         # Publications
         # ------------------------------------------------------------------
-        # self.way_point_pub = self.create_publisher(
-        #     Pose2D, '/way_point_with_heading', default_qos
-        # )
         self.fake_way_point_pub = self.create_publisher(
             PointStamped, '/way_point', 10
         )
@@ -630,36 +612,11 @@ class VLMNavigatorNode(Node):
                 if dist < float(self.goal_reached_threshold):
                     self._on_waypoint_reached(dist)
 
-    def _converted_waypoint_callback(self, msg: PointStamped):
-        """Update current_wp_x/y to the waypoint_converter's adjusted position.
-
-        Only applies to frontier (non-target) waypoints.  For target waypoints
-        the converter may snap to a traversable point much closer than the true
-        target, which would cause an immediate false "reached" trigger.  Target
-        waypoint position must stay at the raycasted target world coordinate.
-        """
-        if self.current_wp_x is None:
-            return
-        if self.current_wp_is_target:
-            return
-        self.current_wp_x = float(msg.point.x)
-        self.current_wp_y = float(msg.point.y)
-
-    def _waypoint_reached_callback(self, msg: Float32):
-        """Legacy callback for /way_point_reached (waypoint_converter removed).
-        Kept as a fallback; delegates to _on_waypoint_reached."""
-        if self.current_wp_x is None:
-            return
-        if self.current_wp_is_target:
-            return
-        self._on_waypoint_reached(msg.data)
-
     def _on_waypoint_reached(self, dist: float = 0.0):
         """Common handler when a non-target waypoint is reached.
 
-        Called from _pose_callback distance check (primary) or the legacy
-        _waypoint_reached_callback. Clears the current waypoint, re-triggers
-        VLM inference, and resets the VLM timer.
+        Called from the _pose_callback distance check. Clears the current
+        waypoint, re-triggers VLM inference, and resets the VLM timer.
         """
         self.current_wp_x = None
         self.current_wp_y = None
@@ -1340,15 +1297,6 @@ class VLMNavigatorNode(Node):
         )
 
         # ---- Publish waypoint -------------------------------------------
-        # Publish as Pose2D to /way_point_with_heading so waypoint_converter
-        # can apply traversability adjustment before forwarding to local_planner.
-        # theta=0 means no heading preference at arrival.
-        # wp_msg = Pose2D()
-        # wp_msg.x = float(wx)
-        # wp_msg.y = float(wy)
-        # wp_msg.theta = 0.0
-        # # self.way_point_pub.publish(wp_msg)
-
         fake_wp_msg = PointStamped()
         fake_wp_msg.header.stamp = self.get_clock().now().to_msg()
         fake_wp_msg.header.frame_id = 'map'
@@ -1482,14 +1430,6 @@ class VLMNavigatorNode(Node):
         # self.get_logger().info('Published /stop=2 (safety stop hold).')
         self._hold_position_after_success = True
         if self.latest_pose_x is not None:
-            # Primary stop path: reset waypoint_converter's internal waypoint source.
-            # stop_pose = Pose2D()
-            # stop_pose.x = float(self.latest_pose_x)
-            # stop_pose.y = float(self.latest_pose_y)
-            # stop_pose.theta = 0.0
-            # self.way_point_pub.publish(stop_pose)
-
-
             fake_wp_msg = PointStamped()
             fake_wp_msg.header.stamp = self.get_clock().now().to_msg()
             fake_wp_msg.header.frame_id = 'map'
@@ -1498,7 +1438,7 @@ class VLMNavigatorNode(Node):
             fake_wp_msg.point.z = 0.0
             self.fake_way_point_pub.publish(fake_wp_msg)
 
-            self.get_logger().info('Published stop Pose2D to /way_point_with_heading.')
+            self.get_logger().info('Published stop waypoint to /way_point.')
         completed_goal = self.object_goal
         self.object_goal = ''
         self.current_wp_x = None
