@@ -1,0 +1,29 @@
+name: domain_bridge_waypoint_only
+from_domain: 79
+to_domain: 80
+topics:
+  # Robot -> Host (minimum state for monitoring + TF)
+  state_estimation:
+    type: nav_msgs/msg/Odometry
+  tf:
+    type: tf2_msgs/msg/TFMessage
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+  tf_static:
+    type: tf2_msgs/msg/TFMessage
+    qos:
+      reliability: reliable
+      durability: transient_local
+      history: keep_last
+      depth: 1
+
+  # Host -> Robot (control)
+  way_point:
+    type: geometry_msgs/msg/PointStamped
+    reversed: True
+  stop:
+    type: std_msgs/msg/Int8
+    reversed: True
