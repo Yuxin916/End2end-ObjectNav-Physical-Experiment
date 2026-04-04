@@ -12,6 +12,8 @@ ROBOT_CONFIG="unitree/unitree_go2_slow"
 ROBOT_COMM_IFACE="${ROBOT_COMM_IFACE:-wlo1}"
 ROBOT_BRIDGE_CONFIG="${ROBOT_BRIDGE_CONFIG:-src/utilities/domain_bridge/config/domain_bridge_minimal.yaml}"
 ROBOT_ENABLE_BRIDGE="${ROBOT_ENABLE_BRIDGE:-1}"
+ROBOT_BRIDGE_NICE="${ROBOT_BRIDGE_NICE:-15}"
+ROBOT_BRIDGE_CPU="${ROBOT_BRIDGE_CPU:-}"
 if ip link show "$ROBOT_COMM_IFACE" >/dev/null 2>&1; then
     ROBOT_CYCLONEDDS_URI="<CycloneDDS><Domain><General><Interfaces><NetworkInterface name=\"${ROBOT_COMM_IFACE}\"/></Interfaces></General></Domain></CycloneDDS>"
     SETUP_COMM_DDS="export CYCLONEDDS_URI='$ROBOT_CYCLONEDDS_URI'"
@@ -60,8 +62,12 @@ tmux send-keys -t "$SESSION_NAME":0.1 "ros2 launch receive_theta receive_theta_s
 
 # Pane 2: communication-only domain_bridge (79 <-> 80), interface pinned
 if [[ "$ROBOT_ENABLE_BRIDGE" == "1" ]]; then
+    BRIDGE_CMD="nice -n $ROBOT_BRIDGE_NICE ros2 launch domain_bridge domain_bridge.launch config:=$ROBOT_BRIDGE_CONFIG"
+    if [[ -n "$ROBOT_BRIDGE_CPU" ]]; then
+        BRIDGE_CMD="taskset -c $ROBOT_BRIDGE_CPU $BRIDGE_CMD"
+    fi
     tmux send-keys -t "$SESSION_NAME":0.2 \
-        "source ./install/setup.bash && nice -n 10 ros2 launch domain_bridge domain_bridge.launch config:=$ROBOT_BRIDGE_CONFIG" C-m
+        "source ./install/setup.bash && $BRIDGE_CMD" C-m
 else
     tmux send-keys -t "$SESSION_NAME":0.2 "echo 'Bridge disabled (ROBOT_ENABLE_BRIDGE=0)'" C-m
 fi
