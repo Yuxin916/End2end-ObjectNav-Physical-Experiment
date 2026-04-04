@@ -52,17 +52,18 @@ class BEVMapperConfig:
     vision_range: int = 100         # cells (= 5 m at 0.05 m/cell)
 
     # Obstacle height range relative to robot z (metres)
-    obstacle_height_min: float = 0.0
-    obstacle_height_max: float = 1.5
-
-    # Lidar range filter (metres, 2-D distance from robot)
-    range_min: float = 0.5
-    range_max: float = 5.0
+    obstacle_height_min: float = -0.2
+    obstacle_height_max: float = 1.0
 
     # Map update thresholds
     map_pred_threshold: float = 1.0  # hits to mark as occupied
     exp_pred_threshold: float = 1.0  # sweeps to mark as explored
     explored_max_rays_per_scan: int = 512
+    # Optional scan denoising (XY voxel support filtering) before map updates.
+    # Keep points only when their XY voxel has enough support.
+    scan_denoise_enable: bool = True
+    scan_denoise_voxel_size: float = 0.10
+    scan_denoise_min_points: int = 2
     # Visual obstacle dilation for rendering only (does not affect map data).
     # Thickens sparse LiDAR wall returns to look like solid walls in the BEV image.
     # 1 = no dilation. Tune to match training data appearance.
@@ -212,15 +213,13 @@ class LidarBEVMapper:
 
         pts = points_xyz.astype(np.float32)
 
-        # ---- 1. Map bounds filter (all lidar points kept for occ/exp) ------
-        # Range filter removed: lidar depth is accurate, all returns are valid.
-        # Only discard points that fall outside the global map grid (handled
-        # in step 2). A minimal self-hit guard (< 0.1 m) avoids marking the
-        # robot's own body as obstacle.
+        # ---- 1. Distance + denoise pre-filter --------------------------------
+        # Keep a near self-hit guard to avoid marking the robot body itself.
         dx = pts[:, 0] - robot_x
         dy = pts[:, 1] - robot_y
         dist2d = np.sqrt(dx * dx + dy * dy)
         pts = pts[dist2d >= 0.1]
+        pts = self._denoise_scan_xy_voxel(pts)
         if len(pts) == 0:
             self._update_agent_channels()
             self._extract_local_map()
@@ -277,6 +276,25 @@ class LidarBEVMapper:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _denoise_scan_xy_voxel(self, pts: np.ndarray) -> np.ndarray:
+        """Remove isolated scan outliers using XY voxel support."""
+        if pts is None or len(pts) == 0:
+            return pts
+        if not bool(self.cfg.scan_denoise_enable):
+            return pts
+
+        voxel = float(self.cfg.scan_denoise_voxel_size)
+        min_points = int(self.cfg.scan_denoise_min_points)
+        if voxel <= 1e-6 or min_points <= 1:
+            return pts
+
+        qx = np.floor(pts[:, 0] / voxel).astype(np.int32)
+        qy = np.floor(pts[:, 1] / voxel).astype(np.int32)
+        qxy = np.stack([qx, qy], axis=1)
+        _, inv, counts = np.unique(qxy, axis=0, return_inverse=True, return_counts=True)
+        keep = counts[inv] >= min_points
+        return pts[keep]
 
     @staticmethod
     def _bresenham_cells(r0: int, c0: int, r1: int, c1: int):
