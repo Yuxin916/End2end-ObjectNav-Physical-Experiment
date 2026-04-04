@@ -44,6 +44,7 @@ double normalizeAngle(double angle) {
 }
 
 bool realRobot = false;
+bool useSerialPort = true;
 string serialPort = "/dev/ttyACM0";
 int baudrate = 115200;
 double sensorOffsetX = 0;
@@ -244,6 +245,7 @@ int main(int argc, char** argv)
   nh = rclcpp::Node::make_shared("pathFollower");
 
   nh->declare_parameter<bool>("realRobot", realRobot);
+  nh->declare_parameter<bool>("useSerialPort", useSerialPort);
   nh->declare_parameter<string>("serialPort", serialPort);
   nh->declare_parameter<int>("baudrate", baudrate);
   nh->declare_parameter<double>("sensorOffsetX", sensorOffsetX);
@@ -280,6 +282,7 @@ int main(int argc, char** argv)
   nh->declare_parameter<double>("goalYawGain", goalYawGain);
 
   nh->get_parameter("realRobot", realRobot);
+  nh->get_parameter("useSerialPort", useSerialPort);
   nh->get_parameter("serialPort", serialPort);
   nh->get_parameter("baudrate", baudrate);
   nh->get_parameter("sensorOffsetX", sensorOffsetX);
@@ -478,7 +481,7 @@ int main(int argc, char** argv)
         pubSpeed->publish(cmd_vel);
         pubSkipCount = pubSkipNum;
 
-        if (realRobot) {
+        if (realRobot && useSerialPort) {
           if (serialOpen) {
             value = cmd_vel.twist.linear.x;
             memcpy(serialBuffer, &value, size);

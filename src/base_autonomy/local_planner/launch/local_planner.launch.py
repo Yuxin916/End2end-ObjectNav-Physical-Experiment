@@ -138,6 +138,7 @@ def generate_launch_description():
     # XML-compatible defaults for pathFollower
     path_follower_defaults = {
         'realRobot': LaunchConfiguration('realRobot'),
+        'useSerialPort': True,
         'serialPort': '/dev/ttyACM0',
         'baudrate': 115200,
         'sensorOffsetX': 0.0,

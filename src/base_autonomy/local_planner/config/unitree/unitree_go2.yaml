@@ -55,6 +55,7 @@ localPlanner:
 
 pathFollower:
   ros__parameters:
+    useSerialPort: false
     # Control parameters
     lookAheadDis: 0.5
     maxAccel: 1.0
