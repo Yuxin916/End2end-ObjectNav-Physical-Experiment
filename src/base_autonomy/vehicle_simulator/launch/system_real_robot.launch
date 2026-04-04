@@ -16,6 +16,10 @@ def generate_launch_description():
   vehicleY = LaunchConfiguration('vehicleY')
   checkTerrainConn = LaunchConfiguration('checkTerrainConn')
 
+  robot_ip = LaunchConfiguration('robot_ip')
+  connection_method = LaunchConfiguration('connection_method')
+  control_mode = LaunchConfiguration('control_mode')
+
   declare_world_name = DeclareLaunchArgument('world_name', default_value='real_world', description='')
   declare_sensorOffsetX = DeclareLaunchArgument('sensorOffsetX', default_value='0.05', description='')
   declare_sensorOffsetY = DeclareLaunchArgument('sensorOffsetY', default_value='0.0', description='')
@@ -23,10 +27,27 @@ def generate_launch_description():
   declare_vehicleX = DeclareLaunchArgument('vehicleX', default_value='0.0', description='')
   declare_vehicleY = DeclareLaunchArgument('vehicleY', default_value='0.0', description='')
   declare_checkTerrainConn = DeclareLaunchArgument('checkTerrainConn', default_value='true', description='')
-  
+
+  declare_robot_ip = DeclareLaunchArgument(
+    'robot_ip',
+    default_value='192.168.12.1',
+    description='Unitree robot IP address'
+  )
+
+  declare_connection_method = DeclareLaunchArgument(
+    'connection_method',
+    default_value='LocalAP',
+    description='Unitree connection method (e.g., LocalAP, Ethernet)'
+  )
+
+  declare_control_mode = DeclareLaunchArgument(
+    'control_mode',
+    default_value='wireless_controller',
+    description='Unitree control mode'
+  )
   start_local_planner = IncludeLaunchDescription(
-    FrontendLaunchDescriptionSource(os.path.join(
-      get_package_share_directory('local_planner'), 'launch', 'local_planner.launch')
+    PythonLaunchDescriptionSource(os.path.join(
+      get_package_share_directory('local_planner'), 'launch', 'local_planner.launch.py')
     ),
     launch_arguments={
       'realRobot': 'true',
@@ -39,8 +60,8 @@ def generate_launch_description():
   )
 
   start_terrain_analysis = IncludeLaunchDescription(
-    FrontendLaunchDescriptionSource(os.path.join(
-      get_package_share_directory('terrain_analysis'), 'launch', 'terrain_analysis.launch')
+    PythonLaunchDescriptionSource(os.path.join(
+        get_package_share_directory('terrain_analysis'), 'launch', 'terrain_analysis.launch.py')
     )
   )
 
@@ -74,22 +95,45 @@ def generate_launch_description():
     }.items()
   )
 
+  start_waypoint_converter = IncludeLaunchDescription(
+    FrontendLaunchDescriptionSource(os.path.join(
+      get_package_share_directory('waypoint_converter'), 'launch', 'waypoint_converter.launch')
+    ),
+    launch_arguments={
+      'world_name': world_name,
+    }.items()
+  )
+
   start_joy = Node(
     package='joy', 
     executable='joy_node',
     name='ps3_joy',
     output='screen',
     parameters=[{
-                'dev': "/dev/input/js0",
-                'deadzone': 0.12,
-                'autorepeat_rate': 0.0,
-  		}]
+      'dev': "/dev/input/js0",
+      'deadzone': 0.12,
+      'autorepeat_rate': 0.0,
+    }]
   )
 
   start_mid360 = IncludeLaunchDescription(
     PythonLaunchDescriptionSource(
       [get_package_share_directory('livox_ros_driver2'), '/launch_ROS2/msg_MID360_launch.py']),
   )
+
+  start_unitree_webrtc = IncludeLaunchDescription(
+    PythonLaunchDescriptionSource(os.path.join(
+      get_package_share_directory('unitree_webrtc_ros'),
+      'launch',
+      'unitree_control.launch.py')
+    ),
+    launch_arguments={
+      'robot_ip': robot_ip,
+      'connection_method': connection_method,
+      'control_mode': control_mode,
+    }.items()
+  )
+
 
   ld = LaunchDescription()
 
@@ -102,13 +146,20 @@ def generate_launch_description():
   ld.add_action(declare_vehicleY)
   ld.add_action(declare_checkTerrainConn)
 
+  ld.add_action(declare_robot_ip)
+  ld.add_action(declare_connection_method)
+  ld.add_action(declare_control_mode)
+
+  # Add actions
   ld.add_action(start_local_planner)
   ld.add_action(start_terrain_analysis)
   ld.add_action(start_terrain_analysis_ext)
   ld.add_action(start_sensor_scan_generation)
   ld.add_action(start_arise_slam)
   ld.add_action(start_visualization_tools)
+  ld.add_action(start_waypoint_converter)
   ld.add_action(start_joy)
   ld.add_action(start_mid360)
+  ld.add_action(start_unitree_webrtc)
 
   return ld

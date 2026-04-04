@@ -5,7 +5,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, TimerAction
 from launch.launch_description_sources import PythonLaunchDescriptionSource, FrontendLaunchDescriptionSource
 from launch_ros.actions import Node
-from launch.substitutions import LaunchConfiguration 
+from launch.substitutions import LaunchConfiguration
 
 def generate_launch_description():
   world_name = LaunchConfiguration('world_name')
@@ -16,7 +16,7 @@ def generate_launch_description():
   terrainZ = LaunchConfiguration('terrainZ')
   vehicleYaw = LaunchConfiguration('vehicleYaw')
   checkTerrainConn = LaunchConfiguration('checkTerrainConn')
-  
+
   declare_world_name = DeclareLaunchArgument('world_name', default_value='unity', description='')
   declare_vehicleHeight = DeclareLaunchArgument('vehicleHeight', default_value='0.75', description='')
   declare_cameraOffsetZ = DeclareLaunchArgument('cameraOffsetZ', default_value='0.1', description='')
@@ -25,10 +25,10 @@ def generate_launch_description():
   declare_terrainZ = DeclareLaunchArgument('terrainZ', default_value='0.0', description='')
   declare_vehicleYaw = DeclareLaunchArgument('vehicleYaw', default_value='0.0', description='')
   declare_checkTerrainConn = DeclareLaunchArgument('checkTerrainConn', default_value='true', description='')
-  
+
   start_local_planner = IncludeLaunchDescription(
-    FrontendLaunchDescriptionSource(os.path.join(
-      get_package_share_directory('local_planner'), 'launch', 'local_planner.launch')
+    PythonLaunchDescriptionSource(os.path.join(
+      get_package_share_directory('local_planner'), 'launch', 'local_planner.launch.py')
     ),
     launch_arguments={
       'realRobot': 'false',
@@ -52,17 +52,18 @@ def generate_launch_description():
       'checkTerrainConn': checkTerrainConn,
     }.items()
   )
-  
+
   start_endpoint = Node(
     package='ros_tcp_endpoint',
     executable='default_server_endpoint',
+    name='endpoint',
     # output='screen',
     parameters=[{
   		"ROS_IP": "0.0.0.0",
   		"ROS_TCP_PORT": 10000,
   		}]
   )
-  
+
   start_sim_image_repub = Node(
     package='vehicle_simulator',
     executable='sim_image_repub',
@@ -106,8 +107,17 @@ def generate_launch_description():
     }.items()
   )
 
+  # start_waypoint_converter = IncludeLaunchDescription(
+  #   FrontendLaunchDescriptionSource(os.path.join(
+  #     get_package_share_directory('waypoint_converter'), 'launch', 'waypoint_converter.launch')
+  #   ),
+  #   launch_arguments={
+  #     'world_name': world_name,
+  #   }.items()
+  # )
+
   start_joy = Node(
-    package='joy', 
+    package='joy',
     executable='joy_node',
     name='ps3_joy',
     output='screen',
@@ -138,6 +148,7 @@ def generate_launch_description():
   ld.add_action(start_vehicle_simulator)
   ld.add_action(start_sensor_scan_generation)
   ld.add_action(start_visualization_tools)
+  # ld.add_action(start_waypoint_converter)
   ld.add_action(start_joy)
 
   return ld
