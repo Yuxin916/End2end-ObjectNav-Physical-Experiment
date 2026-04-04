@@ -10,6 +10,7 @@ SESSION_NAME="sagan_nav_robot"
 WORKDIR="./"
 ROBOT_CONFIG="unitree/unitree_go2_slow"
 ROBOT_COMM_IFACE="${ROBOT_COMM_IFACE:-wlo1}"
+ROBOT_BRIDGE_CONFIG="${ROBOT_BRIDGE_CONFIG:-src/utilities/domain_bridge/config/domain_bridge_minimal.yaml}"
 if ip link show "$ROBOT_COMM_IFACE" >/dev/null 2>&1; then
     ROBOT_CYCLONEDDS_URI="<CycloneDDS><Domain><General><Interfaces><NetworkInterface name=\"${ROBOT_COMM_IFACE}\"/></Interfaces></General></Domain></CycloneDDS>"
     SETUP_COMM_DDS="export CYCLONEDDS_URI='$ROBOT_CYCLONEDDS_URI'"
@@ -54,7 +55,7 @@ tmux send-keys -t "$SESSION_NAME":0.1 "ros2 launch receive_theta receive_theta_s
 
 # Pane 2: communication-only domain_bridge (79 <-> 80), interface pinned
 tmux send-keys -t "$SESSION_NAME":0.2 \
-    "source ./install/setup.bash && ros2 launch domain_bridge domain_bridge.launch config:=src/utilities/domain_bridge/config/domain_bridge_minimal.yaml" C-m
+    "source ./install/setup.bash && ros2 launch domain_bridge domain_bridge.launch config:=$ROBOT_BRIDGE_CONFIG" C-m
 
 # Pane 3: free for manual commands
 tmux send-keys -t "$SESSION_NAME":0.3 "echo 'Robot environment ready in pane 3'" C-m

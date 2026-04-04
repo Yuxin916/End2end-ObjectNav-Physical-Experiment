@@ -3,20 +3,15 @@ from_domain: 79
 to_domain: 80
 topics:
   # Robot -> Host (minimum needed by host-side VLM + monitoring)
-  camera/image/compressed:
-    type: sensor_msgs/msg/CompressedImage
+  # camera/image/compressed is intentionally not bridged in minimal mode
+  # to protect robot-side localization/control timing over Wi-Fi.
+  registered_scan:
+    type: sensor_msgs/msg/PointCloud2
     qos:
       reliability: best_effort
       durability: volatile
       history: keep_last
-      depth: 3
-  registered_scan:
-    type: sensor_msgs/msg/PointCloud2
-    qos:
-      reliability: reliable
-      durability: volatile
-      history: keep_last
-      depth: 5
+      depth: 1
   state_estimation:
     type: nav_msgs/msg/Odometry
   tf:
