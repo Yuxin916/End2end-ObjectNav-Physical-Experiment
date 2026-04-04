@@ -4,10 +4,15 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 
 cd $SCRIPT_DIR
 
-# Hard-pin robot autonomy stack to local DDS defaults on Domain 79.
-# This prevents host-side shell exports from leaking into the robot stack.
+# Keep robot stack deterministic:
+# - DDS mode: force Domain 79 and clear Cyclone interface pinning.
+# - Zenoh mode: do not force ROS_DOMAIN_ID.
 unset CYCLONEDDS_URI
-export ROS_DOMAIN_ID=79
+if [[ "${RMW_IMPLEMENTATION:-rmw_cyclonedds_cpp}" == "rmw_zenoh_cpp" ]]; then
+  unset ROS_DOMAIN_ID
+else
+  export ROS_DOMAIN_ID=79
+fi
 
 source ./install/setup.bash
 ros2 launch vehicle_simulator system_real_robot.launch &
