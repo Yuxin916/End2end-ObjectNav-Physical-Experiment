@@ -1,12 +1,22 @@
 #!/usr/bin/env zsh
-# Runs on the ROBOT NUC (Domain 79).
-# Launches: navigation stack only (SLAM + local planner + Livox driver + WebRTC)
-# plus the Theta camera driver. VLM/SAM/domain_bridge run on the host side.
+# Runs on the ROBOT NUC.
+# Launches:
+# - robot navigation stack (Domain 79, default DDS interface selection)
+# - Theta camera driver (Domain 79, default DDS interface selection)
+# - dedicated cross-machine domain_bridge process (interface-pinned via CYCLONEDDS_URI)
 set -e
 
 SESSION_NAME="sagan_nav_robot"
 WORKDIR="./"
 ROBOT_CONFIG="unitree/unitree_go2_slow"
+ROBOT_COMM_IFACE="${ROBOT_COMM_IFACE:-wlo1}"
+if ip link show "$ROBOT_COMM_IFACE" >/dev/null 2>&1; then
+    ROBOT_CYCLONEDDS_URI="<CycloneDDS><Domain><General><Interfaces><NetworkInterface name=\"${ROBOT_COMM_IFACE}\"/></Interfaces></General></Domain></CycloneDDS>"
+    SETUP_COMM_DDS="export CYCLONEDDS_URI='$ROBOT_CYCLONEDDS_URI'"
+else
+    echo "Warning: interface '$ROBOT_COMM_IFACE' not found; comm pane will use default DDS interfaces."
+    SETUP_COMM_DDS="unset CYCLONEDDS_URI"
+fi
 
 # kill existing session if exists
 if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
@@ -23,12 +33,16 @@ for i in $(seq 1 3); do
     tmux select-layout -t "$SESSION_NAME":0 tiled
 done
 
-# All panes use the interactive zsh environment from ~/.zshrc.
-FULL_SETUP="cd \"$WORKDIR\" && export ROBOT_CONFIG_PATH=$ROBOT_CONFIG"
+# Pane-specific setup:
+# - Panes 0/1/3 keep default DDS selection to protect local SLAM/control timing.
+# - Pane 2 is communication-only and pins DDS to Wi-Fi interface.
+SETUP_LOCAL="cd \"$WORKDIR\" && unset CYCLONEDDS_URI && export ROS_DOMAIN_ID=79 && export ROBOT_CONFIG_PATH=$ROBOT_CONFIG"
+SETUP_COMM="cd \"$WORKDIR\" && unset ROS_DOMAIN_ID && $SETUP_COMM_DDS && export ROBOT_CONFIG_PATH=$ROBOT_CONFIG"
 
-for pane in 0 1 2 3; do
-    tmux send-keys -t "$SESSION_NAME":0.$pane "$FULL_SETUP" C-m
-done
+tmux send-keys -t "$SESSION_NAME":0.0 "$SETUP_LOCAL" C-m
+tmux send-keys -t "$SESSION_NAME":0.1 "$SETUP_LOCAL" C-m
+tmux send-keys -t "$SESSION_NAME":0.2 "$SETUP_COMM" C-m
+tmux send-keys -t "$SESSION_NAME":0.3 "$SETUP_LOCAL" C-m
 
 sleep 5
 
@@ -38,8 +52,11 @@ tmux send-keys -t "$SESSION_NAME":0.0 "./system_real_robot.sh" C-m
 # Pane 1: Theta camera driver
 tmux send-keys -t "$SESSION_NAME":0.1 "ros2 launch receive_theta receive_theta_sensorpod.launch" C-m
 
-# Panes 2-3: free for manual commands
-tmux send-keys -t "$SESSION_NAME":0.2 "echo 'Robot environment ready in pane 2'" C-m
+# Pane 2: communication-only domain_bridge (79 <-> 80), interface pinned
+tmux send-keys -t "$SESSION_NAME":0.2 \
+    "source ./install/setup.bash && ros2 launch domain_bridge domain_bridge.launch config:=src/utilities/domain_bridge/config/domain_bridge_minimal.yaml" C-m
+
+# Pane 3: free for manual commands
 tmux send-keys -t "$SESSION_NAME":0.3 "echo 'Robot environment ready in pane 3'" C-m
 
 tmux attach -t "$SESSION_NAME"

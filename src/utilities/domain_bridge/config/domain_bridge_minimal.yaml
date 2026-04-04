@@ -1,0 +1,29 @@
+name: domain_bridge_minimal
+from_domain: 79
+to_domain: 80
+topics:
+  # Robot -> Host (minimum needed by host-side VLM + monitoring)
+  camera/image/compressed:
+    type: sensor_msgs/msg/CompressedImage
+    qos:
+      reliability: best_effort
+      durability: volatile
+      history: keep_last
+      depth: 3
+  registered_scan:
+    type: sensor_msgs/msg/PointCloud2
+    qos:
+      reliability: best_effort
+      durability: volatile
+      history: keep_last
+      depth: 3
+  state_estimation:
+    type: nav_msgs/msg/Odometry
+
+  # Host -> Robot (minimum needed for control)
+  way_point:
+    type: geometry_msgs/msg/PointStamped
+    reversed: True
+  stop:
+    type: std_msgs/msg/Int8
+    reversed: True
