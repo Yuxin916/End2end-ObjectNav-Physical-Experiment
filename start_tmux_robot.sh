@@ -26,6 +26,10 @@ if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
     tmux kill-session -t "$SESSION_NAME"
 fi
 
+# cleanup stale domain_bridge processes from previous experiments
+echo "Cleaning stale domain_bridge processes ..."
+pkill -f "/install/domain_bridge/lib/domain_bridge/domain_bridge" 2>/dev/null || true
+
 # create new detached session
 tmux new-session -d -s "$SESSION_NAME" -c "$WORKDIR"
 
