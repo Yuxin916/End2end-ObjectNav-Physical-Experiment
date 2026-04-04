@@ -8,7 +8,7 @@ topics:
   registered_scan:
     type: sensor_msgs/msg/PointCloud2
     qos:
-      reliability: best_effort
+      reliability: reliable
       durability: volatile
       history: keep_last
       depth: 1
@@ -17,7 +17,7 @@ topics:
   tf:
     type: tf2_msgs/msg/TFMessage
     qos:
-      reliability: best_effort
+      reliability: reliable
       durability: volatile
       history: keep_last
       depth: 10
