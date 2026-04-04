@@ -89,14 +89,15 @@ class VLMNavigatorNode(Node):
             vision_range=self.vision_range,
             obstacle_height_min=self.obstacle_height_min,
             obstacle_height_max=self.obstacle_height_max,
-            range_min=self.range_min,
-            range_max=self.range_max,
             map_pred_threshold=self.map_pred_threshold,
             exp_pred_threshold=self.exp_pred_threshold,
             explored_max_rays_per_scan=self.explored_max_rays_per_scan,
             output_size=self.output_size,
             hfov_deg=self.hfov_deg,
             obstacle_render_dilate_ksize=self.obstacle_render_dilate_ksize,
+            scan_denoise_enable=self.scan_denoise_enable,
+            scan_denoise_voxel_size=self.scan_denoise_voxel_size,
+            scan_denoise_min_points=self.scan_denoise_min_points,
         )
         self.mapper = LidarBEVMapper(bev_cfg)
 
@@ -395,7 +396,7 @@ class VLMNavigatorNode(Node):
         )
         self.get_logger().info(
             f'Parity settings: hfov={float(self.hfov_deg):.1f}deg '
-            f'vision_range={int(self.vision_range)} range_max={float(self.range_max):.2f}m '
+            f'vision_range={int(self.vision_range)} '
             f'pad2square={self.vlm_pad2square} normalize={self.vlm_normalize_type}'
         )
 
@@ -423,12 +424,13 @@ class VLMNavigatorNode(Node):
         self.declare_parameter('vision_range', 100)
         self.declare_parameter('obstacle_height_min', 0.1)
         self.declare_parameter('obstacle_height_max', 1.5)
-        self.declare_parameter('range_min', 0.5)
-        self.declare_parameter('range_max', 5.0)
         self.declare_parameter('map_pred_threshold', 1.0)
         self.declare_parameter('exp_pred_threshold', 1.0)
         self.declare_parameter('explored_max_rays_per_scan', 512)
         self.declare_parameter('obstacle_render_dilate_ksize', 1)
+        self.declare_parameter('scan_denoise_enable', True)
+        self.declare_parameter('scan_denoise_voxel_size', 0.10)
+        self.declare_parameter('scan_denoise_min_points', 2)
         self.declare_parameter('output_size', 448)
 
         self.declare_parameter('frontier_exp_threshold', 0.1)
@@ -494,12 +496,13 @@ class VLMNavigatorNode(Node):
         self.vision_range = g('vision_range').value
         self.obstacle_height_min = g('obstacle_height_min').value
         self.obstacle_height_max = g('obstacle_height_max').value
-        self.range_min = g('range_min').value
-        self.range_max = g('range_max').value
         self.map_pred_threshold = g('map_pred_threshold').value
         self.exp_pred_threshold = g('exp_pred_threshold').value
         self.explored_max_rays_per_scan = g('explored_max_rays_per_scan').value
         self.obstacle_render_dilate_ksize = g('obstacle_render_dilate_ksize').value
+        self.scan_denoise_enable = g('scan_denoise_enable').value
+        self.scan_denoise_voxel_size = g('scan_denoise_voxel_size').value
+        self.scan_denoise_min_points = g('scan_denoise_min_points').value
         self.output_size = g('output_size').value
 
         self.frontier_exp_threshold = g('frontier_exp_threshold').value
@@ -718,13 +721,35 @@ class VLMNavigatorNode(Node):
         self._scan_received = True
 
         if self._pose_received:
+            # Time-align lidar integration using the pose at scan timestamp.
+            # Falls back to nearest/latest pose when history does not bracket the stamp.
+            pose_x, pose_y, pose_z, pose_yaw, matched_pose_stamp = self._lookup_pose_at(
+                float(self.latest_scan_stamp_s)
+            )
+            if (
+                pose_x is None or pose_y is None or pose_z is None or pose_yaw is None or
+                not np.isfinite(pose_x) or not np.isfinite(pose_y) or
+                not np.isfinite(pose_z) or not np.isfinite(pose_yaw)
+            ):
+                pose_x = self.latest_pose_x
+                pose_y = self.latest_pose_y
+                pose_z = self.latest_pose_z
+                pose_yaw = self.latest_yaw
+                matched_pose_stamp = self.latest_pose_stamp_s
+
             self.mapper.update(
                 pts,
-                self.latest_pose_x,
-                self.latest_pose_y,
-                self.latest_pose_z,
-                self.latest_yaw,
+                float(pose_x),
+                float(pose_y),
+                float(pose_z),
+                float(pose_yaw),
             )
+            pose_scan_dt = abs(float(self.latest_scan_stamp_s) - float(matched_pose_stamp))
+            if pose_scan_dt > float(self.max_sensor_skew_sec):
+                self.get_logger().warn(
+                    f'Scan-pose alignment uses stale pose: dt={pose_scan_dt:.3f}s '
+                    f'(max_sensor_skew_sec={float(self.max_sensor_skew_sec):.3f}s).'
+                )
             _now = time.time()
             if _now - self._last_live_bev_publish_time >= 0.2:  # max 5 Hz
                 self._last_live_bev_publish_time = _now
