@@ -7,6 +7,7 @@ set -e
 
 SESSION_NAME="sagan_nav_host"
 WORKDIR="./"
+HOST_CYCLONEDDS_URI='<CycloneDDS><Domain><General><Interfaces><NetworkInterface name="wlp131s0"/></Interfaces></General></Domain></CycloneDDS>'
 
 # kill existing session if exists
 if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
@@ -28,8 +29,8 @@ done
 
 # ~/.zshrc handles venv + ROS sourcing.
 # Most panes use Domain 80 (host side). Pane 0 (domain_bridge) must NOT set ROS_DOMAIN_ID.
-SETUP_BRIDGE="cd \"$WORKDIR\""
-SETUP_HOST="cd \"$WORKDIR\" && export ROS_DOMAIN_ID=80"
+SETUP_BRIDGE="cd \"$WORKDIR\" && export CYCLONEDDS_URI=\"$HOST_CYCLONEDDS_URI\""
+SETUP_HOST="cd \"$WORKDIR\" && export ROS_DOMAIN_ID=80 && export CYCLONEDDS_URI=\"$HOST_CYCLONEDDS_URI\""
 
 # Pane 0: domain_bridge — no ROS_DOMAIN_ID so it can reach both Domain 79 and 80
 tmux send-keys -t "$SESSION_NAME":0.0 "$SETUP_BRIDGE" C-m

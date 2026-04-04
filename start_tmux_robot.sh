@@ -1,11 +1,12 @@
 #!/usr/bin/env zsh
-# Runs on the ROBOT (Domain 79).
-# Launches: autonomy stack (SLAM + local planner + Livox driver) and Theta camera driver.
-# domain_bridge runs on the host side (start_tmux_host.sh).
+# Runs on the ROBOT NUC (Domain 79).
+# Launches: navigation stack only (SLAM + local planner + Livox driver + WebRTC)
+# plus the Theta camera driver. VLM/SAM/domain_bridge run on the host side.
 set -e
 
 SESSION_NAME="sagan_nav_robot"
 WORKDIR="./"
+ROBOT_CONFIG="unitree/unitree_go2_slow"
 
 # kill existing session if exists
 if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
@@ -22,8 +23,8 @@ for i in $(seq 1 3); do
     tmux select-layout -t "$SESSION_NAME":0 tiled
 done
 
-# All panes use Domain 79. ~/.zshrc handles venv + ROS sourcing.
-FULL_SETUP="cd \"$WORKDIR\" && export ROS_DOMAIN_ID=79"
+# All panes use the interactive zsh environment from ~/.zshrc.
+FULL_SETUP="cd \"$WORKDIR\" && export ROBOT_CONFIG_PATH=$ROBOT_CONFIG"
 
 for pane in 0 1 2 3; do
     tmux send-keys -t "$SESSION_NAME":0.$pane "$FULL_SETUP" C-m
@@ -31,7 +32,7 @@ done
 
 sleep 5
 
-# Pane 0: autonomy stack (SLAM + local planner + terrain analysis + Livox driver)
+# Pane 0: robot-side navigation stack (SLAM + local planner + terrain analysis + Livox driver + WebRTC)
 tmux send-keys -t "$SESSION_NAME":0.0 "./system_real_robot.sh" C-m
 
 # Pane 1: Theta camera driver
