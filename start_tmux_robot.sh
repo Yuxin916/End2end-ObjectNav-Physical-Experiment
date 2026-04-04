@@ -19,6 +19,12 @@ ZENOH_ROUTER_ENDPOINT="${ZENOH_ROUTER_ENDPOINT:-tcp/192.168.8.147:7447}"
 ZENOH_ROUTER_CHECK_ATTEMPTS="${ZENOH_ROUTER_CHECK_ATTEMPTS:-20}"
 ZENOH_OVERRIDE="mode=\"client\";connect/endpoints=[\"${ZENOH_ROUTER_ENDPOINT}\"]"
 
+# Safety guard: when bridge is disabled, force local DDS baseline mode.
+# This prevents stale USE_ZENOH exports from affecting local-only robot runs.
+if [[ "$ROBOT_ENABLE_BRIDGE" == "0" ]]; then
+    USE_ZENOH=0
+fi
+
 # kill existing session if exists
 if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
     echo "Killing existing tmux session: $SESSION_NAME"
