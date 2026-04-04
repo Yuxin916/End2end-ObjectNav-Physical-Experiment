@@ -267,10 +267,15 @@ class LidarBEVMapper:
         # never marks cells through walls as explored.
         self._mark_explored_raycast(g_rows, g_cols)
 
-        # ---- 5. Agent position & trajectory channels ---------------------
+        # ---- 5. Keep only robot-connected component on FULL map ----------
+        # Do this before local crop extraction to avoid crop-window truncation
+        # causing connected-component flicker near local-map borders.
+        self._post_process_full_map_connectivity()
+
+        # ---- 6. Agent position & trajectory channels ---------------------
         self._update_agent_channels()
 
-        # ---- 6. Extract local crop around robot -------------------------
+        # ---- 7. Extract local crop around robot -------------------------
         self._extract_local_map()
 
     # ------------------------------------------------------------------
@@ -405,6 +410,43 @@ class LidarBEVMapper:
         self._prev_g_row = rc
         self._prev_g_col = cc
 
+    def _post_process_full_map_connectivity(self):
+        """Keep only the explored/occupied component connected to the robot on full_map."""
+        occ = self.full_map[0].copy()
+        exp = self.full_map[1].copy()
+        occ_th = float(self.cfg.map_pred_threshold)
+        exp_th = float(self.cfg.exp_pred_threshold)
+
+        # Build connectivity over the union of explored + occupied cells so
+        # obstacle cells are preserved in the same connected component.
+        conn_binary = ((exp >= exp_th) | (occ >= occ_th)).astype(np.uint8)
+        num_labels, labels, _, _ = cv2.connectedComponentsWithStats(conn_binary, connectivity=4)
+        if num_labels <= 1:
+            return
+
+        rr = int(np.clip(self.robot_g_row, 0, self.global_cells - 1))
+        rc = int(np.clip(self.robot_g_col, 0, self.global_cells - 1))
+        target = int(labels[rr, rc])
+        if target == 0:
+            min_dist, best = float('inf'), 1
+            for i in range(1, num_labels):
+                ys, xs = np.where(labels == i)
+                if len(xs) == 0:
+                    continue
+                d = int(((xs - rc) ** 2 + (ys - rr) ** 2).min())
+                if d < min_dist:
+                    min_dist, best = d, i
+            target = best
+
+        keep = (labels == target)
+        occ[~keep] = 0.0
+        exp[~keep] = 0.0
+        # Mark occupied cells inside the kept component as explored for consistency.
+        exp[occ >= occ_th] = 1.0
+
+        self.full_map[0] = occ
+        self.full_map[1] = exp
+
     def _extract_local_map(self):
         """Crop ±(output_size/2) cells around robot — 1 cell = 1 pixel, no resize."""
         out = self.cfg.output_size
@@ -434,7 +476,7 @@ class LidarBEVMapper:
         self.local_pixel_col = out / 2.0
 
     def _post_process_local_map(self, local: np.ndarray, size: int) -> np.ndarray:
-        """Apply post_process_map() logic to a local crop (CHW, size×size).
+        """Apply lightweight morphology to a local crop (CHW, size×size).
 
         Works on a copy so the caller's array is not modified.  The robot pixel
         centre is always (size/2, size/2) in the local crop.
@@ -449,49 +491,11 @@ class LidarBEVMapper:
         exp = cv2.erode(cv2.dilate(exp.astype(np.uint8), k), k).astype(np.float32)
 
         exp[occ == 1] = 0.0
-
-        # Pass 1: keep only the explored component containing the robot centre
-        exp_binary = (exp > 0).astype(np.uint8)
-        num_labels, labels, _, _ = cv2.connectedComponentsWithStats(
-            exp_binary, connectivity=4
-        )
-        if num_labels > 1:
-            ry, rx = size // 2, size // 2
-            target = int(labels[ry, rx])
-            if target == 0:
-                min_dist, target = float('inf'), 1
-                for i in range(1, num_labels):
-                    ys, xs = np.where(labels == i)
-                    d = int(((xs - rx) ** 2 + (ys - ry) ** 2).min())
-                    if d < min_dist:
-                        min_dist, target = d, i
-            exp = (labels == target).astype(np.float32)
-
         exp[occ == 1] = 1.0
-        exp_copy_1 = exp.copy()
-
-        # Pass 2: trim occ to cells connected to the explored region
-        exp_binary2 = (exp > 0).astype(np.uint8)
-        num_labels2, labels2, _, _ = cv2.connectedComponentsWithStats(
-            exp_binary2, connectivity=4
-        )
-        if num_labels2 > 1:
-            ry, rx = size // 2, size // 2
-            target2 = int(labels2[ry, rx])
-            if target2 == 0:
-                min_dist, target2 = float('inf'), 1
-                for i in range(1, num_labels2):
-                    ys, xs = np.where(labels2 == i)
-                    d = int(((xs - rx) ** 2 + (ys - ry) ** 2).min())
-                    if d < min_dist:
-                        min_dist, target2 = d, i
-            exp2 = (labels2 == target2).astype(np.float32)
-            occ[exp2 == 0] = 0.0
-            exp_copy_1[exp2 == 0] = 0.0
 
         result = local.copy()
         result[0] = occ
-        result[1] = exp_copy_1
+        result[1] = exp
         return result
 
 
