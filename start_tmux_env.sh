@@ -34,6 +34,23 @@ CMD_PANE0="./system_real_robot.sh"
 CMD_PANE1="ros2 launch vlm_nav_bridge vlm_nav_bridge.launch.py"
 CMD_PANE2="ros2 launch sam2_detector sam2_detector.launch.py"
 CMD_PANE3="ros2 launch receive_theta receive_theta_sensorpod.launch"
+CMD_PANE4='sleep 10 && mkdir -p bags && ros2 bag record \
+/registered_scan \
+/path \
+/free_paths \
+/way_point \
+/fake_way_point \
+/navigation_boundary \
+/overall_map \
+/trajectory \
+/sam2_detection_debug \
+/egocentric_rgb \
+/fov \
+/vlm_bev_debug \
+/frontier_rgb_debug \
+/tf \
+/tf_static \
+-o bags/run_$(date +%Y%m%d_%H%M%S) --storage mcap --compression-mode file --compression-format zstd'
 
 # send full setup to all 6 panes
 for pane in 0 1 2 3 4 5; do
@@ -48,7 +65,7 @@ tmux send-keys -t "$SESSION_NAME":0.0 "$CMD_PANE0" C-m
 tmux send-keys -t "$SESSION_NAME":0.1 "$CMD_PANE1" C-m
 tmux send-keys -t "$SESSION_NAME":0.2 "$CMD_PANE2" C-m
 tmux send-keys -t "$SESSION_NAME":0.3 "$CMD_PANE3" C-m
-tmux send-keys -t "$SESSION_NAME":0.4 "echo 'Environment ready in pane 4'" C-m
+tmux send-keys -t "$SESSION_NAME":0.4 "$CMD_PANE4" C-m
 tmux send-keys -t "$SESSION_NAME":0.5 "echo 'Environment ready in pane 5'" C-m
 
 # attach
