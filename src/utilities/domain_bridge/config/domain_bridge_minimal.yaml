@@ -17,7 +17,7 @@ topics:
   tf:
     type: tf2_msgs/msg/TFMessage
     qos:
-      reliability: reliable
+      reliability: best_effort
       durability: volatile
       history: keep_last
       depth: 10
