@@ -2,8 +2,8 @@ name: domain_bridge
 from_domain: 79
 to_domain: 80
 topics:
-  camera/image/compressed:
-    type: sensor_msgs/msg/CompressedImage
+  # camera/image/compressed:
+  #   type: sensor_msgs/msg/CompressedImage
   registered_scan:
     type: sensor_msgs/msg/PointCloud2
   state_estimation:

@@ -21,7 +21,7 @@ ZENOH_OVERRIDE="mode=\"client\";connect/endpoints=[\"${ZENOH_ROUTER_ENDPOINT}\"]
 
 # Safety guard: when bridge is disabled, force local DDS baseline mode.
 # This prevents stale USE_ZENOH exports from affecting local-only robot runs.
-if [[ "$ROBOT_ENABLE_BRIDGE" == "0" ]]; then
+if [[ "$ROBOT_ENABLE_BRIDGE" == "1" ]]; then
     USE_ZENOH=0
 fi
 

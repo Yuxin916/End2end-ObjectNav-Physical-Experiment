@@ -71,7 +71,7 @@ pathFollower:
     stopYawRateGain: 0.75
     maxYawRate: 60.0
     dirDiffThre: 0.4
-    stopDisThre: 0.3
+    stopDisThre: 0.5
 
 terrainAnalysis:
   ros__parameters:
