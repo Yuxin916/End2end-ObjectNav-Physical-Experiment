@@ -43,6 +43,7 @@ import numpy as np
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 
 from sensor_msgs.msg import PointCloud2, Image
 from nav_msgs.msg import Odometry
@@ -203,10 +204,16 @@ class VLMNavigatorNode(Node):
         # ------------------------------------------------------------------
         # Subscriptions
         # ------------------------------------------------------------------
+        scan_qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+        )
         self.create_subscription(
             PointCloud2, '/registered_scan',
             self._scan_callback,
-            5
+            scan_qos
         )
         self.create_subscription(
             Odometry, '/state_estimation',
