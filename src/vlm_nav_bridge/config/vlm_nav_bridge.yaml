@@ -233,6 +233,17 @@ vlm_navigator:
     # 0 = panorama centre is robot forward. Adjust if camera is mounted offset.
     camera_yaw_offset_deg: 0.0
 
+    # Camera translation extrinsic (metres), expressed in robot body frame.
+    # These are used in target localization to shift the bearing ray origin
+    # from /state_estimation pose origin to camera optical center.
+    # Convention: +tx forward, +ty left, +tz up.
+    # If /state_estimation pose is at lidar origin:
+    #   tx = x_cam - x_lidar, ty = y_cam - y_lidar, tz = z_cam - z_lidar
+    # all expressed in the robot body frame.
+    camera_extrinsic_tx: -0.2
+    camera_extrinsic_ty: 0.0
+    camera_extrinsic_tz: 0.1
+
     # Sign mapping between crop heading and panorama longitude direction.
     # -1.0 is typical when ROS yaw is CCW but panorama x-axis increases rightward.
     # Set to +1.0 if your egocentric crop rotates in the opposite direction.
