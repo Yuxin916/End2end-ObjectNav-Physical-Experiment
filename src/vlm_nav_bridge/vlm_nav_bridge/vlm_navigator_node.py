@@ -204,16 +204,16 @@ class VLMNavigatorNode(Node):
         # ------------------------------------------------------------------
         # Subscriptions
         # ------------------------------------------------------------------
-        scan_qos = QoSProfile(
-            reliability=ReliabilityPolicy.BEST_EFFORT,
-            durability=DurabilityPolicy.VOLATILE,
-            history=HistoryPolicy.KEEP_LAST,
-            depth=1,
-        )
+        # scan_qos = QoSProfile(
+        #     reliability=ReliabilityPolicy.BEST_EFFORT,
+        #     durability=DurabilityPolicy.VOLATILE,
+        #     history=HistoryPolicy.KEEP_LAST,
+        #     depth=1,
+        # )
         self.create_subscription(
             PointCloud2, '/registered_scan',
             self._scan_callback,
-            scan_qos
+            5
         )
         self.create_subscription(
             Odometry, '/state_estimation',
@@ -283,7 +283,7 @@ class VLMNavigatorNode(Node):
             Image, '/vlm_target_debug', 10
         )
         self.target_marker_pub = self.create_publisher(
-            PointStamped, '/vlm_target_marker', 10  
+            PointStamped, '/vlm_target_marker', 10
         )
         self.target_reached_pub = self.create_publisher(
             Bool, '/vlm_target_reached', 10

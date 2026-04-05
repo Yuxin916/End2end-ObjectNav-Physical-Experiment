@@ -11,7 +11,7 @@ topics:
       reliability: reliable
       durability: volatile
       history: keep_last
-      depth: 10
+      depth: 1
   state_estimation:
     type: nav_msgs/msg/Odometry
   tf:
