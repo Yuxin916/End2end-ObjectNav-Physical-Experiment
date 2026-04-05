@@ -8,10 +8,10 @@ topics:
   registered_scan:
     type: sensor_msgs/msg/PointCloud2
     qos:
-      reliability: best_effort
+      reliability: reliable
       durability: volatile
       history: keep_last
-      depth: 1
+      depth: 10
   state_estimation:
     type: nav_msgs/msg/Odometry
   tf:
