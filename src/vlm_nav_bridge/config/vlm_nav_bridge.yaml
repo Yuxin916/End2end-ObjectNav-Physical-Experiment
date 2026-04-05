@@ -101,22 +101,12 @@ vlm_navigator:
     # Excludes floor returns from the obstacle map.
     # Tune for robot: Go2 sensor is ~0.3–0.5 m above floor → 0.1 m min excludes floor well.
     # G1 sensor is ~1.0 m above floor → 0.1 m min may miss low furniture (try -0.3 to -0.5).
-    obstacle_height_min: -0.6
+    obstacle_height_min: -0.2
 
     # Points above (robot_z + obstacle_height_max) are NOT counted as obstacles.
     # Excludes ceiling and high mounted objects.
     # 1.5 m covers head-height obstacles. Increase for tall furniture/doors if needed.
-    obstacle_height_max: 1.5
-
-    # Minimum 2-D lidar range (metres) — points closer than this are ignored.
-    # Eliminates body self-reflection and near-field noise.
-    # mp3d parity: 0.5 m (Habitat min depth clip).
-    range_min: 0.5
-
-    # Maximum 2-D lidar range (metres) — points farther than this are ignored.
-    # mp3d parity: 5.0 m (Habitat max depth range for obstacle mapping).
-    # Do NOT increase beyond 5.0 — the VLM was trained with this horizon.
-    range_max: 5.0
+    obstacle_height_max: 1.0
 
     # Hit-count threshold to classify a cell as occupied (obstacle) in the map.
     # 1.0 = any single lidar return marks the cell as an obstacle.
@@ -130,6 +120,15 @@ vlm_navigator:
     # Upper bound on unique endpoint rays traced per scan (performance guard).
     # Increase for denser point clouds if explored map looks too sparse.
     explored_max_rays_per_scan: 512
+
+    # Registered-scan denoising before occupancy/explored update.
+    # Uses XY voxel support filtering: keep points only if their XY voxel
+    # contains at least scan_denoise_min_points points in the current scan.
+    scan_denoise_enable: true
+    # XY voxel size (metres) for denoise support counting.
+    scan_denoise_voxel_size: 0.10
+    # Minimum points per XY voxel to keep points from that voxel.
+    scan_denoise_min_points: 2
 
     # Visual dilation of obstacle pixels in the rendered BEV image (render only,
     # does NOT affect map data or frontier detection).
@@ -202,10 +201,6 @@ vlm_navigator:
     # clears internal object_goal, and waits for the next /object_goal command.
     # Set <= 0 to reuse goal_reached_threshold.
     target_reached_threshold: 1.0
-
-    # After a non-target waypoint is reached, hold cmd_vel=0 for this duration
-    # while VLM inference runs and before the next waypoint is issued.
-    waypoint_reached_pause_sec: 2.0
 
     # TF frame for published waypoints. Must match local_planner's expected frame.
     waypoint_frame: "map"
@@ -314,6 +309,19 @@ vlm_navigator:
     # Prevents navigating to stale target positions after the object moves out of view.
     target_state_ttl_sec: 3.0
 
+    # Labels treated as screen-like targets (TV/monitor) for standoff waypoint logic.
+    target_tv_labels: ["tv_monitor", "monitor", "screen"]
+
+    # If true and target label is screen-like, back off by target_screen_standoff_m
+    # from the detected target point before publishing waypoint.
+    target_screen_standoff_enable: false
+
+    # Desired standoff distance (metres) from screen-like targets.
+    target_screen_standoff_m: 0.6
+
+    # Maximum snap distance (metres) allowed for standoff projection fallback.
+    target_screen_standoff_max_snap_m: 1.5
+
 
 
     # ==========================================================================
@@ -323,7 +331,7 @@ vlm_navigator:
     # Maximum allowed age difference between pose, lidar scan, and camera timestamps (seconds).
     # If any two sensors differ by more than this, a WARN is logged.
     # Not a hard block — navigation continues.  Tighten for high-speed robots.
-    max_sensor_skew_sec: 0.5
+    max_sensor_skew_sec: 0.15
 
     # NOTE: Visualization appearance (arrow size/color, trail color, frontier dot radius,
     # FOV overlay alpha) is hardcoded in BEVMapperConfig defaults in lidar_bev_mapper.py

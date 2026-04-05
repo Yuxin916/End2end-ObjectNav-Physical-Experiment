@@ -4,6 +4,7 @@ Panels:
     Name: Displays
     Property Tree Widget:
       Expanded:
+        - /RegScan1
         - /SAM2 Detection1
       Splitter Ratio: 0.729411780834198
     Tree Height: 640
@@ -63,7 +64,7 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: /camera/semantic_image
       Value: false
-    - Alpha: 0.10000000149011612
+    - Alpha: 0.6000000238418579
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
         Max Value: 0.9582680463790894
@@ -582,9 +583,9 @@ Visualization Manager:
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: 3.345141649246216
-        Y: 5.1259636878967285
-        Z: 2.310506820678711
+        X: 2.0836124420166016
+        Y: 1.3250412940979004
+        Z: 2.306708335876465
       Focal Shape Fixed Size: false
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
