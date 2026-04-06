@@ -9,9 +9,6 @@ SESSION_NAME="sagan_nav_host"
 WORKDIR="./"
 HOST_DOMAIN_ID="${HOST_DOMAIN_ID:-80}"
 ROBOT_DOMAIN_ID="${ROBOT_DOMAIN_ID:-79}"
-HOST_NET_IFACE="${HOST_NET_IFACE:-wlp131s0}"
-RMW_IMPLEMENTATION_NAME="${RMW_IMPLEMENTATION_NAME:-rmw_cyclonedds_cpp}"
-HOST_CYCLONEDDS_URI="<CycloneDDS><Domain><General><Interfaces><NetworkInterface name=\"${HOST_NET_IFACE}\"/></Interfaces></General></Domain></CycloneDDS>"
 
 # kill existing session if exists
 if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
@@ -30,8 +27,8 @@ done
 
 # Most panes use the host-side ROS domain. Pane 0 launches the domain bridge,
 # which reads the bridge direction from its YAML config.
-SETUP_BRIDGE="cd \"$WORKDIR\" && source ./install/setup.bash && export RMW_IMPLEMENTATION=$RMW_IMPLEMENTATION_NAME && export CYCLONEDDS_URI='$HOST_CYCLONEDDS_URI'"
-SETUP_HOST="cd \"$WORKDIR\" && source ./install/setup.bash && export RMW_IMPLEMENTATION=$RMW_IMPLEMENTATION_NAME && export ROS_DOMAIN_ID=$HOST_DOMAIN_ID && export CYCLONEDDS_URI='$HOST_CYCLONEDDS_URI'"
+SETUP_BRIDGE="cd \"$WORKDIR\" && source ./install/setup.zsh && unset RMW_IMPLEMENTATION CYCLONEDDS_URI ROBOT_CYCLONEDDS_URI"
+SETUP_HOST="cd \"$WORKDIR\" && source ./install/setup.zsh && unset RMW_IMPLEMENTATION CYCLONEDDS_URI ROBOT_CYCLONEDDS_URI && export ROS_DOMAIN_ID=$HOST_DOMAIN_ID"
 
 # Pane 0: domain_bridge — no ROS_DOMAIN_ID so it can reach both Domain 79 and 80
 tmux send-keys -t "$SESSION_NAME":0.0 "$SETUP_BRIDGE" C-m
@@ -50,7 +47,7 @@ tmux send-keys -t "$SESSION_NAME":0.0 \
 # Pane 1: decompress /camera/image/compressed → /camera/image
 # Required because domain_bridge forwards the compressed topic; VLM subscribes to raw.
 tmux send-keys -t "$SESSION_NAME":0.1 \
-    "source ./install/setup.bash && ros2 run image_transport republish \
+    "source ./install/setup.zsh && ros2 run image_transport republish \
 --ros-args \
 -p in_transport:=compressed \
 -p out_transport:=raw \

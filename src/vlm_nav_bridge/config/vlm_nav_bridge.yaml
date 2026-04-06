@@ -194,7 +194,7 @@ vlm_navigator:
 
     # Distance threshold (metres) to declare the current waypoint "reached".
     # When robot_distance < threshold, the VLM inference timer re-triggers early.
-    goal_reached_threshold: 0.5
+    goal_reached_threshold: 1.0
 
     # Distance threshold (metres) to declare a TARGET waypoint reached.
     # When reached, vlm_navigator marks current goal success, publishes /vlm_target_reached=true,

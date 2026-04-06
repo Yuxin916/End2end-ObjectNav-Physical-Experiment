@@ -8,9 +8,6 @@ SESSION_NAME="sagan_nav_robot"
 WORKDIR="./"
 ROBOT_CONFIG="unitree/unitree_go2_slow"
 ROBOT_DOMAIN_ID="${ROBOT_DOMAIN_ID:-79}"
-ROBOT_NET_IFACE="${ROBOT_NET_IFACE:-wlo1}"
-RMW_IMPLEMENTATION_NAME="${RMW_IMPLEMENTATION_NAME:-rmw_cyclonedds_cpp}"
-ROBOT_CYCLONEDDS_URI="<CycloneDDS><Domain><General><Interfaces><NetworkInterface name=\"${ROBOT_NET_IFACE}\"/></Interfaces></General></Domain></CycloneDDS>"
 
 # kill existing session if exists
 if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
@@ -28,7 +25,7 @@ for i in $(seq 1 3); do
 done
 
 # All robot-side panes stay on the robot ROS 2 domain.
-FULL_SETUP="cd \"$WORKDIR\" && source ./install/setup.bash && export RMW_IMPLEMENTATION=$RMW_IMPLEMENTATION_NAME && export ROS_DOMAIN_ID=$ROBOT_DOMAIN_ID && export CYCLONEDDS_URI='$ROBOT_CYCLONEDDS_URI' && export ROBOT_CONFIG_PATH=$ROBOT_CONFIG"
+FULL_SETUP="cd \"$WORKDIR\" && source ./install/setup.zsh && unset RMW_IMPLEMENTATION CYCLONEDDS_URI ROBOT_CYCLONEDDS_URI && export ROS_DOMAIN_ID=$ROBOT_DOMAIN_ID && export ROBOT_CONFIG_PATH=$ROBOT_CONFIG"
 
 for pane in 0 1 2 3; do
     tmux send-keys -t "$SESSION_NAME":0.$pane "$FULL_SETUP" C-m

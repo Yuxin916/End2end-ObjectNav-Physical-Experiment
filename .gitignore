@@ -29,3 +29,4 @@ src/base_autonomy/vehicle_simulator/log/*
 .codex
 saved_unity_demo/
 .idea/
+bags/
