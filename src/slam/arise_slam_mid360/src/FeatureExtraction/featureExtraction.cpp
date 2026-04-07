@@ -986,7 +986,7 @@ namespace arise_slam {
     }
 
 
-    bool featureExtraction::synchronizeLidarDepthMeasurement(double lidar_start_time, std::queue<sensor_msgs::msg::PointCloud2::SharedPtr> cloud_in, DepthType depthtype)
+    bool featureExtraction::synchronizeLidarDepthMeasurement(double lidar_start_time, std::queue<sensor_msgs::msg::PointCloud2::SharedPtr> &cloud_in, DepthType depthtype)
     {
 
         // only use the all_cloud_buf[0] timestamp
@@ -1013,7 +1013,7 @@ namespace arise_slam {
 
         double depth_time = cloud_in.front()->header.stamp.sec + cloud_in.front()->header.stamp.nanosec*1e-9;
      
-        if (fabs(depth_time-lidar_start_time>1.0))
+        if (std::fabs(depth_time - lidar_start_time) > 1.0)
         {  
             if(depthtype==DepthType::UP_DEPTH)
             RCLCPP_WARN(this->get_logger(), "\033[1;32m lidar and depth camera are not synced | up depth camera time offset %f \033[0m"

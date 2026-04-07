@@ -173,6 +173,8 @@ class LidarBEVMapper:
 
         self._initialised = True
 
+        self.full_map[1, g_row-11:g_row+10, g_col-11:g_col+10] = 1.0
+
     # ------------------------------------------------------------------
     # Main update — called on each lidar scan callback
     # ------------------------------------------------------------------

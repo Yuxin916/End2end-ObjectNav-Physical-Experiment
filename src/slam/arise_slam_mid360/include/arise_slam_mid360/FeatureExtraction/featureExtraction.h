@@ -149,7 +149,7 @@ namespace arise_slam {
                                     pcl::PointCloud<point_os::PointcloudXYZITR>::Ptr &lidar_msg);
         void undistortionAndscanregistration();
 
-        bool synchronizeLidarDepthMeasurement(double lidar_start_time,std::queue<sensor_msgs::msg::PointCloud2::SharedPtr> cloud_in, DepthType depthtype);
+        bool synchronizeLidarDepthMeasurement(double lidar_start_time,std::queue<sensor_msgs::msg::PointCloud2::SharedPtr> &cloud_in, DepthType depthtype);
 
         void normalizeImuData(const sensor_msgs::msg::Imu::SharedPtr imu_in, Imu::Ptr imuData);
 
