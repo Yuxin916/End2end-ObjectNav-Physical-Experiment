@@ -75,7 +75,7 @@
     <param name="maxAccel" value="2.0" />
     <param name="switchTimeThre" value="1.0" />
     <param name="omniDirDiffThre" value="1.5" />
-    <param name="slowDwnDisThre" value="0.875" />
+    <param name="slowDwnDisThre" value="1.5" />
     <param name="useInclRateToSlow" value="false" />
     <param name="inclRateThre" value="120.0" />
     <param name="slowRate1" value="0.25" />

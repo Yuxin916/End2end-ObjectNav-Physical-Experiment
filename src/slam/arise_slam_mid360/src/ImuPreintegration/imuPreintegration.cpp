@@ -1067,7 +1067,7 @@ namespace arise_slam {
         odometry2.pose.covariance[7] = config_.imuGravity;
         
         frame_count++;
-        if(frame_count%4==0)
+        if(frame_count%2==0)
             pubImuOdometry2->publish(odometry2);
 
         std_msgs::msg::Bool health_status_msg;

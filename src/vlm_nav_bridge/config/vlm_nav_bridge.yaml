@@ -101,12 +101,12 @@ vlm_navigator:
     # Excludes floor returns from the obstacle map.
     # Tune for robot: Go2 sensor is ~0.3–0.5 m above floor → 0.1 m min excludes floor well.
     # G1 sensor is ~1.0 m above floor → 0.1 m min may miss low furniture (try -0.3 to -0.5).
-    obstacle_height_min: -0.2
+    obstacle_height_min: -0.4
 
     # Points above (robot_z + obstacle_height_max) are NOT counted as obstacles.
     # Excludes ceiling and high mounted objects.
     # 1.5 m covers head-height obstacles. Increase for tall furniture/doors if needed.
-    obstacle_height_max: 1.0
+    obstacle_height_max: 1.2
 
     # Hit-count threshold to classify a cell as occupied (obstacle) in the map.
     # 1.0 = any single lidar return marks the cell as an obstacle.
@@ -200,7 +200,7 @@ vlm_navigator:
     # When reached, vlm_navigator marks current goal success, publishes /vlm_target_reached=true,
     # clears internal object_goal, and waits for the next /object_goal command.
     # Set <= 0 to reuse goal_reached_threshold.
-    target_reached_threshold: 1.0
+    target_reached_threshold: 0.5
 
     # TF frame for published waypoints. Must match local_planner's expected frame.
     waypoint_frame: "map"
@@ -232,6 +232,17 @@ vlm_navigator:
     # Yaw offset between panorama centre and robot forward direction (degrees).
     # 0 = panorama centre is robot forward. Adjust if camera is mounted offset.
     camera_yaw_offset_deg: 0.0
+
+    # Camera translation extrinsic (metres), expressed in robot body frame.
+    # These are used in target localization to shift the bearing ray origin
+    # from /state_estimation pose origin to camera optical center.
+    # Convention: +tx forward, +ty left, +tz up.
+    # If /state_estimation pose is at lidar origin:
+    #   tx = x_cam - x_lidar, ty = y_cam - y_lidar, tz = z_cam - z_lidar
+    # all expressed in the robot body frame.
+    camera_extrinsic_tx: -0.05
+    camera_extrinsic_ty: -0.12
+    camera_extrinsic_tz: 0.06
 
     # Sign mapping between crop heading and panorama longitude direction.
     # -1.0 is typical when ROS yaw is CCW but panorama x-axis increases rightward.
@@ -282,7 +293,7 @@ vlm_navigator:
     # GroundingDINO scores are roughly in [0.3, 0.9]. 0.30 is permissive;
     # raise to 0.5 for fewer false positives in cluttered scenes.
     # Fix 2: raised from 0.30 → 0.40 to match box_threshold increase in sam2_detector.yaml.
-    target_confidence_threshold: 0.40
+    target_confidence_threshold: 0.60
 
     # Size of the temporal detection buffer (number of recent frames).
     # A detection is only confirmed if ≥ target_temporal_min_hits frames
