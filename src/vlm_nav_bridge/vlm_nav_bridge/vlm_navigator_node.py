@@ -173,6 +173,7 @@ class VLMNavigatorNode(Node):
         # Detection-driven interrupt state (no-cooldown hybrid policy).
         self._last_detection_signature: Optional[Tuple[Any, ...]] = None
         self._pending_detection_interrupt: bool = False
+        self._pending_detection_reason: str = ''
 
         # Frontier birth RGB (dual-ViT templates)
         self.latest_rgb_pil: PILImage.Image = None
@@ -638,6 +639,11 @@ class VLMNavigatorNode(Node):
                 if dist < float(self.goal_reached_threshold):
                     self._on_waypoint_reached(dist)
 
+        # If a fresh target detection arrived while a required precondition
+        # was missing (e.g., map not ready), retry the immediate interrupt
+        # once pose/map are available.
+        self._maybe_trigger_detection_interrupt()
+
     def _converted_waypoint_callback(self, msg: PointStamped):
         """Update current_wp_x/y to the waypoint_converter's adjusted position.
 
@@ -937,6 +943,25 @@ class VLMNavigatorNode(Node):
         )
         if best is not None:
             self.target_confidence = float(best['confidence'])
+
+        # Detection-driven immediate VLM trigger:
+        # when target appears/changes, run VLM early once target can be
+        # localized into local BEV (so render_local_bev includes target dot + FOV).
+        change_reason = self._compute_detection_change_reason(best)
+        if change_reason is not None:
+            self._pending_detection_reason = str(change_reason)
+            self.get_logger().info(
+                f'Target detection change: {change_reason}. '
+                'Scheduling immediate VLM interrupt when target is localizable.'
+            )
+        if best is None:
+            # Drop any stale pending interrupt when detections disappear.
+            self._pending_detection_interrupt = False
+            self._pending_detection_reason = ''
+            return
+        if change_reason is not None:
+            self._pending_detection_interrupt = True
+        self._maybe_trigger_detection_interrupt()
 
     def _project_panorama_to_pinhole(self, pano_rgb: np.ndarray,
                                       heading_override: Optional[float] = None) -> np.ndarray:
@@ -1959,6 +1984,32 @@ class VLMNavigatorNode(Node):
             and bool(self.object_goal)
             and not self._hold_position_after_success
         )
+
+    def _maybe_trigger_detection_interrupt(self):
+        """Run one immediate VLM step for a fresh target detection when ready."""
+        if not self._pending_detection_interrupt:
+            return
+        if not self._can_trigger_detection_interrupt():
+            return
+        if self.mapper.local_map is None:
+            return
+        if self._running_vlm_step:
+            return
+
+        # Ensure the immediate VLM input can actually render target on BEV.
+        self._update_target_state()
+        if self.target_pixel_local is None:
+            return
+
+        reason = self._pending_detection_reason or 'target update'
+        self._pending_detection_interrupt = False
+        self._pending_detection_reason = ''
+        self.get_logger().info(
+            f'Detection interrupt: {reason}. '
+            'Triggering immediate VLM step with target-rendered FOV BEV.'
+        )
+        self._run_vlm_step()
+        self.vlm_timer.reset()
 
     def _camera_origin_world_from_pose(self, pose_x: float, pose_y: float,
                                         pose_z: float, pose_yaw: float) -> Tuple[float, float, float]:

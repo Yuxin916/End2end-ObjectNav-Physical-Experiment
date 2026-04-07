@@ -293,19 +293,19 @@ vlm_navigator:
     # GroundingDINO scores are roughly in [0.3, 0.9]. 0.30 is permissive;
     # raise to 0.5 for fewer false positives in cluttered scenes.
     # Fix 2: raised from 0.30 → 0.40 to match box_threshold increase in sam2_detector.yaml.
-    target_confidence_threshold: 0.60
+    target_confidence_threshold: 0.40
 
     # Size of the temporal detection buffer (number of recent frames).
     # A detection is only confirmed if ≥ target_temporal_min_hits frames
     # within this buffer contain valid detections.
     # [DIAG] lowered to 1 to bypass temporal gate during stamp-fix validation
-    target_temporal_buffer_size: 3
+    target_temporal_buffer_size: 1
 
     # Minimum confirmed detections in the buffer to accept the target.
     # 2-of-3 (default) requires two consecutive detections — suppresses single spurious hits.
     # Set to 1 for faster target response (at cost of more false positives).
     # [DIAG] lowered to 1 — any single hit becomes a valid detection
-    target_temporal_min_hits: 2
+    target_temporal_min_hits: 1
 
     # Label matching mode: "exact" (case-sensitive) or "normalized" (alphanumeric only).
     # "normalized" converts "tv_monitor" → "tvmonitor" for robust string matching.
