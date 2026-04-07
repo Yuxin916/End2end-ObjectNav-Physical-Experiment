@@ -46,8 +46,8 @@ from rclpy.node import Node
 
 from sensor_msgs.msg import PointCloud2, Image
 from nav_msgs.msg import Odometry
-from geometry_msgs.msg import PointStamped, Pose2D
-from std_msgs.msg import String, Bool, Int8, Float32
+from geometry_msgs.msg import PointStamped
+from std_msgs.msg import String, Bool, Float32
 
 import cv2
 from PIL import Image as PILImage
@@ -163,8 +163,8 @@ class VLMNavigatorNode(Node):
         self._pose_received = False
         self._scan_received = False
         self._running_vlm_step = False
-        # Hold-stop mode after goal success. While enabled, keep publishing stop
-        # commands until a new non-empty /object_goal arrives.
+        # Hold mode after goal success. Blocks new detection-triggered VLM
+        # interrupts until a new non-empty /object_goal arrives.
         self._hold_position_after_success: bool = False
         # Goal rebroadcast: improves delivery when one-shot /object_goal publish
         # is missed by one of the subscribers during startup races.
@@ -232,19 +232,19 @@ class VLMNavigatorNode(Node):
         )
         # Track waypoint_converter's adjusted goal so distance checks use the
         # actual navigation target rather than the raw frontier position.
-        self.create_subscription(
-            PointStamped, '/way_point',
-            self._converted_waypoint_callback,
-            10
-        )
-        # waypoint_converter publishes this when the adjusted waypoint is reached.
-        # Use it as the primary trigger for the next VLM step (avoids the
-        # frontier_min_distance / goal_reached_threshold mismatch entirely).
-        self.create_subscription(
-            Float32, '/way_point_reached',
-            self._waypoint_reached_callback,
-            10
-        )
+        # self.create_subscription(
+        #     PointStamped, '/way_point',
+        #     self._converted_waypoint_callback,
+        #     10
+        # )
+        # # waypoint_converter publishes this when the adjusted waypoint is reached.
+        # # Use it as the primary trigger for the next VLM step (avoids the
+        # # frontier_min_distance / goal_reached_threshold mismatch entirely).
+        # self.create_subscription(
+        #     Float32, '/way_point_reached',
+        #     self._waypoint_reached_callback,
+        #     10
+        # )
         # ------------------------------------------------------------------
         # Publications
         # ------------------------------------------------------------------
@@ -302,9 +302,6 @@ class VLMNavigatorNode(Node):
         )
         self.goal_pub = self.create_publisher(
             String, '/object_goal', 10
-        )
-        self.stop_pub = self.create_publisher(
-            Int8, '/stop', 10
         )
         # ------------------------------------------------------------------
         # VLM inference timer
@@ -451,6 +448,11 @@ class VLMNavigatorNode(Node):
         self.declare_parameter('camera_project_height', 480)
         self.declare_parameter('camera_project_hfov_deg', 79.0)
         self.declare_parameter('camera_yaw_offset_deg', 0.0)
+        # Camera translation extrinsic in robot body frame (metres).
+        # Used to shift target-raycast origin from robot pose origin to camera optical center.
+        self.declare_parameter('camera_extrinsic_tx', 0.0)
+        self.declare_parameter('camera_extrinsic_ty', 0.0)
+        self.declare_parameter('camera_extrinsic_tz', 0.0)
         self.declare_parameter('camera_heading_sign', -1.0)
         self.declare_parameter('camera_heading_gain', 0.5)
         self.declare_parameter('camera_heading_use_initial_relative', True)
@@ -522,6 +524,9 @@ class VLMNavigatorNode(Node):
         self.camera_project_height = g('camera_project_height').value
         self.camera_project_hfov_deg = g('camera_project_hfov_deg').value
         self.camera_yaw_offset_deg = g('camera_yaw_offset_deg').value
+        self.camera_extrinsic_tx = float(g('camera_extrinsic_tx').value)
+        self.camera_extrinsic_ty = float(g('camera_extrinsic_ty').value)
+        self.camera_extrinsic_tz = float(g('camera_extrinsic_tz').value)
         self.camera_heading_sign = g('camera_heading_sign').value
         self.camera_heading_gain = g('camera_heading_gain').value
         self.camera_heading_use_initial_relative = g('camera_heading_use_initial_relative').value
@@ -710,6 +715,27 @@ class VLMNavigatorNode(Node):
         yawi = yaw0 + alpha * dyaw
 
         return xi, yi, zi, yawi, stamp_s
+
+    def _pose_stamp_alignment_metrics(self, stamp_s: float) -> Tuple[float, float, bool]:
+        """Return (nearest_pose_sample_dt_s, interp_bracket_span_s, is_bracketed)."""
+        if not self._pose_history:
+            return float('nan'), float('nan'), False
+
+        history = list(self._pose_history)
+        before = [e[0] for e in history if e[0] <= stamp_s]
+        after = [e[0] for e in history if e[0] > stamp_s]
+
+        candidates = []
+        if before:
+            candidates.append(abs(stamp_s - before[-1]))
+        if after:
+            candidates.append(abs(after[0] - stamp_s))
+        nearest_dt_s = min(candidates) if candidates else float('nan')
+
+        if before and after:
+            bracket_span_s = float(after[0] - before[-1])
+            return nearest_dt_s, bracket_span_s, True
+        return nearest_dt_s, float('nan'), False
 
     def _scan_callback(self, msg: PointCloud2):
         """Parse PointCloud2 → (N, 3) float32 array and update BEV map."""
@@ -1085,8 +1111,7 @@ class VLMNavigatorNode(Node):
                 # Release hold-stop only when a new non-empty goal is commanded.
                 if self._hold_position_after_success:
                     self._hold_position_after_success = False
-                    # self._publish_safety_stop(0)
-                    self.get_logger().info('Received new goal; released stop hold (/stop=0).')
+                    self.get_logger().info('Received new goal; released post-success hold.')
                 # Rebroadcast the received goal a few times to help peer nodes
                 # catch it if they missed the initial one-shot publication.
                 self._goal_rebroadcast_value = new_goal
@@ -1194,12 +1219,6 @@ class VLMNavigatorNode(Node):
             return
         self.goal_pub.publish(String(data=self._goal_rebroadcast_value))
         self._goal_rebroadcast_remaining -= 1
-
-    def _publish_safety_stop(self, level: int):
-        """Publish /stop command for pathFollower safety stop."""
-        stop_msg = Int8()
-        stop_msg.data = int(level)
-        self.stop_pub.publish(stop_msg)
 
     def _run_vlm_step(self):
         """Core step wrapper with re-entry guard."""
@@ -1502,9 +1521,7 @@ class VLMNavigatorNode(Node):
         done_msg.data = True
         self.target_reached_pub.publish(done_msg)
 
-        # Hold-stop until a new non-empty goal arrives.
-        # self._publish_safety_stop(2)
-        # self.get_logger().info('Published /stop=2 (safety stop hold).')
+        # Hold state until a new non-empty goal arrives.
         self._hold_position_after_success = True
         if self.latest_pose_x is not None:
             # Primary stop path: reset waypoint_converter's internal waypoint source.
@@ -1523,7 +1540,7 @@ class VLMNavigatorNode(Node):
             fake_wp_msg.point.z = 0.0
             self.fake_way_point_pub.publish(fake_wp_msg)
 
-            self.get_logger().info('Published stop Pose2D to /way_point_with_heading.')
+            self.get_logger().info('Published hold-position waypoint to /goal_point.')
         completed_goal = self.object_goal
         self.object_goal = ''
         self.current_wp_x = None
@@ -1943,6 +1960,26 @@ class VLMNavigatorNode(Node):
             and not self._hold_position_after_success
         )
 
+    def _camera_origin_world_from_pose(self, pose_x: float, pose_y: float,
+                                        pose_z: float, pose_yaw: float) -> Tuple[float, float, float]:
+        """Camera optical-center world position from robot pose + translation extrinsic.
+
+        Extrinsic convention:
+          - tx/ty/tz are in robot body frame, units: metres.
+          - +tx: forward, +ty: left, +tz: up.
+        """
+        tx = float(self.camera_extrinsic_tx)
+        ty = float(self.camera_extrinsic_ty)
+        tz = float(self.camera_extrinsic_tz)
+        cy = math.cos(float(pose_yaw))
+        sy = math.sin(float(pose_yaw))
+
+        cam_x = float(pose_x) + cy * tx - sy * ty
+        cam_y = float(pose_y) + sy * tx + cy * ty
+        base_z = float(pose_z) if pose_z is not None else 0.0
+        cam_z = base_z + tz
+        return cam_x, cam_y, cam_z
+
     def _raycast_obstacle_along_bearing(self, bearing_world: float,
                                          origin_x: float = None,
                                          origin_y: float = None) -> Tuple[float, float, bool]:
@@ -2058,11 +2095,14 @@ class VLMNavigatorNode(Node):
         now_wall = self.get_clock().now().nanoseconds / 1e9
         if det_stamp is not None:
             det_pose_x, det_pose_y, det_pose_z, det_yaw, matched_stamp = self._lookup_pose_at(float(det_stamp))
+            nearest_pose_dt_s, bracket_span_s, is_bracketed = self._pose_stamp_alignment_metrics(float(det_stamp))
+            bracket_span_text = f'{bracket_span_s * 1000:.1f}ms' if is_bracketed else 'n/a'
             self.get_logger().warn(
                 f'[target_localize] STAMP ALIGNMENT '
                 f'detection_stamp={float(det_stamp):.6f} '
                 f'matched_pose_stamp={matched_stamp:.6f} '
-                f'stamp_delta={abs(float(det_stamp) - matched_stamp) * 1000:.1f}ms '
+                f'nearest_pose_sample_delta={nearest_pose_dt_s * 1000:.1f}ms '
+                f'interp_bracket_span={bracket_span_text} '
                 f'now={now_wall:.6f} '
                 f'age_since_detection={(now_wall - float(det_stamp)) * 1000:.0f}ms | '
                 f'det_pose=({det_pose_x:.3f}, {det_pose_y:.3f}, {det_pose_z:.3f}) '
@@ -2105,20 +2145,24 @@ class VLMNavigatorNode(Node):
         # unit direction (cos(ψ - θ), sin(ψ - θ)).  Using ψ + θ mirrors left/right and
         # places the BEV target dot on the opposite side of the FOV from DET_CENTER.
         bearing_world = robot_yaw - theta
+        cam_origin_x, cam_origin_y, cam_origin_z = self._camera_origin_world_from_pose(
+            det_pose_x, det_pose_y, det_pose_z, det_yaw
+        )
         wx, wy, raycast_hit = self._raycast_obstacle_along_bearing(
-            bearing_world, origin_x=det_pose_x, origin_y=det_pose_y,
+            bearing_world, origin_x=cam_origin_x, origin_y=cam_origin_y,
         )
         self._target_raycast_hit = raycast_hit
 
         if not raycast_hit:
             self._file_logger.info(
                 f'[target_state] SKIP — no obstacle along bearing '
-                f'{math.degrees(bearing_world):.1f}deg; target not locked'
+                f'{math.degrees(bearing_world):.1f}deg; target not locked '
+                f'(ray origin=cam [{cam_origin_x:.3f}, {cam_origin_y:.3f}] m)'
             )
             return
 
-        wz = float(det_pose_z) if det_pose_z is not None else 0.0
-        raycast_dist = math.sqrt((wx - float(det_pose_x))**2 + (wy - float(det_pose_y))**2)
+        wz = float(cam_origin_z)
+        raycast_dist = math.sqrt((wx - float(cam_origin_x))**2 + (wy - float(cam_origin_y))**2)
 
         if self.target_birth_rgb is None and self.latest_rgb_pil is not None:
             self.target_birth_rgb = self.latest_rgb_pil
@@ -2135,6 +2179,7 @@ class VLMNavigatorNode(Node):
         self._file_logger.info(
             f'[target_state] LOCKING bearing theta_img={math.degrees(theta_img):.1f}deg '
             f'theta={math.degrees(theta):.1f}deg raycast_hit={raycast_hit} dist={raycast_dist:.2f}m '
+            f'cam_origin=({cam_origin_x:.3f},{cam_origin_y:.3f},{cam_origin_z:.3f}) '
             f'wp=({wx:.3f},{wy:.3f}) pixel=({pr:.1f},{pc:.1f}) in_local={in_local} '
             f'label={label}'
         )
