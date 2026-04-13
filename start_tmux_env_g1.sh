@@ -51,11 +51,13 @@ tmux send-keys -t "$SESSION_NAME":0.1 "ros2 launch vlm_nav_bridge vlm_nav_bridge
 # Pane 2: SAM2/YOLOE object detector
 tmux send-keys -t "$SESSION_NAME":0.2 "ros2 launch sam2_detector sam2_detector.launch.py" C-m
 
-# Pane 3: RealSense camera driver (publishes /camera/color/image_raw at 640x480x30)
+# Pane 3: RealSense camera driver
 tmux send-keys -t "$SESSION_NAME":0.3 "ros2 launch realsense2_camera rs_launch.py pointcloud.enable:=false depth_module.profile:=640x480x30 rgb_camera.profile:=640x480x30" C-m
 
-# Pane 4-5: free for manual commands (e.g. publishing /object_goal, arm gesture services)
-tmux send-keys -t "$SESSION_NAME":0.4 "echo 'G1 environment ready — pane 4 free'" C-m
+# Pane 4: Relay RealSense RGB to the legacy /camera/image interface for downstream consumers
+tmux send-keys -t "$SESSION_NAME":0.4 "ros2 run image_transport republish raw --ros-args -r in:=/camera/camera/color/image_raw -r out:=/camera/image" C-m
+
+# Pane 5: free for manual commands (e.g. publishing /object_goal, arm gesture services)
 tmux send-keys -t "$SESSION_NAME":0.5 "echo 'G1 environment ready — pane 5 free'" C-m
 
 tmux attach -t "$SESSION_NAME"
