@@ -32,10 +32,7 @@ source ~/unitree_venv/bin/activate
 pip install PyYAML
 
 # Install unitree_webrtc_connect
-cd ~
-git clone https://github.com/VectorRobotics/unitree_webrtc_connect.git
-cd unitree_webrtc_connect
-pip install -e .
+pip install unitree_webrtc_connect
 ```
 
 ### Step 2: Build the ROS 2 package

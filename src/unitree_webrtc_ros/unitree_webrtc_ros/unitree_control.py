@@ -50,6 +50,7 @@ class UnitreeControlNode(Node):
         self.conn = None
         self.loop = None
         self.connected = threading.Event()
+        self.connection_error = None
 
         # Start connection in background thread
         self.connection_thread = threading.Thread(target=self._connection_worker, daemon=True)
@@ -59,6 +60,8 @@ class UnitreeControlNode(Node):
         if not self.connected.wait(timeout=30.0):
             self.get_logger().error('Failed to connect to robot within timeout')
             raise RuntimeError('Connection timeout')
+        if self.connection_error is not None:
+            raise RuntimeError(f'Connection failed: {self.connection_error}')
 
         self.get_logger().info('Successfully connected to robot')
 
@@ -109,6 +112,7 @@ class UnitreeControlNode(Node):
             # Keep the loop running
             self.loop.run_forever()
         except Exception as e:
+            self.connection_error = str(e)
             self.get_logger().error(f'Connection error: {e}')
             self.connected.set()  # Release waiting thread even on error
         finally:

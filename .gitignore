@@ -30,3 +30,9 @@ src/base_autonomy/vehicle_simulator/log/*
 saved_unity_demo/
 .idea/
 bags/
+*.egg-infolsusb
+*.egg-info
+*.egg
+dist/
+build/
+*.egg-info/

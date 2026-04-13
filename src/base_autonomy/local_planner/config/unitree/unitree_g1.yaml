@@ -94,7 +94,8 @@ pathFollower:
     sensorOffsetX: 0.0
     sensorOffsetY: 0.0
 
-    # Serial / robot interface
+    # Serial / robot interface — disabled for G1 (cmd_vel goes to WebRTC, not serial)
+    useSerialPort: false
     serialPort: /dev/ttyACM0
     baudrate: 115200
     pubSkipNum: 1
