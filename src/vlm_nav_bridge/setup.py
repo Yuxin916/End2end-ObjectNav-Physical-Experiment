@@ -35,6 +35,7 @@ setup(
     entry_points={
         'console_scripts': [
             'vlm_navigator = vlm_nav_bridge.vlm_navigator_node:main',
+            'rs_tcp_receiver = vlm_nav_bridge.rs_tcp_receiver_node:main',
         ],
     },
 )

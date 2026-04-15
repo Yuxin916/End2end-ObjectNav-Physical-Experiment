@@ -33,7 +33,7 @@ def generate_launch_description():
     args = [
         DeclareLaunchArgument(
             'checkpoint',
-            default_value='../all_log/experiments/prompt_revision/a100_dualvit_llm-64_mlp-train-patch-32768-acc1_BEVftFOV_FrontierRGB_PosD__FRONTIER_PIXEL_NUMBER_ONLY/checkpoints',
+            default_value='/home/tsaisplus/projects/checkpoints/PosD/checkpoints',
                               description='Absolute path to InternVL checkpoint directory'),
         DeclareLaunchArgument('template',
                               default_value='BEVftFOV_FrontierRGB_PosD__FRONTIER_PIXEL_NUMBER_ONLY_STRATEGY2',
@@ -67,6 +67,19 @@ def generate_launch_description():
         parameters=[
             # Load defaults from YAML
             LaunchConfiguration('config_file'),
+            # Launch arguments override YAML when provided.
+            {
+                'checkpoint': LaunchConfiguration('checkpoint'),
+                'template': LaunchConfiguration('template'),
+                'device': LaunchConfiguration('device'),
+                'inference_interval': LaunchConfiguration('inference_interval'),
+                'pad2square': LaunchConfiguration('pad2square'),
+                'normalize_type': LaunchConfiguration('normalize_type'),
+                'target_detection_topic': LaunchConfiguration('target_detection_topic'),
+                'target_confidence_threshold': LaunchConfiguration('target_confidence_threshold'),
+                'target_require_sam2': LaunchConfiguration('target_require_sam2'),
+                'bev_only': LaunchConfiguration('bev_only'),
+            },
         ],
         # Remappings if topic names differ
         remappings=[

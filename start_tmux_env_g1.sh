@@ -3,7 +3,7 @@
 # Pane 0: base nav stack (SLAM + local planner + Livox + G1 WebRTC)
 # Pane 1: VLM navigation bridge
 # Pane 2: SAM2/YOLOE object detector
-# Pane 3: RealSense camera driver
+# Pane 3: TCP RealSense receiver -> /camera/image
 # Pane 4-5: free terminals
 set -e
 
@@ -51,11 +51,11 @@ tmux send-keys -t "$SESSION_NAME":0.1 "ros2 launch vlm_nav_bridge vlm_nav_bridge
 # Pane 2: SAM2/YOLOE object detector
 tmux send-keys -t "$SESSION_NAME":0.2 "ros2 launch sam2_detector sam2_detector.launch.py" C-m
 
-# Pane 3: RealSense camera driver
-tmux send-keys -t "$SESSION_NAME":0.3 "ros2 launch realsense2_camera rs_launch.py pointcloud.enable:=false depth_module.profile:=640x480x30 rgb_camera.profile:=640x480x30" C-m
+# Pane 3: Receive JPEG frames from Jetson over TCP and publish /camera/image
+tmux send-keys -t "$SESSION_NAME":0.3 "ros2 launch vlm_nav_bridge rs_tcp_receiver.launch.py" C-m
 
-# Pane 4: Relay RealSense RGB to the legacy /camera/image interface for downstream consumers
-tmux send-keys -t "$SESSION_NAME":0.4 "ros2 run image_transport republish raw --ros-args -r in:=/camera/camera/color/image_raw -r out:=/camera/image" C-m
+# Pane 4: free for camera/topic diagnostics
+tmux send-keys -t "$SESSION_NAME":0.4 "echo 'Camera TCP receiver ready — pane 4 free for diagnostics'" C-m
 
 # Pane 5: free for manual commands (e.g. publishing /object_goal, arm gesture services)
 tmux send-keys -t "$SESSION_NAME":0.5 "echo 'G1 environment ready — pane 5 free'" C-m

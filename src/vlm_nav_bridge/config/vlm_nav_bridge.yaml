@@ -10,7 +10,7 @@ vlm_navigator:
     # Path to InternVL checkpoint directory (contains pytorch_model*.bin + config.json).
     # Relative paths are resolved from the repo root.
     # PosD is the best-performing deployable template (dual-ViT, angular soft CE training).
-    checkpoint: "../checkpoints/PosD/checkpoints"
+    checkpoint: "/home/tsaisplus/projects/checkpoints/PosD/checkpoints"
 
     # Prompt template — must match the checkpoint.
     # Single-ViT templates (no camera required):
