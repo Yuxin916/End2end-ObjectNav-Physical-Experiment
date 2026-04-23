@@ -39,7 +39,12 @@ using namespace std;
 
 const double PI = 3.1415926;
 
+double normalizeAngle(double angle) {
+  return atan2(sin(angle), cos(angle));
+}
+
 bool realRobot = false;
+bool useSerialPort = true;
 string serialPort = "/dev/ttyACM0";
 int baudrate = 115200;
 double sensorOffsetX = 0;
@@ -75,6 +80,10 @@ bool manualMode = false;
 bool autonomyMode = false;
 double autonomySpeed = 1.0;
 double joyToSpeedDelay = 2.0;
+
+double goalYaw = 0;
+bool hasGoalYaw = false;
+double goalYawGain = 2.0;
 
 float joySpeed = 0;
 float joySpeedRaw = 0;
@@ -146,6 +155,24 @@ void pathHandler(const nav_msgs::msg::Path::ConstSharedPtr pathIn)
     path.poses[i].pose.position.x = pathIn->poses[i].pose.position.x;
     path.poses[i].pose.position.y = pathIn->poses[i].pose.position.y;
     path.poses[i].pose.position.z = pathIn->poses[i].pose.position.z;
+    path.poses[i].pose.orientation = pathIn->poses[i].pose.orientation;
+  }
+
+  if (pathSize > 0) {
+    auto& lastOrientation = path.poses[pathSize - 1].pose.orientation;
+    if (lastOrientation.w != 0 || lastOrientation.x != 0 ||
+        lastOrientation.y != 0 || lastOrientation.z != 0) {
+      tf2::Quaternion q(lastOrientation.x, lastOrientation.y,
+                        lastOrientation.z, lastOrientation.w);
+      double roll, pitch, yaw;
+      tf2::Matrix3x3(q).getRPY(roll, pitch, yaw);
+      goalYaw = yaw;
+      hasGoalYaw = true;
+    } else {
+      hasGoalYaw = false;
+    }
+  } else {
+    hasGoalYaw = false;
   }
 
   vehicleXRec = vehicleX;
@@ -218,6 +245,7 @@ int main(int argc, char** argv)
   nh = rclcpp::Node::make_shared("pathFollower");
 
   nh->declare_parameter<bool>("realRobot", realRobot);
+  nh->declare_parameter<bool>("useSerialPort", useSerialPort);
   nh->declare_parameter<string>("serialPort", serialPort);
   nh->declare_parameter<int>("baudrate", baudrate);
   nh->declare_parameter<double>("sensorOffsetX", sensorOffsetX);
@@ -251,8 +279,10 @@ int main(int argc, char** argv)
   nh->declare_parameter<bool>("autonomyMode", autonomyMode);
   nh->declare_parameter<double>("autonomySpeed", autonomySpeed);
   nh->declare_parameter<double>("joyToSpeedDelay", joyToSpeedDelay);
+  nh->declare_parameter<double>("goalYawGain", goalYawGain);
 
   nh->get_parameter("realRobot", realRobot);
+  nh->get_parameter("useSerialPort", useSerialPort);
   nh->get_parameter("serialPort", serialPort);
   nh->get_parameter("baudrate", baudrate);
   nh->get_parameter("sensorOffsetX", sensorOffsetX);
@@ -286,6 +316,7 @@ int main(int argc, char** argv)
   nh->get_parameter("autonomyMode", autonomyMode);
   nh->get_parameter("autonomySpeed", autonomySpeed);
   nh->get_parameter("joyToSpeedDelay", joyToSpeedDelay);
+  nh->get_parameter("goalYawGain", goalYawGain);
 
   auto subOdom = nh->create_subscription<nav_msgs::msg::Odometry>("/state_estimation", 5, odomHandler);
 
@@ -384,9 +415,17 @@ int main(int argc, char** argv)
       if (vehicleYawRate > maxYawRate * PI / 180.0) vehicleYawRate = maxYawRate * PI / 180.0;
       else if (vehicleYawRate < -maxYawRate * PI / 180.0) vehicleYawRate = -maxYawRate * PI / 180.0;
 
+      if (hasGoalYaw && pathPointID >= pathSize - 1 && endDis < stopDisThre && !noRotAtGoal) {
+        double yawError = normalizeAngle(goalYaw - vehicleYaw);
+        vehicleYawRate = goalYawGain * yawError;
+        if (vehicleYawRate > maxYawRate * PI / 180.0) vehicleYawRate = maxYawRate * PI / 180.0;
+        else if (vehicleYawRate < -maxYawRate * PI / 180.0) vehicleYawRate = -maxYawRate * PI / 180.0;
+        joySpeed2 = 0;
+      }
+
       if (joySpeed2 == 0 && !autonomyMode) {
         vehicleYawRate = maxYawRate * joyYaw * PI / 180.0;
-      } else if (pathSize <= 1 || (dis < stopDisThre && noRotAtGoal)) {
+      } else if ((pathSize <= 1 && !hasGoalYaw) || (dis < stopDisThre && noRotAtGoal && !hasGoalYaw)) {
         vehicleYawRate = 0;
       }
 
@@ -442,7 +481,7 @@ int main(int argc, char** argv)
         pubSpeed->publish(cmd_vel);
         pubSkipCount = pubSkipNum;
 
-        if (realRobot) {
+        if (realRobot && useSerialPort) {
           if (serialOpen) {
             value = cmd_vel.twist.linear.x;
             memcpy(serialBuffer, &value, size);

@@ -5,7 +5,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, TimerAction
 from launch.launch_description_sources import PythonLaunchDescriptionSource, FrontendLaunchDescriptionSource
 from launch_ros.actions import Node
-from launch.substitutions import LaunchConfiguration 
+from launch.substitutions import LaunchConfiguration
 
 def generate_launch_description():
   world_name = LaunchConfiguration('world_name')
@@ -19,6 +19,7 @@ def generate_launch_description():
   robot_ip = LaunchConfiguration('robot_ip')
   connection_method = LaunchConfiguration('connection_method')
   control_mode = LaunchConfiguration('control_mode')
+  joy_dev = LaunchConfiguration('joy_dev')
 
   declare_world_name = DeclareLaunchArgument('world_name', default_value='real_world', description='')
   declare_sensorOffsetX = DeclareLaunchArgument('sensorOffsetX', default_value='0.05', description='')
@@ -30,21 +31,28 @@ def generate_launch_description():
 
   declare_robot_ip = DeclareLaunchArgument(
     'robot_ip',
-    default_value='192.168.12.1',
-    description='Unitree robot IP address'
+    default_value='192.168.123.161',
+    description='Unitree G1 robot IP address (ethernet: 192.168.123.161)'
   )
 
   declare_connection_method = DeclareLaunchArgument(
     'connection_method',
-    default_value='LocalAP',
-    description='Unitree connection method (e.g., LocalAP, Ethernet)'
+    default_value='LocalSTA',
+    description='Unitree connection method: LocalSTA for ethernet, LocalAP for robot WiFi'
   )
 
   declare_control_mode = DeclareLaunchArgument(
     'control_mode',
     default_value='wireless_controller',
-    description='Unitree control mode'
+    description='Unitree G1 control mode: wireless_controller or sport_cmd'
   )
+
+  declare_joy_dev = DeclareLaunchArgument(
+    'joy_dev',
+    default_value='/dev/input/js0',
+    description='Joystick device path, preferably /dev/input/by-id/...-joystick'
+  )
+
   start_local_planner = IncludeLaunchDescription(
     PythonLaunchDescriptionSource(os.path.join(
       get_package_share_directory('local_planner'), 'launch', 'local_planner.launch.py')
@@ -96,12 +104,12 @@ def generate_launch_description():
   )
 
   start_joy = Node(
-    package='joy', 
+    package='joy',
     executable='joy_node',
     name='ps3_joy',
     output='screen',
     parameters=[{
-      'dev': "/dev/input/js0",
+      'dev': joy_dev,
       'deadzone': 0.12,
       'autorepeat_rate': 0.0,
     }]
@@ -112,7 +120,8 @@ def generate_launch_description():
       [get_package_share_directory('livox_ros_driver2'), '/launch_ROS2/msg_MID360_launch.py']),
   )
 
-  start_unitree_webrtc = IncludeLaunchDescription(
+  # G1-specific WebRTC control node (subscribes to cmd_vel, supports arm gestures)
+  start_g1_webrtc = IncludeLaunchDescription(
     PythonLaunchDescriptionSource(os.path.join(
       get_package_share_directory('unitree_webrtc_ros'),
       'launch',
@@ -128,7 +137,6 @@ def generate_launch_description():
 
   ld = LaunchDescription()
 
-  # Add the actions
   ld.add_action(declare_world_name)
   ld.add_action(declare_sensorOffsetX)
   ld.add_action(declare_sensorOffsetY)
@@ -136,12 +144,11 @@ def generate_launch_description():
   ld.add_action(declare_vehicleX)
   ld.add_action(declare_vehicleY)
   ld.add_action(declare_checkTerrainConn)
-
   ld.add_action(declare_robot_ip)
   ld.add_action(declare_connection_method)
   ld.add_action(declare_control_mode)
+  ld.add_action(declare_joy_dev)
 
-  # Add actions
   ld.add_action(start_local_planner)
   ld.add_action(start_terrain_analysis)
   ld.add_action(start_terrain_analysis_ext)
@@ -150,6 +157,6 @@ def generate_launch_description():
   ld.add_action(start_visualization_tools)
   ld.add_action(start_joy)
   ld.add_action(start_mid360)
-  ld.add_action(start_unitree_webrtc)
+  ld.add_action(start_g1_webrtc)
 
   return ld
