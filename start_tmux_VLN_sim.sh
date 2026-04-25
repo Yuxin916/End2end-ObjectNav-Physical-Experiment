@@ -1,8 +1,11 @@
-#!/usr/bin/env zsh
+#!/usr/bin/env bash
 set -e
 
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 SESSION_NAME="sagan_nav_physical_experiment"
-WORKDIR="./"
+WORKDIR="$SCRIPT_DIR"
+export ROS_LOG_DIR="$WORKDIR/.ros/log"
+mkdir -p "$ROS_LOG_DIR"
 
 # kill existing session if exists
 if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
@@ -25,6 +28,11 @@ pkill -f "vehicleSimulator" 2>/dev/null || true
 echo "Removing ./debug_images ..."
 rm -rf "./debug_images"
 
+# make sure the latest bridge and simulator image republisher code are installed
+echo "Building vln_bridge and vehicle_simulator ..."
+source /opt/ros/jazzy/setup.bash
+colcon build --packages-select vln_bridge vehicle_simulator --symlink-install
+
 # create new detached session
 tmux new-session -d -s "$SESSION_NAME" -c "$WORKDIR"
 
@@ -36,13 +44,12 @@ for i in $(seq 1 5); do
 done
 
 # setup for all panes
-# tmux starts interactive zsh shells, so ~/.zshrc already handles venv + ROS sourcing.
-FULL_SETUP="cd \"$WORKDIR\""
+FULL_SETUP="cd \"$WORKDIR\" && export ROS_LOG_DIR=\"$ROS_LOG_DIR\" && mkdir -p \"$ROS_LOG_DIR\" && source \"$WORKDIR/install/setup.bash\""
 
 # commands to run
 CMD_PANE0="./system_simulation.sh"
-CMD_PANE1="ros2 launch vlm_nav_bridge vlm_nav_bridge.launch.py"
-# CMD_PANE2="ros2 launch sam2_detector sam2_detector.launch.py"
+CMD_PANE1="ros2 launch vln_bridge vln_bridge.launch.py depth_topic:=/camera/depth instruction_topic:=/instruction"
+CMD_PANE2="bash \"$WORKDIR/instruction_console.sh\""
 
 # send full setup to all 6 panes
 for pane in 0 1 2 3 4 5; do

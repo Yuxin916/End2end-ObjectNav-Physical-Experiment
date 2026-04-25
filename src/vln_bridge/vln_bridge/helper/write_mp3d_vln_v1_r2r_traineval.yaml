@@ -1,0 +1,209 @@
+# @package _global_
+
+defaults:
+  - /habitat: habitat_config_base
+  - /habitat/task: vln_r2r
+  - /habitat/simulator/sensor_setups@habitat.simulator.agents.main_agent: rgbds_agent
+  - /habitat/dataset/vln: mp3d_r2r
+  - override /habitat/task/lab_sensors:
+      - instruction_sensor
+      - compass_sensor
+      - gps_sensor
+  - override /habitat/task/measurements:
+      - distance_to_goal
+      - success
+      - spl
+      - soft_spl
+      # - ndtw
+      # - sdtw
+      - path_length
+      - oracle_navigation_error
+      - oracle_success
+      - oracle_spl
+      - steps_taken
+      - top_down_map_vlnce
+  - _self_
+
+# hydra.searchpath can only be configured in the primary config.
+# Attempting to configure it in other configs will result in an error.
+hydra:
+  searchpath:
+    - file://../configs_hydra/basic/
+  run:
+    dir: "../all_log/log/hydra/{exp_name}"
+  job:
+    name: "{exp_name}"
+
+semantic_prediction:
+  # mask rcnn
+  matterport_id_mapping: '../VLN_dataset/data/matterport_semantics/matterport_category_mappings.tsv'
+  sem_pred_config: '../configs_hydra/COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml'
+  sem_pred_prob_thr: 0.50 # Semantic prediction confidence threshold
+  sem_gpu_id: 0  # GPU ID for semantic model
+  visualize: 1 # render rgb observation with semantic predictions
+
+  # groundedsam2
+  SAM2_CHECKPOINT: "../Grounded-SAM-2/checkpoints/sam2.1_hiera_large.pt"
+  SAM2_MODEL_CONFIG: "../Grounded-SAM-2/sam2/configs/sam2.1/sam2.1_hiera_l.yaml"
+  GROUNDING_DINO_CONFIG: "../Grounded-SAM-2/grounding_dino/groundingdino/config/GroundingDINO_SwinT_OGC.py"
+  GROUNDING_DINO_CHECKPOINT: "../Grounded-SAM-2/gdino_checkpoints/groundingdino_swint_ogc.pth"
+  BOX_THRESHOLD: 0.35
+  TEXT_THRESHOLD: 0.25
+
+
+
+mapping:
+  env_frame_width: 256
+  env_frame_height: 256
+  frame_width: 256
+  frame_height: 256
+  du_scale: 1
+  vision_range: 100  # cells - with max_depth=4.85m and resolution=0.05m/cell, sensor sees 97 cells. Using 100 for margin (5m radius).
+  num_sem_categories: 40
+  num_sem_categories_room:
+  cat_pred_threshold: 5.0
+  map_pred_threshold: 1.0  # Require more voxel hits to mark as obstacle (reduces far-distance noise)
+  exp_pred_threshold: 1.0
+  collision_threshold: 0.20
+  obstacle_height_min: 0.1   # meters - minimum height for obstacle detection (ground level)
+  obstacle_height_max: 1.8   # meters - maximum height for obstacle detection (below door headers ~2.0m)
+  floor_height: 0.0          # meters - minimum heightmax_depth for floor detection (below ground)
+  # how many number of map to obtain in one pass
+  # should be aligned with batch size for VLM training
+
+  map_size: 44.8  # meters - must be >= 2*vision_range*resolution*downscaling (2*100*0.05*2=20m, using 36m for margin)
+  map_resolution: 0.05  # meters/cell (was 5 cm/cell)
+  # the ratio between global map and local map
+  global_downscaling: 2
+  blind_area_max_distance: 1.3 # 盲区最大距离
+  
+  # Frontier extraction parameters
+  frontier_extraction:
+    exp_threshold: 0.1  # threshold for explored area (0-1)
+    dilate_wall_ksize: 1  # wall dilation kernel size (1=no dilation, 3=small safety margin, 5=larger margin)
+    close_explore_ksize: 5  # morphological closing kernel to fill small gaps in exploration
+    min_frontier_area: 4  # minimum connected component area (cells) to be considered a frontier
+    clear_border_px: 2  # clear frontiers within this many pixels from map border
+    trajectory_clearance_cells: 0  # extra cells to clear around trajectory (beyond agent radius)
+  
+  # BEV visualization settings
+  visualization:
+    # Zoom and crop settings
+    crop_radius: 150  # cells - zoom radius around agent (150 cells = 7.5m at 0.05m/cell)
+    output_size: 448  # pixels - final output image size (width and height)
+    
+    # Agent arrow appearance
+    arrow_color: [255, 0, 0]  # RGB - red arrow for agent heading
+    arrow_len_px: 22  # pixels - length of arrow shaft
+    arrow_width: 4  # pixels - width of arrow line
+    arrow_head_length: 10  # pixels - length of arrowhead
+    arrow_head_width: 8  # pixels - width of arrowhead
+    mark_radius: 4  # pixels - radius of center mark circle
+    
+    # Trajectory trail appearance
+    trail_color: [0, 0, 255]  # RGB - blue trail for visited path
+    trail_alpha: 200  # 0-255 - transparency of trail overlay
+    trail_erode_ksize: 3  # pixels - erosion kernel size to thin trail
+    
+    # Frontier point appearance
+    frontier_dot_radius: 5  # pixels - radius of frontier point circles
+    frontier_color: [0, 255, 0]  # RGB - green for frontier points
+    frontier_outline: [255, 255, 255]  # RGB - white outline for frontier points
+    frontier_width: 2  # pixels - width of frontier circle outline
+    frontier_font_size: 16  # pixels - font size for frontier labels
+    
+    # Selected frontier appearance
+    selected_frontier_color: [255, 215, 0]  # RGB - gold for selected frontier
+    selected_line_width: 3  # pixels - width of line to selected frontier
+    selected_ring_radius: 7  # pixels - radius of ring around selected frontier
+    selected_show_index: false  # whether to show frontier number next to selected frontier
+    selected_index_color: [255, 255, 255]  # RGB - white text for frontier number (if shown)
+    
+    # Frontier selection algorithm
+    frontier_selection_mode: hybrid  # "nearest" | "heading" | "hybrid"
+    frontier_weight_distance: 0.3  # weight for distance in hybrid mode (0-1)
+    frontier_weight_heading: 0.7  # weight for heading alignment in hybrid mode (0-1)
+    frontier_angle_cone_deg: 180  # field of view cone for frontier filtering (degrees, null=no filtering)
+    frontier_top_k: 5  # number of top frontiers to extract and visualize
+    
+    # Map display colors (grayscale 0-255)
+    gray_unknown: 127  # unexplored areas
+    gray_free: 255  # free space (white)
+    gray_occupied: 0  # obstacles (black)
+    # History RGBD accumulation (for temporal aggregation)
+    history_window_size: 5  # number of frames to accumulate (sliding window)
+    history_save_interval: 10000  # save history RGB every N steps
+    history_sparse_factor_old: 1  # subsampling factor for older frames (1=no subsampling, all frames dense)
+
+    # fov 
+    fov_color: [100, 200, 255]
+    fov_alpha: 0.3
+
+habitat:
+  env_task: "AnnotatedGymHabitatEnv"
+  environment:
+    max_episode_steps: 500
+  simulator:
+    type: Sim-v0
+    scene_dataset: "../../VLN_dataset/data/scene_datasets/mp3d/mp3d.scene_dataset_config.json"
+    agents:
+      main_agent:
+        height: 0.88
+        radius: 0.18
+        sim_sensors:
+          rgb_sensor:
+            width: 256
+            height: 256
+            hfov: 90
+            position: [0, 0.88, 0]
+            type: HabitatSimRGBSensor
+          depth_sensor:
+            width: 256
+            height: 256
+            position: [0, 0.88, 0]
+            min_depth: 0.5
+            max_depth: 5.00
+            normalize_depth: false
+    forward_step_size: 0.25
+    turn_angle: 15
+    habitat_sim_v0:
+      gpu_device_id: 0
+  dataset:
+    type: R2RVLN-v2
+    # split: val_seen
+    # split: train
+    split: train_eval50
+    # split: val_unseen
+    # split: debug
+    data_path: "../../VLN_dataset/data/datasets/instruction_follow/mp3d/r2r/v1-3/{split}/{split}.json.gz"
+    scenes_dir: "../../VLN_dataset/data/scene_datasets/"
+  task:
+    measurements:
+      success:
+        success_distance: 3.0
+      top_down_map_vlnce:
+        map_padding: 3
+        map_resolution: 1024
+        draw_source_and_target: True
+        draw_reference_path: True
+        draw_fixed_waypoints: True
+        draw_mp3d_agent_path: True
+        graphs_file: "../../VLN_dataset/data/connectivity_graphs.pkl"
+        draw_source: True
+        draw_border: True
+        draw_shortest_path: True
+        draw_view_points: True
+        draw_goal_positions: True
+        # axes aligned bounding boxes
+        draw_goal_aabbs: True
+        fog_of_war:
+          draw: True
+          visibility_dist: 5.0
+          fov: 90
+
+    reward_measure: "success" # TODO
+    success_measure: "success" # TODO
+
+experiment_mode: visualization
+environment: "habitat" # "habitat" or "real_world"
+cuda: true

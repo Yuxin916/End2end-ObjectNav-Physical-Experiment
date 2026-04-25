@@ -1,0 +1,117 @@
+vlm_navigator:
+  ros__parameters:
+
+    # ----------------------------------------------------------------------
+    # VLM
+    # ----------------------------------------------------------------------
+    checkpoint: "/home/all/muyi/End2end-ObjectNav-Physical-Experiment/checkpoints/ALLdata_NL03_paddingEmbedding12400"
+    instruction_topic: "/instruction"
+    template: "RGB_HisKFSingleColor"
+    output_template: "pixelintext"
+    device: "cuda:0"
+    num_beams: 1
+    max_new_tokens: 8
+    min_new_tokens: 8
+    temperature: 0.0
+    do_sample: false
+    pad2square: true
+    normalize_type: "imagenet"
+    vlm_load_delay_sec: 2.0
+    vlm_auto_infer: true
+    vlm_inference_interval_sec: 2.0
+
+    # Current-image padding used by Go2Pixel-style pixel output.
+    vlm_padding_px: 8
+
+    # ----------------------------------------------------------------------
+    # Waypoint / Control
+    # ----------------------------------------------------------------------
+    waypoint_frame: "map"
+    waypoint_turn_distance_m: 5.0
+    waypoint_turn_angle_deg: 30.0
+    waypoint_max_step_m: 0.0
+
+    # Best-effort direct turn-in-place command sent on /cmd_vel for left/right
+    # padding outputs. Local planner may still influence the final motion.
+    direct_turn_rate_rad_s: 0.6
+    direct_turn_duration_sec: 1.0
+
+    # ----------------------------------------------------------------------
+    # Depth
+    # ----------------------------------------------------------------------
+    # Simulation publishes /camera/depth by default.
+    depth_topic: "/camera/depth"
+    depth_process_hz: 10.0
+    depth_min_m: 0.5
+    depth_max_m: 10.0
+    depth_sampling_radius_px: 2
+    scan_depth_topic: "/registered_scan"
+    scan_depth_process_hz: 5.0
+    scan_depth_max_points: 200000
+    scan_depth_point_radius_px: 1
+    scan_depth_interp_enable: true
+    scan_depth_interp_max_dist_px: 12.0
+    scan_depth_interp_kernel_px: 5
+    scan_depth_interp_iterations: 3
+    scan_depth_min_height_m: -1.0
+    scan_depth_max_height_m: 2.0
+    scan_depth_camera_z_offset_m: 0.0
+    scan_depth_ground_fill_enable: true
+    scan_depth_ground_fill_radius_m: 2.0
+    scan_depth_ground_fill_inner_radius_m: 0.0
+    scan_depth_ground_fill_spacing_m: 0.06
+
+    # ----------------------------------------------------------------------
+    # Camera
+    # ----------------------------------------------------------------------
+    camera_topic: "/camera/image"
+    camera_process_hz: 5.0
+    camera_is_panorama: true
+    camera_project_width: 256
+    camera_project_height: 256
+    camera_project_hfov_deg: 90.0
+    camera_height_m: 0.88
+    camera_elevation_deg: 0.0
+    camera_panorama_lock_to_vehicle: true
+    camera_yaw_offset_deg: 0.0
+    camera_heading_sign: -1.0
+    camera_heading_gain: 0.5
+    camera_heading_use_initial_relative: true
+    camera_heading_motion_min_displacement_m: 0.05
+    camera_heading_smoothing_alpha: 0.0
+    camera_heading_debug_log_interval_sec: 2.0
+
+    # ----------------------------------------------------------------------
+    # History
+    # ----------------------------------------------------------------------
+    history_length: 8
+    history_max_entries: 1024
+    history_sensor_height_m: 0.88
+    history_camera_elevation_deg: 0.0
+    history_keyframe_translation_m: 0.25
+    history_keyframe_rotation_deg: 15.0
+    history_keyframe_time_sec: 0.75
+    history_look_ahead: 2
+    history_visibility_distance_threshold_m: 0.90
+    history_visibility_patch_radius_px: 2
+    history_blind_radius_m: 1.00
+    history_storage_merge_distance_m: 0.10
+    history_draw_merge_distance_m: 0.10
+    history_depth_min_m: 0.5
+    history_depth_max_m: 5.0
+
+    # ----------------------------------------------------------------------
+    # Optional detection debug
+    # ----------------------------------------------------------------------
+    target_detection_topic: "/target_detection"
+    target_confidence_threshold: 0.30
+    target_temporal_buffer_size: 3
+    target_temporal_min_hits: 2
+    target_require_sam2: false
+    target_state_ttl_sec: 2.0
+
+    # ----------------------------------------------------------------------
+    # Debug outputs
+    # ----------------------------------------------------------------------
+    debug_save_dir: ""
+    debug_save_interval_sec: 1.0
