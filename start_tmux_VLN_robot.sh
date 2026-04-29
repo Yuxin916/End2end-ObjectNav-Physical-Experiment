@@ -7,6 +7,7 @@ set -e
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 SESSION_NAME="sagan_nav_vln_robot"
 WORKDIR="$SCRIPT_DIR"
+CAMDIR="$WORKDIR/../360_camera/"
 export ROS_LOG_DIR="$WORKDIR/.ros/log"
 mkdir -p "$ROS_LOG_DIR"
 
@@ -33,7 +34,7 @@ for i in $(seq 1 4); do
     tmux select-layout -t "$SESSION_NAME":0 tiled
 done
 
-FULL_SETUP="cd \"$WORKDIR\" && export ROS_LOG_DIR=\"$ROS_LOG_DIR\" && mkdir -p \"$ROS_LOG_DIR\" && export ROS_DOMAIN_ID=79 && source /opt/ros/jazzy/setup.bash && source \"$WORKDIR/install/setup.bash\""
+FULL_SETUP="cd \"$WORKDIR\" && export ROS_LOG_DIR=\"$ROS_LOG_DIR\" && mkdir -p \"$ROS_LOG_DIR\" && export ROS_DOMAIN_ID=79 && source /opt/ros/jazzy/setup.bash && source \"$WORKDIR/install/setup.bash\"" && source \"$CAMDIR/install/setup.bash\""
 
 for pane in 0 1 2 3 4; do
     tmux send-keys -t "$SESSION_NAME":0.$pane "$FULL_SETUP" C-m
