@@ -33,7 +33,7 @@ def generate_launch_description():
     args = [
         DeclareLaunchArgument(
             'checkpoint',
-            default_value='/home/all/muyi/End2end-ObjectNav-Physical-Experiment/checkpoints/ALLdata_NL03_paddingEmbedding12400',
+            default_value='/home/muyi/muyi/End2end-ObjectNav-Physical-Experiment/checkpoints/ALLdata_NL03_paddingEmbedding12400',
                               description='Absolute path to InternVL checkpoint directory'),
         DeclareLaunchArgument('instruction_topic', default_value='/instruction',
                               description='Instruction topic for VLN text commands'),

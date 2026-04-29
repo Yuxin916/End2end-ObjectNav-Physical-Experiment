@@ -13,7 +13,8 @@ def get_share_file(package_name, file_name):
 def generate_launch_description():
     config_path = get_share_file(
         package_name="arise_slam_mid360",
-        file_name="config/livox_mid360.yaml")
+        # file_name="config/livox_mid360.yaml")
+        file_name="config/livox_mid360_2.yaml")
     calib_path = get_share_file(
         package_name="arise_slam_mid360",
         file_name="config/livox/livox_mid360_calibration.yaml"

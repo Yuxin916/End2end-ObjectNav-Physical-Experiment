@@ -1,0 +1,7 @@
+{
+  "package_name": "livox_ros_driver2",
+  "non_idl_tuples": [
+    "/home/muyi/muyi/End2end-ObjectNav-Physical-Experiment/src/utilities/livox_ros_driver2:msg/CustomPoint.msg",
+    "/home/muyi/muyi/End2end-ObjectNav-Physical-Experiment/src/utilities/livox_ros_driver2:msg/CustomMsg.msg"
+  ]
+}

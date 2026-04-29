@@ -12,7 +12,7 @@ python -c "import torch; print(torch.__version__, torch.version.cuda)"
 # 2.5.1+cu121 12.1
 python -m pip install -U wheel setuptools==79.0.1 ninja packaging cython
 python -m pip install -U colcon-common-extensions pyyaml
-python -m pip install catkin_pkg empy==3.3.4 lark ultralytics tensorrt
+python -m pip install catkin_pkg empy==3.3.4 lark ultralytics 
 python -m pip install transformers==4.37.2 deepspeed==0.14.4 accelerate==0.33.0 timm==1.0.22 peft==0.10.0
 python -m pip install \
   tensorrt-cu12==10.13.3.9 \
@@ -31,6 +31,11 @@ conda deactivate
 cd muyi/End2end-ObjectNav-Physical-Experiment/
 source .venv/bin/activate
 bash start_tmux_VLN_sim.sh
+```
+
+```bash
+source .venv/bin/activate
+bash start_tmux_VLN_env.sh
 ```
 
 ```bash

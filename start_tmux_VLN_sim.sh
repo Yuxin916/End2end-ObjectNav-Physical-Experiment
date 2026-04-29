@@ -48,7 +48,7 @@ FULL_SETUP="cd \"$WORKDIR\" && export ROS_LOG_DIR=\"$ROS_LOG_DIR\" && mkdir -p \
 
 # commands to run
 CMD_PANE0="./system_simulation.sh"
-CMD_PANE1="ros2 launch vln_bridge vln_bridge.launch.py depth_topic:=/camera/depth instruction_topic:=/instruction"
+CMD_PANE1="ros2 launch vln_bridge vln_bridge.launch.py depth_topic:=/camera/depth instruction_topic:=/instruction template:=RGB_HisKFSingleColor"
 CMD_PANE2="bash \"$WORKDIR/instruction_console.sh\""
 
 # send full setup to all 6 panes
