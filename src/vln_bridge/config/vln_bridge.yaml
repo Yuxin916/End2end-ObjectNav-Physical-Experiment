@@ -4,7 +4,7 @@ vlm_navigator:
     # ----------------------------------------------------------------------
     # VLM
     # ----------------------------------------------------------------------
-    checkpoint: "/home/muyi/muyi/End2end-ObjectNav-Physical-Experiment/checkpoints/ALLdata_NL03_paddingEmbedding12400"
+    checkpoint: "checkpoints/ALLdata_NL03_paddingEmbedding12400"
     instruction_topic: "/instruction"
     template: "RGB_HisKFSingleColor"
     output_template: "pixelintext"

@@ -32,3 +32,18 @@ saved_unity_demo/
 .idea/
 bags/
 checkpoints/
+src/utilities/livox_ros_driver2/*
+
+
+# Livox SDK2 generated build artifacts
+src/utilities/livox_ros_driver2/Livox-SDK2/CMakeFiles/
+src/utilities/livox_ros_driver2/Livox-SDK2/CMakeCache.txt
+src/utilities/livox_ros_driver2/Livox-SDK2/Makefile
+src/utilities/livox_ros_driver2/Livox-SDK2/cmake_install.cmake
+src/utilities/livox_ros_driver2/Livox-SDK2/progress.marks
+
+# Livox SDK2 compiled objects
+src/utilities/livox_ros_driver2/Livox-SDK2/**/*.o
+src/utilities/livox_ros_driver2/Livox-SDK2/**/*.o.d
+src/utilities/livox_ros_driver2/Livox-SDK2/**/*.so
+src/utilities/livox_ros_driver2/Livox-SDK2/**/*.a

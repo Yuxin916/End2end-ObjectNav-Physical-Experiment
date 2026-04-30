@@ -7,7 +7,6 @@ WORKDIR="$SCRIPT_DIR"
 export ROS_LOG_DIR="$WORKDIR/.ros/log"
 mkdir -p "$ROS_LOG_DIR"
 
-CHECKPOINT_DIR="$WORKDIR/checkpoints/ALLdata_NL03_paddingEmbedding12400"
 CONFIG_FILE="$WORKDIR/src/vln_bridge/config/vln_bridge.yaml"
 VENV_ACTIVATE="$WORKDIR/.venv/bin/activate"
 
@@ -28,11 +27,6 @@ pkill -f "localPlanner" 2>/dev/null || true
 # cleanup debug images
 echo "Removing ./debug_images ..."
 rm -rf "$WORKDIR/debug_images"
-
-if [[ ! -d "$CHECKPOINT_DIR" ]]; then
-    echo "[ERROR] Checkpoint directory not found: $CHECKPOINT_DIR"
-    exit 1
-fi
 
 if [[ ! -f "$CONFIG_FILE" ]]; then
     echo "[ERROR] Config file not found: $CONFIG_FILE"
@@ -66,7 +60,7 @@ fi
 
 # commands to run
 CMD_PANE0="bash \"$WORKDIR/system_real_robot.sh\""
-CMD_PANE1="ros2 launch vln_bridge vln_bridge.launch.py config_file:=$CONFIG_FILE checkpoint:=$CHECKPOINT_DIR instruction_topic:=/instruction template:=RGB_HisKFSingleColor"
+CMD_PANE1="ros2 launch vln_bridge vln_bridge.launch.py config_file:=$CONFIG_FILE instruction_topic:=/instruction template:=RGB_HisKFSingleColor"
 CMD_PANE2="bash \"$WORKDIR/instruction_console.sh\""
 CMD_PANE3="echo 'Pane 3 ready. Use for debug or manual ros2 commands.'"
 CMD_PANE4="echo 'Pane 4 ready. Run ./record.sh manually when needed.'"

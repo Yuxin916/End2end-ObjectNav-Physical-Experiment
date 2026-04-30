@@ -2,8 +2,7 @@
 Launch file for vln_bridge.
 
 Usage (standalone, after autonomy stack is already running):
-    ros2 launch vln_bridge vln_bridge.launch.py \
-      checkpoint:=/abs/path/to/checkpoint
+    ros2 launch vln_bridge vln_bridge.launch.py
 
   # Publish instruction separately (topic-based, not launch arg):
   ros2 topic pub /instruction std_msgs/String "data: 'Go to the kitchen and stop near the table.'" -1
@@ -14,7 +13,7 @@ Or integrated with the real-robot system:
 
   # In another terminal after SLAM is up:
   source install/setup.bash
-    ros2 launch vln_bridge vln_bridge.launch.py checkpoint:=...
+    ros2 launch vln_bridge vln_bridge.launch.py
 """
 
 from ament_index_python.packages import get_package_share_directory
@@ -29,12 +28,9 @@ def generate_launch_description():
     default_config = pkg_share + '/config/vln_bridge.yaml'
 
     # ---- Launch arguments -----------------------------------------------
-    # Precedence: launch-argument overrides here > values loaded from YAML.
+    # Precedence: explicit parameter overrides here > values loaded from YAML.
+    # Keep the VLM checkpoint path in vln_bridge.yaml so it has one source of truth.
     args = [
-        DeclareLaunchArgument(
-            'checkpoint',
-            default_value='/home/muyi/muyi/End2end-ObjectNav-Physical-Experiment/checkpoints/ALLdata_NL03_paddingEmbedding12400',
-                              description='Absolute path to InternVL checkpoint directory'),
         DeclareLaunchArgument('instruction_topic', default_value='/instruction',
                               description='Instruction topic for VLN text commands'),
         DeclareLaunchArgument('template',
@@ -80,7 +76,6 @@ def generate_launch_description():
             # Load defaults from YAML
             LaunchConfiguration('config_file'),
             {
-                'checkpoint': LaunchConfiguration('checkpoint'),
                 'instruction_topic': LaunchConfiguration('instruction_topic'),
                 'template': LaunchConfiguration('template'),
                 'output_template': LaunchConfiguration('output_template'),

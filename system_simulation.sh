@@ -3,6 +3,7 @@
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 
 cd $SCRIPT_DIR
+source /opt/ros/jazzy/setup.bash
 source ./install/setup.bash
 # __NV_PRIME_RENDER_OFFLOAD=1 __GLX_VENDOR_LIBRARY_NAME=nvidia ./src/base_autonomy/vehicle_simulator/mesh/unity/environment/Model.x86_64 &
 ./src/base_autonomy/vehicle_simulator/mesh/unity/environment/Model.x86_64 &
