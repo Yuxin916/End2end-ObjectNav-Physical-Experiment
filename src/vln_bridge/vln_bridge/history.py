@@ -41,6 +41,7 @@ class HistoryEntry:
 class VisibilityResult:
     pixel: Optional[Tuple[int, int]]
     visible: bool
+    known: bool = True
 
 
 class History:
@@ -292,19 +293,23 @@ class History:
 
         future_indices = self._trajectory_draw_indices(entry_idx)
         future_entries = [self.entries[idx] for idx in future_indices]
-        vis_results = self._visibility_results(entry, future_entries)
 
         prev_pixel: Optional[Tuple[int, int]] = None
         visible_rank = 0
         started_segment = False
-        for hist_entry, vis in zip(future_entries, vis_results):
-            if not vis.visible or vis.pixel is None:
+        for hist_entry in future_entries:
+            # Drawing the trajectory is only a geometric overlay.  Keyframe
+            # selection still uses depth-based visibility, but the visual prompt
+            # should not disappear just because depth is sparse, mismatched, or
+            # inside the depth blind zone.
+            pixel = self._project_entry_into_view(hist_entry, observer=entry)
+            if pixel is None:
                 if started_segment:
                     break
                 prev_pixel = None
                 continue
 
-            u, v = vis.pixel
+            u, v = pixel
             started_segment = True
             if draw_mode == 'single_color':
                 color_rgb = single_color or (0, 0, 255)
@@ -361,7 +366,11 @@ class History:
             if not self._is_past_keyframe_blind_zone(last_key_idx, cur_idx):
                 cursor += 1
                 continue
-            if self._is_visible_from(last_key_idx, cur_idx):
+            visibility = self._visibility_state(last_key_idx, cur_idx)
+            if visibility is True:
+                cursor += 1
+                continue
+            if visibility is None:
                 cursor += 1
                 continue
 
@@ -375,12 +384,24 @@ class History:
                 if not self._passes_reference_motion(last_key_idx, cand_idx):
                     search_pos += 1
                     continue
-                if self._is_visible_from(last_key_idx, cand_idx):
+                candidate_visibility = self._visibility_state(last_key_idx, cand_idx)
+                if candidate_visibility is True:
                     search_pos += 1
                     continue
-                if self._looks_like_keyframe(cand_idx):
+                if candidate_visibility is None:
+                    search_pos += 1
+                    continue
+
+                candidate_result = self._looks_like_keyframe(cand_idx)
+                if candidate_result is None:
+                    break
+                if candidate_result:
                     keyframes.append(cand_idx)
-                    cursor = search_pos + 1
+                    cursor = self._jump_after_keyframe(
+                        cand_idx,
+                        distinct_indices,
+                        search_pos + 1,
+                    )
                     found_new_keyframe = True
                     break
                 search_pos += 1
@@ -410,19 +431,21 @@ class History:
         distance = self._horizontal_distance(ref_entry, cur_entry)
         return distance >= self.keyframe_translation_m
 
-    def _looks_like_keyframe(self, idx: int) -> bool:
+    def _looks_like_keyframe(self, idx: int) -> Optional[bool]:
         observer = self.entries[idx]
         future_indices = self._distinct_entry_indices(start_idx=idx + 1)
         future = [self.entries[i] for i in future_indices]
         if not future:
             return False
+        if len(future) < self.look_ahead:
+            return None
 
         look_ahead_entries = future[: self.look_ahead]
         if not self._in_fov_cone(observer, look_ahead_entries):
             return False
 
         if observer.depth is None:
-            return True
+            return False
 
         far_future = [
             entry
@@ -435,30 +458,49 @@ class History:
             # future waypoints inside the blind zone, we do not have enough
             # evidence yet to confirm a new keyframe. Recompute later when more
             # trajectory is available.
-            return False
+            return None
 
         vis_results = self._visibility_results(
             observer,
             far_future[: max(self.look_ahead * 3, 6)],
         )
-        if any(result.visible for result in vis_results):
+        known_results = [result for result in vis_results if result.known]
+        if not known_results:
+            return None
+        if any(result.visible for result in known_results):
             return True
 
-        # Depth from lidar projection can still be sparse; keep a weak fallback
-        # so we do not starve history completely when visibility is inconclusive.
-        prev_idx = max(0, self._previous_distinct_index(idx))
-        prev = self.entries[prev_idx]
-        return self._horizontal_distance(prev, observer) >= (
-            1.5 * self.keyframe_translation_m
-        )
+        return False
 
-    def _is_visible_from(self, observer_idx: int, target_idx: int) -> bool:
+    def _visibility_state(
+        self,
+        observer_idx: int,
+        target_idx: int,
+    ) -> Optional[bool]:
         observer = self.entries[observer_idx]
         target = self.entries[target_idx]
         if self._horizontal_distance(observer, target) <= float(self.blind_radius_m):
             return True
         vis_results = self._visibility_results(observer, [target])
-        return bool(vis_results and vis_results[0].visible)
+        if not vis_results or not vis_results[0].known:
+            return None
+        return bool(vis_results[0].visible)
+
+    def _is_visible_from(self, observer_idx: int, target_idx: int) -> bool:
+        return self._visibility_state(observer_idx, target_idx) is True
+
+    def _jump_after_keyframe(
+        self,
+        keyframe_idx: int,
+        distinct_indices: Sequence[int],
+        start_pos: int,
+    ) -> int:
+        start_pos = max(0, int(start_pos))
+        for pos in range(start_pos, len(distinct_indices)):
+            state = self._visibility_state(keyframe_idx, distinct_indices[pos])
+            if state is True:
+                return pos
+        return start_pos
 
     def _is_past_keyframe_blind_zone(self, observer_idx: int, target_idx: int) -> bool:
         observer = self.entries[observer_idx]
@@ -476,24 +518,24 @@ class History:
         results: List[VisibilityResult] = []
         for target in targets:
             if self._horizontal_distance(observer, target) <= float(self.blind_radius_m):
-                results.append(VisibilityResult(pixel=None, visible=False))
+                results.append(VisibilityResult(pixel=None, visible=False, known=False))
                 continue
             pixel = self._project_entry_into_view(target, observer=observer)
             if pixel is None:
-                results.append(VisibilityResult(pixel=None, visible=False))
+                results.append(VisibilityResult(pixel=None, visible=False, known=True))
                 continue
             if observer.depth is None:
-                results.append(VisibilityResult(pixel=pixel, visible=True))
+                results.append(VisibilityResult(pixel=pixel, visible=False, known=False))
                 continue
 
             depth_m = self._lookup_depth(observer.depth, pixel)
             if depth_m is None:
-                results.append(VisibilityResult(pixel=pixel, visible=False))
+                results.append(VisibilityResult(pixel=pixel, visible=False, known=False))
                 continue
 
             reproj = self._pixel_to_agent_from_depth(pixel, depth_m)
             if reproj is None:
-                results.append(VisibilityResult(pixel=pixel, visible=False))
+                results.append(VisibilityResult(pixel=pixel, visible=False, known=False))
                 continue
 
             right, forward, up = self._world_to_agent(target, observer=observer)
@@ -503,11 +545,8 @@ class History:
             forward_err = abs(float(delta[1]))
             lateral_err = float(np.linalg.norm(delta[[0, 2]]))
             tol = float(self.visibility_distance_threshold_m)
-            visible = (
-                dist_3d < tol
-                or (forward_err < tol and lateral_err < (1.5 * tol))
-            )
-            results.append(VisibilityResult(pixel=pixel, visible=bool(visible)))
+            visible = dist_3d < tol
+            results.append(VisibilityResult(pixel=pixel, visible=bool(visible), known=True))
         return results
 
     def _lookup_depth(
@@ -591,14 +630,14 @@ class History:
             return None
 
         pitch = math.radians(self.camera_elevation_deg)
-        down = self.sensor_height_m - up
-        down_rot = down * math.cos(pitch) - forward * math.sin(pitch)
-        forward_rot = down * math.sin(pitch) + forward * math.cos(pitch)
+        rel_up = up - self.sensor_height_m
+        forward_rot = forward * math.cos(pitch) + rel_up * math.sin(pitch)
+        up_rot = -forward * math.sin(pitch) + rel_up * math.cos(pitch)
         if forward_rot <= 1e-3:
             return None
 
         u = self.fx * (right / forward_rot) + self.cx
-        v = self.fy * (down_rot / forward_rot) + self.cy
+        v = self.cy - self.fy * (up_rot / forward_rot)
         if (
             u < 0.0
             or u >= float(self.image_width)
@@ -619,20 +658,19 @@ class History:
         u = float(pixel_xy[0])
         v = float(pixel_xy[1])
         x_img = (u - self.cx) / max(self.fx, 1e-6)
-        y_img = (v - self.cy) / max(self.fy, 1e-6)
+        y_img = (self.cy - v) / max(self.fy, 1e-6)
         pitch = math.radians(float(self.camera_elevation_deg))
 
         ray_right = float(x_img)
-        ray_down = float(y_img * math.cos(pitch) + math.sin(pitch))
+        ray_up = float(y_img * math.cos(pitch) + math.sin(pitch))
         ray_forward = float(-y_img * math.sin(pitch) + math.cos(pitch))
         if ray_forward <= 1e-6:
             return None
 
         scale = float(depth_m) / ray_forward
         right = ray_right * scale
-        down = ray_down * scale
         forward = ray_forward * scale
-        up = self.sensor_height_m - down
+        up = self.sensor_height_m + ray_up * scale
         return np.array([right, forward, up], dtype=np.float32)
 
     def _make_entry(
@@ -710,7 +748,19 @@ class History:
         return distance < self.storage_merge_distance_m
 
     def _trajectory_draw_indices(self, start_idx: int) -> List[int]:
-        indices = self._distinct_entry_indices(start_idx=start_idx)
+        end_idx = len(self.entries)
+        sorted_keyframes = sorted(idx for idx in self.keyframe_indices if idx >= 0)
+        if start_idx in sorted_keyframes:
+            for key_idx in sorted_keyframes:
+                if key_idx > start_idx:
+                    end_idx = key_idx
+                    break
+
+        indices = [
+            idx
+            for idx in self._distinct_entry_indices(start_idx=start_idx)
+            if idx < end_idx
+        ]
         if not indices or self.draw_merge_distance_m <= 0.0:
             return indices
 

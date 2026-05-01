@@ -82,6 +82,8 @@ class VLMNavigatorNode(Node):
         self.latest_pose_stamp_s: Optional[float] = None
         self.latest_rgb_stamp_s: Optional[float] = None
         self.latest_depth_stamp_s: Optional[float] = None
+        self.latest_history_depth_stamp_s: Optional[float] = None
+        self._pose_history = deque()
         self.initial_yaw: Optional[float] = None
         self.last_camera_heading_rad: float = 0.0
         self.last_camera_heading_source: str = 'init'
@@ -103,6 +105,7 @@ class VLMNavigatorNode(Node):
         self.latest_rgb_pil: Optional[PILImage.Image] = None
         self.latest_panoramic_arr: Optional[np.ndarray] = None
         self.latest_depth_arr: Optional[np.ndarray] = None
+        self.latest_history_depth_arr: Optional[np.ndarray] = None
         self.latest_depth_panoramic_arr: Optional[np.ndarray] = None
         self._last_camera_process_time_s: float = 0.0
         self._last_depth_process_time_s: float = 0.0
@@ -344,6 +347,10 @@ class VLMNavigatorNode(Node):
         self.declare_parameter('history_draw_merge_distance_m', 0.10)
         self.declare_parameter('history_depth_min_m', 0.5)
         self.declare_parameter('history_depth_max_m', 5.0)
+        self.declare_parameter('history_pose_buffer_sec', 5.0)
+        self.declare_parameter('history_pose_max_dt_sec', 0.20)
+        self.declare_parameter('history_depth_max_dt_sec', 0.35)
+        self.declare_parameter('scan_depth_pose_max_dt_sec', 0.20)
         self.declare_parameter('target_detection_topic', '/target_detection')
         self.declare_parameter('target_confidence_threshold', 0.30)
         self.declare_parameter('target_temporal_buffer_size', 3)
@@ -462,6 +469,10 @@ class VLMNavigatorNode(Node):
         )
         self.history_depth_min_m = float(g('history_depth_min_m').value)
         self.history_depth_max_m = float(g('history_depth_max_m').value)
+        self.history_pose_buffer_sec = float(g('history_pose_buffer_sec').value)
+        self.history_pose_max_dt_sec = float(g('history_pose_max_dt_sec').value)
+        self.history_depth_max_dt_sec = float(g('history_depth_max_dt_sec').value)
+        self.scan_depth_pose_max_dt_sec = float(g('scan_depth_pose_max_dt_sec').value)
         self.target_detection_topic = g('target_detection_topic').value
         self.target_confidence_threshold = float(
             g('target_confidence_threshold').value
@@ -591,12 +602,51 @@ class VLMNavigatorNode(Node):
                 f'offset_deg={float(self.camera_yaw_offset_deg):.1f}'
             )
 
-    def _current_history_pose(self) -> Optional[Tuple[Tuple[float, float, float], float]]:
+    def _pose_sample_for_stamp(
+        self,
+        stamp_s: Optional[float],
+        max_dt_s: float,
+    ) -> Optional[Tuple[float, float, float, float, float]]:
+        if not self._pose_history:
+            return None
+        if stamp_s is None or not np.isfinite(float(stamp_s)):
+            return None
+        stamp = float(stamp_s)
+        best = min(self._pose_history, key=lambda sample: abs(float(sample[0]) - stamp))
+        dt = abs(float(best[0]) - stamp)
+        if dt > max(0.0, float(max_dt_s)):
+            self.get_logger().debug(
+                f'Skip timestamped sample: nearest pose dt={dt:.3f}s '
+                f'> max_dt={float(max_dt_s):.3f}s'
+            )
+            return None
+        return best
+
+    def _camera_yaw_from_pose_yaw(self, yaw_rad: float) -> float:
+        return float(yaw_rad) + self._camera_yaw_offset_world_rad()
+
+    def _current_history_pose(
+        self,
+        stamp_s: Optional[float] = None,
+    ) -> Optional[Tuple[Tuple[float, float, float], float]]:
+        if stamp_s is not None:
+            sample = self._pose_sample_for_stamp(
+                stamp_s,
+                self.history_pose_max_dt_sec,
+            )
+            if sample is None:
+                return None
+            _, px, py, pz, yaw = sample
+            return (
+                (float(px), float(py), float(pz)),
+                self._camera_yaw_from_pose_yaw(float(yaw)),
+            )
+
         if self.latest_pose_x is None or self.latest_pose_y is None:
             return None
         if self.latest_yaw is None or not np.isfinite(self.latest_yaw):
             return None
-        camera_yaw = float(self.latest_yaw) + self._camera_yaw_offset_world_rad()
+        camera_yaw = self._camera_yaw_from_pose_yaw(float(self.latest_yaw))
         return (
             (
                 float(self.latest_pose_x),
@@ -607,10 +657,10 @@ class VLMNavigatorNode(Node):
         )
 
     def _update_history_from_rgb(self, rgb_arr: np.ndarray):
-        pose = self._current_history_pose()
-        if pose is None:
-            return
         if self.latest_rgb_stamp_s is None:
+            return
+        pose = self._current_history_pose(float(self.latest_rgb_stamp_s))
+        if pose is None:
             return
         if (
             self._last_history_rgb_stamp_s is not None
@@ -621,9 +671,28 @@ class VLMNavigatorNode(Node):
         self._ensure_history(rgb_arr.shape)
         pos, yaw_rad = pose
         depth_arr = None
-        if self.latest_depth_arr is not None:
-            candidate = np.asarray(self.latest_depth_arr, dtype=np.float32)
-            if candidate.ndim == 2 and candidate.shape[:2] == rgb_arr.shape[:2]:
+        history_depth = self.latest_history_depth_arr
+        if history_depth is None and self._last_depth_source != 'registered_scan':
+            history_depth = self.latest_depth_arr
+        if history_depth is not None:
+            depth_dt_ok = True
+            if self.latest_history_depth_stamp_s is not None:
+                depth_dt = abs(
+                    float(self.latest_history_depth_stamp_s)
+                    - float(self.latest_rgb_stamp_s)
+                )
+                depth_dt_ok = depth_dt <= max(0.0, float(self.history_depth_max_dt_sec))
+                if not depth_dt_ok:
+                    self.get_logger().debug(
+                        f'History RGB has stale depth: dt={depth_dt:.3f}s '
+                        f'> max_dt={float(self.history_depth_max_dt_sec):.3f}s'
+                    )
+            candidate = np.asarray(history_depth, dtype=np.float32)
+            if (
+                depth_dt_ok
+                and candidate.ndim == 2
+                and candidate.shape[:2] == rgb_arr.shape[:2]
+            ):
                 depth_arr = candidate.copy()
         if self.history is None:
             return
@@ -1361,6 +1430,22 @@ class VLMNavigatorNode(Node):
         self.latest_pose_y = float(p.y)
         self.latest_pose_z = float(p.z)
         self.latest_yaw = float(quaternion_to_yaw(q.x, q.y, q.z, q.w))
+        if np.isfinite(self.latest_pose_stamp_s) and np.isfinite(self.latest_yaw):
+            self._pose_history.append(
+                (
+                    float(self.latest_pose_stamp_s),
+                    float(self.latest_pose_x),
+                    float(self.latest_pose_y),
+                    float(self.latest_pose_z),
+                    float(self.latest_yaw),
+                )
+            )
+            keep_after = float(self.latest_pose_stamp_s) - max(
+                0.5,
+                float(self.history_pose_buffer_sec),
+            )
+            while self._pose_history and float(self._pose_history[0][0]) < keep_after:
+                self._pose_history.popleft()
         if self.initial_yaw is None and np.isfinite(self.latest_yaw):
             self.initial_yaw = float(self.latest_yaw)
             self._last_reliable_yaw_abs = float(self.latest_yaw)
@@ -1420,6 +1505,8 @@ class VLMNavigatorNode(Node):
                     interpolation=cv2.INTER_NEAREST,
                 ).astype(np.float32)
             self.latest_depth_arr = depth_arr
+            self.latest_history_depth_arr = depth_arr.copy()
+            self.latest_history_depth_stamp_s = float(self.latest_depth_stamp_s)
             self._last_depth_status_text = (
                 f'Depth OK: topic={self.depth_topic}, encoding={msg.encoding}, '
                 f'size={msg.width}x{msg.height}'
@@ -1438,6 +1525,10 @@ class VLMNavigatorNode(Node):
         if now_mono - float(self._last_scan_depth_process_time_s) < (1.0 / scan_hz):
             return
         self._last_scan_depth_process_time_s = now_mono
+        scan_stamp_s = (
+            float(msg.header.stamp.sec)
+            + float(msg.header.stamp.nanosec) * 1e-9
+        )
 
         # Prefer real camera depth if it is actually arriving.  In the current
         # Unity setup /camera/depth exists but the compressed source has no
@@ -1445,19 +1536,29 @@ class VLMNavigatorNode(Node):
         if now_mono - float(self._last_camera_depth_time_s) < 1.0:
             return
 
-        if self.latest_pose_x is None or self.latest_pose_y is None or self.latest_yaw is None:
+        pose_sample = self._pose_sample_for_stamp(
+            scan_stamp_s,
+            self.scan_depth_pose_max_dt_sec,
+        )
+        if pose_sample is None:
             self._last_depth_status_text = (
-                f'Waiting for pose before projecting {self.scan_depth_topic}'
+                f'Waiting for timestamp-aligned pose before projecting {self.scan_depth_topic}'
             )
             self._publish_depth_status_image(self._last_depth_status_text)
             return
 
         try:
-            depth_arr, used_points, projected_points = self._project_scan_to_depth_image(msg)
+            depth_arr, used_points, projected_points = self._project_scan_to_depth_image(
+                msg,
+                pose_sample,
+            )
             if depth_arr is None:
                 self._publish_depth_status_image(self._last_depth_status_text)
                 return
             self.latest_depth_arr = depth_arr
+            self.latest_history_depth_arr = depth_arr.copy()
+            self.latest_depth_stamp_s = float(scan_stamp_s)
+            self.latest_history_depth_stamp_s = float(scan_stamp_s)
             self._last_depth_source = 'registered_scan'
             self._last_depth_status_text = (
                 f'Depth OK from {self.scan_depth_topic}: '
@@ -1472,6 +1573,7 @@ class VLMNavigatorNode(Node):
     def _project_scan_to_depth_image(
         self,
         msg: PointCloud2,
+        pose_sample: Tuple[float, float, float, float, float],
     ) -> Tuple[Optional[np.ndarray], int, int]:
         if self.latest_rgb_pil is not None:
             out_w, out_h = self.latest_rgb_pil.size
@@ -1503,29 +1605,49 @@ class VLMNavigatorNode(Node):
         py = py[finite]
         pz = pz[finite]
 
-        dx = px - float(self.latest_pose_x)
-        dy = py - float(self.latest_pose_y)
-        camera_z = float(self.latest_pose_z or 0.0) + float(self.scan_depth_camera_z_offset_m)
-        dz_down = camera_z - pz
-
-        yaw = float(self.latest_yaw) + self._camera_yaw_offset_world_rad()
-        cos_yaw = math.cos(yaw)
-        sin_yaw = math.sin(yaw)
-        forward = dx * cos_yaw + dy * sin_yaw
-        # Match vlm_nav_bridge's bearing convention: u > cx means image-right,
-        # which is a clockwise turn in world frame (bearing = yaw - theta).
-        right = dx * sin_yaw - dy * cos_yaw
-        down = dz_down
-
+        all_px, all_py, all_pz = px, py, pz
         synth_points = 0
         if bool(self.scan_depth_ground_fill_enable):
-            synth_forward, synth_right, synth_down = self._make_ground_fill_agent_points()
-            if synth_forward.size > 0:
-                forward = np.concatenate([forward, synth_forward], axis=0)
-                right = np.concatenate([right, synth_right], axis=0)
-                down = np.concatenate([down, synth_down], axis=0)
-                synth_points = int(synth_forward.size)
+            synth_px, synth_py, synth_pz = self._make_ground_fill_world_points(
+                pose_sample
+            )
+            if synth_px.size > 0:
+                all_px = np.concatenate([all_px, synth_px], axis=0)
+                all_py = np.concatenate([all_py, synth_py], axis=0)
+                all_pz = np.concatenate([all_pz, synth_pz], axis=0)
+                synth_points = int(synth_px.size)
 
+        forward, right, down = self._world_points_to_camera_components(
+            all_px,
+            all_py,
+            all_pz,
+            pose_sample,
+        )
+
+        depth, projected = self._rasterize_scan_depth_points(
+            forward,
+            right,
+            down,
+            out_w,
+            out_h,
+        )
+        if depth is None:
+            self._last_depth_status_text = (
+                f'No scan points project into range: topic={self.scan_depth_topic}, '
+                f'input={points.shape[0]}, forward_range=[{float(self.depth_min_m):.2f}, '
+                f'{float(self.depth_max_m):.2f}]m'
+            )
+            return None, int(points.shape[0]) + synth_points, 0
+        return depth, int(points.shape[0]) + synth_points, projected
+
+    def _rasterize_scan_depth_points(
+        self,
+        forward: np.ndarray,
+        right: np.ndarray,
+        down: np.ndarray,
+        out_w: int,
+        out_h: int,
+    ) -> Tuple[Optional[np.ndarray], int]:
         height_mask = (
             (down >= float(self.scan_depth_min_height_m))
             & (down <= float(self.scan_depth_max_height_m))
@@ -1536,12 +1658,7 @@ class VLMNavigatorNode(Node):
         )
         mask = height_mask & range_mask & np.isfinite(forward) & np.isfinite(right) & np.isfinite(down)
         if not np.any(mask):
-            self._last_depth_status_text = (
-                f'No scan points project into range: topic={self.scan_depth_topic}, '
-                f'input={points.shape[0]}, forward_range=[{float(self.depth_min_m):.2f}, '
-                f'{float(self.depth_max_m):.2f}]m'
-            )
-            return None, int(points.shape[0]), 0
+            return None, 0
 
         forward = forward[mask]
         right = right[mask]
@@ -1561,8 +1678,7 @@ class VLMNavigatorNode(Node):
         z_cam = down * math.sin(pitch) + forward * math.cos(pitch)
         valid_z = z_cam > 1e-4
         if not np.any(valid_z):
-            self._last_depth_status_text = 'No scan points are in front of the projected camera'
-            return None, int(points.shape[0]), 0
+            return None, 0
 
         forward = forward[valid_z]
         right = right[valid_z]
@@ -1573,10 +1689,7 @@ class VLMNavigatorNode(Node):
         v = np.rint(cy + fy * (y_cam / z_cam)).astype(np.int32)
         in_image = (u >= 0) & (u < out_w) & (v >= 0) & (v < out_h)
         if not np.any(in_image):
-            self._last_depth_status_text = (
-                f'Scan points are in range but outside image: size={out_w}x{out_h}'
-            )
-            return None, int(points.shape[0]), 0
+            return None, 0
 
         u = u[in_image]
         v = v[in_image]
@@ -1598,15 +1711,38 @@ class VLMNavigatorNode(Node):
 
         depth[~np.isfinite(depth)] = np.nan
         if not np.any(np.isfinite(depth)):
-            self._last_depth_status_text = 'Projected scan depth image is empty after splatting'
-            return None, int(points.shape[0]), projected
-        valid_before = int(np.count_nonzero(np.isfinite(depth)))
+            return None, projected
         if bool(self.scan_depth_interp_enable):
             depth = self._interpolate_sparse_depth(depth)
-        valid_after = int(np.count_nonzero(np.isfinite(depth)))
-        return depth, int(points.shape[0]) + synth_points, projected
+        return depth, projected
 
-    def _make_ground_fill_agent_points(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def _world_points_to_camera_components(
+        self,
+        px: np.ndarray,
+        py: np.ndarray,
+        pz: np.ndarray,
+        pose_sample: Tuple[float, float, float, float, float],
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        _, pose_x, pose_y, pose_z, pose_yaw = pose_sample
+        dx = px - float(pose_x)
+        dy = py - float(pose_y)
+        camera_z = float(pose_z) + float(self.scan_depth_camera_z_offset_m)
+        dz_down = camera_z - pz
+
+        yaw = self._camera_yaw_from_pose_yaw(float(pose_yaw))
+        cos_yaw = math.cos(yaw)
+        sin_yaw = math.sin(yaw)
+        forward = dx * cos_yaw + dy * sin_yaw
+        # Match vlm_nav_bridge's bearing convention: u > cx means image-right,
+        # which is a clockwise turn in world frame (bearing = yaw - theta).
+        right = dx * sin_yaw - dy * cos_yaw
+        down = dz_down
+        return forward, right, down
+
+    def _make_ground_fill_world_points(
+        self,
+        pose_sample: Tuple[float, float, float, float, float],
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         radius_m = max(0.0, float(self.scan_depth_ground_fill_radius_m))
         inner_m = max(0.0, float(self.scan_depth_ground_fill_inner_radius_m))
         spacing_m = max(0.02, float(self.scan_depth_ground_fill_spacing_m))
@@ -1639,8 +1775,27 @@ class VLMNavigatorNode(Node):
 
         forward = np.asarray(forward_list, dtype=np.float32)
         right = np.asarray(right_list, dtype=np.float32)
-        down = np.full_like(forward, float(self.camera_height_m), dtype=np.float32)
-        return forward, right, down
+        _, pose_x, pose_y, pose_z, pose_yaw = pose_sample
+        yaw = self._camera_yaw_from_pose_yaw(float(pose_yaw))
+        cos_yaw = math.cos(yaw)
+        sin_yaw = math.sin(yaw)
+        synth_px = (
+            float(pose_x)
+            + forward * cos_yaw
+            + right * sin_yaw
+        ).astype(np.float32)
+        synth_py = (
+            float(pose_y)
+            + forward * sin_yaw
+            - right * cos_yaw
+        ).astype(np.float32)
+        camera_z = float(pose_z) + float(self.scan_depth_camera_z_offset_m)
+        synth_pz = np.full_like(
+            forward,
+            camera_z - float(self.camera_height_m),
+            dtype=np.float32,
+        )
+        return synth_px, synth_py, synth_pz
 
     def _interpolate_sparse_depth(self, depth: np.ndarray) -> np.ndarray:
         depth = np.asarray(depth, dtype=np.float32).copy()

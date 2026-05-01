@@ -57,9 +57,12 @@ vlm_navigator:
     scan_depth_max_height_m: 2.0
     scan_depth_camera_z_offset_m: 0.0
     scan_depth_ground_fill_enable: true
+    # scan_depth_ground_fill_radius_m: 2.0
+    # scan_depth_ground_fill_inner_radius_m: 0.0
+    # scan_depth_ground_fill_spacing_m: 0.06
     scan_depth_ground_fill_radius_m: 2.0
-    scan_depth_ground_fill_inner_radius_m: 0.0
-    scan_depth_ground_fill_spacing_m: 0.06
+    scan_depth_ground_fill_inner_radius_m: 0.15
+    scan_depth_ground_fill_spacing_m: 0.08
 
     # ----------------------------------------------------------------------
     # Camera
@@ -84,7 +87,7 @@ vlm_navigator:
     # ----------------------------------------------------------------------
     # History
     # ----------------------------------------------------------------------
-    history_length: 8
+    history_length: 3
     history_max_entries: 1024
     history_sensor_height_m: 0.88
     history_camera_elevation_deg: 0.0
@@ -99,6 +102,10 @@ vlm_navigator:
     history_draw_merge_distance_m: 0.10
     history_depth_min_m: 0.5
     history_depth_max_m: 5.0
+    history_pose_buffer_sec: 5.0
+    history_pose_max_dt_sec: 0.20
+    history_depth_max_dt_sec: 0.35
+    scan_depth_pose_max_dt_sec: 0.20
 
     # ----------------------------------------------------------------------
     # Optional detection debug
