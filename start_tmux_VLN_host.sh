@@ -74,7 +74,7 @@ sleep 5
 
 CMD_PANE0="ros2 launch domain_bridge domain_bridge.launch"
 CMD_PANE1="ros2 run image_transport republish --ros-args -p in_transport:=compressed -p out_transport:=raw --remap in/compressed:=/camera/image/compressed --remap out:=/camera/image"
-CMD_PANE2="ros2 launch vln_bridge vln_bridge.launch.py config_file:=$CONFIG_FILE instruction_topic:=/instruction template:=RGB_HisKFSingleColor"
+CMD_PANE2="ros2 launch vln_bridge vln_bridge.launch.py config_file:=$CONFIG_FILE instruction_topic:=/instruction template:=RGB_HisKFSingleColor depth_enable:=true camera_enable:=true camera_is_panorama:=true history_enable:=true"
 CMD_PANE3="bash \"$WORKDIR/instruction_console.sh\""
 CMD_PANE4="ros2 run rviz2 rviz2 -d src/base_autonomy/vehicle_simulator/rviz/vehicle_simulator.rviz"
 CMD_PANE5="echo 'Pane 5 ready. Run ./record.sh manually when needed.'"

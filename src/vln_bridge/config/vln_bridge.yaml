@@ -5,6 +5,7 @@ vlm_navigator:
     # VLM
     # ----------------------------------------------------------------------
     checkpoint: "checkpoints/ALLdata_NL03_paddingEmbedding12400"
+    # checkpoint: ""
     instruction_topic: "/instruction"
     template: "RGB_HisKFSingleColor"
     output_template: "pixelintext"
@@ -19,35 +20,78 @@ vlm_navigator:
     vlm_load_delay_sec: 2.0
     vlm_auto_infer: true
     vlm_inference_interval_sec: 2.0
+    # Before every VLM inference, stop briefly and then snapshot the latest
+    # egocentric RGB. Useful when camera updates are slow.
+    vlm_pre_inference_stop_sec: 0.5
 
     # Current-image padding used by Go2Pixel-style pixel output.
     vlm_padding_px: 8
+    # After a forward pixel output, pause VLM inference until the robot is this
+    # close to the published waypoint. Set timeout <= 0 to wait forever.
+    vlm_forward_reinfer_distance_m: 0.75
+    # When the robot reaches the reinference distance, publish a hold-position
+    # waypoint and zero command so it stops before the old waypoint.
+    vlm_stop_at_forward_reinfer_distance: true
+    # Wait until the robot is actually within vlm_forward_reinfer_distance_m
+    # of the VLM waypoint before re-running inference. Set <= 0 to disable
+    # timeout-based early re-inference for far waypoints.
+    vlm_forward_reinfer_timeout_sec: 0.0
+    # For far floor pixels, sparse /registered_scan depth can be much nearer
+    # than the visual target. Use camera height/FOV to intersect the pixel ray
+    # with the ground plane instead of trusting the rasterized scan depth.
+    # Options: depth_surface, ground_if_consistent, ground_intersection,
+    # farther_ground.
+    vlm_waypoint_projection_mode: "ground_intersection"
+    vlm_ground_projection_max_m: 10.0
+    # After left/right padding output, pause VLM inference until the direct
+    # turn duration has elapsed.
+    vlm_wait_for_turn_completion: true
+    # Maximum allowed time difference between the RGB frame sent to VLM and
+    # the pose used to project the VLM pixel into a world waypoint.
+    vlm_pose_max_dt_sec: 0.25
 
     # ----------------------------------------------------------------------
     # Waypoint / Control
     # ----------------------------------------------------------------------
     waypoint_frame: "map"
-    waypoint_turn_distance_m: 5.0
+    waypoint_turn_distance_m: 1.0
     waypoint_turn_angle_deg: 30.0
     waypoint_max_step_m: 0.0
+    # Left/right padding outputs can be handled by a short relative waypoint
+    # ("waypoint") or by direct in-place rotation ("direct_turn").
+    vlm_turn_mode: "waypoint"
+    vlm_turn_waypoint_distance_m: 0.50
+    vlm_turn_waypoint_angle_deg: 30.0
+    vlm_turn_waypoint_reinfer_distance_m: 0.30
+    vlm_turn_waypoint_timeout_sec: 1.5
+    vlm_direct_turn_angle_deg: 30.0
+    # If the model keeps selecting left/right padding, bypass that output after
+    # this many consecutive turn decisions and publish a forward waypoint.
+    vlm_turn_streak_limit: 4
+    vlm_turn_streak_forward_distance_m: 0.20
+    vlm_turn_streak_forward_reinfer_distance_m: 0.05
 
-    # Best-effort direct turn-in-place command sent on /cmd_vel for left/right
-    # padding outputs. Local planner may still influence the final motion.
+    # In-place VLM turn command. VLM publishes /vlm_direct_turn_cmd; pathFollower
+    # owns /cmd_vel and forwards this as zero-linear yaw motion.
     direct_turn_rate_rad_s: 0.6
     direct_turn_duration_sec: 1.0
+    # After stopping early near a forward waypoint, keep sending a zero-motion
+    # override briefly so pathFollower does not rotate toward the stale path.
+    direct_stop_hold_duration_sec: 0.8
 
     # ----------------------------------------------------------------------
     # Depth
     # ----------------------------------------------------------------------
     # Simulation publishes /camera/depth by default.
+    depth_enable: true
     depth_topic: "/camera/depth"
-    depth_process_hz: 10.0
+    depth_process_hz: 5.0
     depth_min_m: 0.5
     depth_max_m: 10.0
     depth_sampling_radius_px: 2
     scan_depth_topic: "/registered_scan"
     scan_depth_process_hz: 5.0
-    scan_depth_max_points: 200000
+    scan_depth_max_points: 100000
     scan_depth_point_radius_px: 1
     scan_depth_interp_enable: true
     scan_depth_interp_max_dist_px: 12.0
@@ -68,6 +112,7 @@ vlm_navigator:
     # Camera
     # ----------------------------------------------------------------------
     camera_topic: "/camera/image"
+    camera_enable: true
     camera_process_hz: 5.0
     camera_is_panorama: true
     camera_project_width: 256
@@ -75,6 +120,9 @@ vlm_navigator:
     camera_project_hfov_deg: 90.0
     camera_height_m: 0.88
     camera_elevation_deg: 0.0
+    camera_async_processing: true
+    camera_publish_panoramic: false
+    camera_publish_target_debug: false
     camera_panorama_lock_to_vehicle: true
     camera_yaw_offset_deg: 0.0
     camera_heading_sign: -1.0
@@ -87,6 +135,7 @@ vlm_navigator:
     # ----------------------------------------------------------------------
     # History
     # ----------------------------------------------------------------------
+    history_enable: true
     history_length: 3
     history_max_entries: 1024
     history_sensor_height_m: 0.88
@@ -105,6 +154,7 @@ vlm_navigator:
     history_pose_buffer_sec: 5.0
     history_pose_max_dt_sec: 0.20
     history_depth_max_dt_sec: 0.35
+    history_debug_publish_hz: 1.0
     scan_depth_pose_max_dt_sec: 0.20
 
     # ----------------------------------------------------------------------

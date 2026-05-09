@@ -17,6 +17,7 @@ import json
 import logging
 import math
 import re
+import threading
 import time
 from collections import deque
 from typing import Any, Dict, Optional, Sequence, Tuple
@@ -29,6 +30,7 @@ from PIL import Image as PILImage
 from geometry_msgs.msg import PointStamped
 from geometry_msgs.msg import TwistStamped
 from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image, PointCloud2
 import sensor_msgs_py.point_cloud2 as pc2
 from std_msgs.msg import Bool, String
@@ -56,6 +58,13 @@ class VLMNavigatorNode(Node):
         self._model_loaded: bool = False
         self._loading: bool = False
         self._load_timer = None
+        self._vlm_thread_lock = threading.Lock()
+        self._vlm_inference_running: bool = False
+        self._scan_depth_thread_lock = threading.Lock()
+        self._scan_depth_running: bool = False
+        self._camera_thread_lock = threading.Lock()
+        self._camera_processing_running: bool = False
+        self._history_lock = threading.RLock()
         if self.vlm_checkpoint:
             vlm_cfg = VLMConfig(
                 checkpoint=self.vlm_checkpoint,
@@ -92,14 +101,24 @@ class VLMNavigatorNode(Node):
         self._last_heading_debug_log_s: float = 0.0
         self.history: Optional[History] = None
         self._last_history_rgb_stamp_s: Optional[float] = None
+        self._last_history_debug_publish_time_s: float = 0.0
         self._last_vlm_inference_stamp_s: Optional[float] = None
         self._last_vlm_inference_time_mono_s: float = 0.0
         self._last_vlm_output_text: str = ''
+        self._pending_vlm_waypoint_xyz: Optional[Tuple[float, float, float]] = None
+        self._pending_vlm_waypoint_reason: str = ''
+        self._pending_vlm_waypoint_start_mono_s: float = 0.0
+        self._pending_vlm_waypoint_threshold_m: float = 0.0
+        self._pending_vlm_waypoint_timeout_s: Optional[float] = None
+        self._last_vlm_gate_log_s: float = 0.0
+        self._vlm_pre_inference_stop_until_s: float = 0.0
+        self._consecutive_turn_outputs: int = 0
 
         self.current_instruction: str = ''
         self._direct_turn_rate_rad_s: float = 0.0
         self._direct_turn_start_s: float = 0.0
         self._direct_turn_until_s: float = 0.0
+        self._direct_stop_until_s: float = 0.0
 
         # Camera / RGB state
         self.latest_rgb_pil: Optional[PILImage.Image] = None
@@ -115,7 +134,13 @@ class VLMNavigatorNode(Node):
         self._depth_decode_log_done: bool = False
         self._last_camera_depth_time_s: float = 0.0
         self._last_depth_source: str = 'none'
-        self._last_depth_status_text: str = f'Waiting for depth topic {self.depth_topic}'
+        self._unsupported_camera_encoding_logged: set = set()
+        self._last_camera_wait_log_s: float = 0.0
+        self._last_depth_status_text: str = (
+            'Depth disabled'
+            if not bool(self.depth_enable)
+            else f'Waiting for depth topic {self.depth_topic}'
+        )
 
         # Detection / target state
         self.latest_detection_msg_time: float = 0.0
@@ -142,16 +167,23 @@ class VLMNavigatorNode(Node):
         self.create_subscription(
             String, self.target_detection_topic, self._target_detection_callback, 10
         )
-        self.create_subscription(
-            Image, self.camera_topic, self._camera_callback, 1
-        )
-        if self.depth_topic:
+        if bool(self.camera_enable):
             self.create_subscription(
-                Image, self.depth_topic, self._depth_callback, 1
+                Image,
+                self.camera_topic,
+                self._camera_callback,
+                qos_profile_sensor_data,
             )
-        if self.scan_depth_topic:
+        if bool(self.depth_enable) and self.depth_topic:
             self.create_subscription(
-                PointCloud2, self.scan_depth_topic, self._scan_depth_callback, 1
+                Image, self.depth_topic, self._depth_callback, qos_profile_sensor_data
+            )
+        if bool(self.depth_enable) and self.scan_depth_topic:
+            self.create_subscription(
+                PointCloud2,
+                self.scan_depth_topic,
+                self._scan_depth_callback,
+                qos_profile_sensor_data,
             )
 
         # ------------------------------------------------------------------
@@ -161,18 +193,49 @@ class VLMNavigatorNode(Node):
             PointStamped, '/way_point', 10
         )
         self.cmd_vel_pub = self.create_publisher(TwistStamped, '/cmd_vel', 10)
-        self.rgb_pub = self.create_publisher(Image, '/rgb', 10)
-        self.panoramic_pub = self.create_publisher(Image, '/panoramic', 10)
-        self.egocentric_rgb_pub = self.create_publisher(Image, '/egocentric_rgb', 10)
-        self.egocentric_rgb_debug_pub = self.create_publisher(
-            Image, '/egocentric_rgb_debug', 10
+        self.direct_turn_cmd_pub = self.create_publisher(
+            TwistStamped, '/vlm_direct_turn_cmd', 10
         )
-        self.target_debug_pub = self.create_publisher(Image, '/vlm_target_debug', 10)
-        self.history_debug_pub = self.create_publisher(Image, '/vlm_history_debug', 10)
-        self.depth_debug_pub = self.create_publisher(Image, '/vlm_depth_debug', 10)
-        self.vlm_pixel_debug_pub = self.create_publisher(Image, '/vlm_pixel_debug', 10)
+        self.rgb_pub = self.create_publisher(Image, '/rgb', qos_profile_sensor_data)
+        self.panoramic_pub = self.create_publisher(
+            Image,
+            '/panoramic',
+            qos_profile_sensor_data,
+        )
+        self.egocentric_rgb_pub = self.create_publisher(
+            Image,
+            '/egocentric_rgb',
+            qos_profile_sensor_data,
+        )
+        self.egocentric_rgb_debug_pub = self.create_publisher(
+            Image,
+            '/egocentric_rgb_debug',
+            qos_profile_sensor_data,
+        )
+        self.target_debug_pub = self.create_publisher(
+            Image,
+            '/vlm_target_debug',
+            qos_profile_sensor_data,
+        )
+        self.history_debug_pub = self.create_publisher(
+            Image,
+            '/vlm_history_debug',
+            qos_profile_sensor_data,
+        )
+        self.depth_debug_pub = self.create_publisher(
+            Image,
+            '/vlm_depth_debug',
+            qos_profile_sensor_data,
+        )
+        self.vlm_pixel_debug_pub = self.create_publisher(
+            Image,
+            '/vlm_pixel_debug',
+            qos_profile_sensor_data,
+        )
         self.current_decision_debug_pub = self.create_publisher(
-            Image, '/vlm_current_decision_debug', 10
+            Image,
+            '/vlm_current_decision_debug',
+            qos_profile_sensor_data,
         )
         self.instruction_finished_pub = self.create_publisher(Bool, '/instruction_finished', 10)
         self.vlm_output_pub = self.create_publisher(String, '/vlm_inference_text', 10)
@@ -186,7 +249,8 @@ class VLMNavigatorNode(Node):
             self._vlm_inference_timer_callback,
         )
         self.create_timer(0.05, self._direct_turn_timer_callback)
-        self.create_timer(0.5, self._depth_debug_timer_callback)
+        if bool(self.depth_enable):
+            self.create_timer(0.5, self._depth_debug_timer_callback)
 
         # ------------------------------------------------------------------
         # Debug image saving
@@ -268,6 +332,14 @@ class VLMNavigatorNode(Node):
             'VLMNavigatorNode started without BEV/frontier logic. '
             f'Waiting for /state_estimation and {self.instruction_topic} ...'
         )
+        self.get_logger().info(
+            'Feature switches: '
+            f'camera/egocentric={bool(self.camera_enable)} topic={self.camera_topic}, '
+            f'panorama_projection={bool(self.camera_is_panorama)}, '
+            f'depth={bool(self.depth_enable)} topic={self.depth_topic or "<disabled>"}, '
+            f'scan_depth={self.scan_depth_topic or "<disabled>"}, '
+            f'history={bool(self.history_enable)} length={int(self.history_length)}'
+        )
 
     # ------------------------------------------------------------------
     # Parameters
@@ -289,13 +361,32 @@ class VLMNavigatorNode(Node):
         self.declare_parameter('vlm_load_delay_sec', 2.0)
         self.declare_parameter('vlm_auto_infer', True)
         self.declare_parameter('vlm_inference_interval_sec', 2.0)
+        self.declare_parameter('vlm_pre_inference_stop_sec', 0.0)
         self.declare_parameter('vlm_padding_px', 8)
+        self.declare_parameter('vlm_forward_reinfer_distance_m', 0.5)
+        self.declare_parameter('vlm_forward_reinfer_timeout_sec', 20.0)
+        self.declare_parameter('vlm_stop_at_forward_reinfer_distance', True)
+        self.declare_parameter('vlm_wait_for_turn_completion', True)
+        self.declare_parameter('vlm_pose_max_dt_sec', 0.25)
+        self.declare_parameter('vlm_waypoint_projection_mode', 'depth_surface')
+        self.declare_parameter('vlm_ground_projection_max_m', 10.0)
+        self.declare_parameter('vlm_turn_mode', 'waypoint')
+        self.declare_parameter('vlm_turn_waypoint_distance_m', 0.10)
+        self.declare_parameter('vlm_turn_waypoint_angle_deg', 30.0)
+        self.declare_parameter('vlm_turn_waypoint_reinfer_distance_m', 0.03)
+        self.declare_parameter('vlm_turn_waypoint_timeout_sec', 0.0)
+        self.declare_parameter('vlm_direct_turn_angle_deg', 30.0)
+        self.declare_parameter('vlm_turn_streak_limit', 4)
+        self.declare_parameter('vlm_turn_streak_forward_distance_m', 0.20)
+        self.declare_parameter('vlm_turn_streak_forward_reinfer_distance_m', 0.05)
         self.declare_parameter('waypoint_frame', 'map')
         self.declare_parameter('waypoint_turn_distance_m', 5.0)
         self.declare_parameter('waypoint_turn_angle_deg', 30.0)
         self.declare_parameter('waypoint_max_step_m', 0.0)
         self.declare_parameter('direct_turn_rate_rad_s', 0.6)
         self.declare_parameter('direct_turn_duration_sec', 1.0)
+        self.declare_parameter('direct_stop_hold_duration_sec', 0.8)
+        self.declare_parameter('depth_enable', True)
         self.declare_parameter('depth_topic', '/camera/depth')
         self.declare_parameter('depth_process_hz', 10.0)
         self.declare_parameter('depth_min_m', 0.05)
@@ -317,6 +408,7 @@ class VLMNavigatorNode(Node):
         self.declare_parameter('scan_depth_ground_fill_inner_radius_m', 0.0)
         self.declare_parameter('scan_depth_ground_fill_spacing_m', 0.06)
         self.declare_parameter('camera_topic', '/camera/image')
+        self.declare_parameter('camera_enable', True)
         self.declare_parameter('camera_process_hz', 5.0)
         self.declare_parameter('camera_is_panorama', True)
         self.declare_parameter('camera_project_width', 640)
@@ -324,6 +416,9 @@ class VLMNavigatorNode(Node):
         self.declare_parameter('camera_project_hfov_deg', 79.0)
         self.declare_parameter('camera_height_m', 0.88)
         self.declare_parameter('camera_elevation_deg', 0.0)
+        self.declare_parameter('camera_async_processing', True)
+        self.declare_parameter('camera_publish_panoramic', False)
+        self.declare_parameter('camera_publish_target_debug', False)
         self.declare_parameter('camera_panorama_lock_to_vehicle', True)
         self.declare_parameter('camera_yaw_offset_deg', 0.0)
         self.declare_parameter('camera_heading_sign', -1.0)
@@ -332,6 +427,7 @@ class VLMNavigatorNode(Node):
         self.declare_parameter('camera_heading_motion_min_displacement_m', 0.05)
         self.declare_parameter('camera_heading_smoothing_alpha', 0.0)
         self.declare_parameter('camera_heading_debug_log_interval_sec', 2.0)
+        self.declare_parameter('history_enable', True)
         self.declare_parameter('history_length', 8)
         self.declare_parameter('history_max_entries', 1024)
         self.declare_parameter('history_sensor_height_m', 0.55)
@@ -350,6 +446,7 @@ class VLMNavigatorNode(Node):
         self.declare_parameter('history_pose_buffer_sec', 5.0)
         self.declare_parameter('history_pose_max_dt_sec', 0.20)
         self.declare_parameter('history_depth_max_dt_sec', 0.35)
+        self.declare_parameter('history_debug_publish_hz', 1.0)
         self.declare_parameter('scan_depth_pose_max_dt_sec', 0.20)
         self.declare_parameter('target_detection_topic', '/target_detection')
         self.declare_parameter('target_confidence_threshold', 0.30)
@@ -377,13 +474,62 @@ class VLMNavigatorNode(Node):
         self.vlm_load_delay_sec = float(g('vlm_load_delay_sec').value)
         self.vlm_auto_infer = bool(g('vlm_auto_infer').value)
         self.vlm_inference_interval_sec = float(g('vlm_inference_interval_sec').value)
+        self.vlm_pre_inference_stop_sec = float(
+            g('vlm_pre_inference_stop_sec').value
+        )
         self.vlm_padding_px = int(g('vlm_padding_px').value)
+        self.vlm_forward_reinfer_distance_m = float(
+            g('vlm_forward_reinfer_distance_m').value
+        )
+        self.vlm_forward_reinfer_timeout_sec = float(
+            g('vlm_forward_reinfer_timeout_sec').value
+        )
+        self.vlm_stop_at_forward_reinfer_distance = bool(
+            g('vlm_stop_at_forward_reinfer_distance').value
+        )
+        self.vlm_wait_for_turn_completion = bool(
+            g('vlm_wait_for_turn_completion').value
+        )
+        self.vlm_pose_max_dt_sec = float(g('vlm_pose_max_dt_sec').value)
+        self.vlm_waypoint_projection_mode = (
+            str(g('vlm_waypoint_projection_mode').value).strip().lower()
+        )
+        self.vlm_ground_projection_max_m = float(
+            g('vlm_ground_projection_max_m').value
+        )
+        self.vlm_turn_mode = str(g('vlm_turn_mode').value).strip().lower()
+        self.vlm_turn_waypoint_distance_m = float(
+            g('vlm_turn_waypoint_distance_m').value
+        )
+        self.vlm_turn_waypoint_angle_deg = float(
+            g('vlm_turn_waypoint_angle_deg').value
+        )
+        self.vlm_turn_waypoint_reinfer_distance_m = float(
+            g('vlm_turn_waypoint_reinfer_distance_m').value
+        )
+        self.vlm_turn_waypoint_timeout_sec = float(
+            g('vlm_turn_waypoint_timeout_sec').value
+        )
+        self.vlm_direct_turn_angle_deg = float(
+            g('vlm_direct_turn_angle_deg').value
+        )
+        self.vlm_turn_streak_limit = int(g('vlm_turn_streak_limit').value)
+        self.vlm_turn_streak_forward_distance_m = float(
+            g('vlm_turn_streak_forward_distance_m').value
+        )
+        self.vlm_turn_streak_forward_reinfer_distance_m = float(
+            g('vlm_turn_streak_forward_reinfer_distance_m').value
+        )
         self.waypoint_frame = g('waypoint_frame').value
         self.waypoint_turn_distance_m = float(g('waypoint_turn_distance_m').value)
         self.waypoint_turn_angle_deg = float(g('waypoint_turn_angle_deg').value)
         self.waypoint_max_step_m = float(g('waypoint_max_step_m').value)
         self.direct_turn_rate_rad_s = float(g('direct_turn_rate_rad_s').value)
         self.direct_turn_duration_sec = float(g('direct_turn_duration_sec').value)
+        self.direct_stop_hold_duration_sec = float(
+            g('direct_stop_hold_duration_sec').value
+        )
+        self.depth_enable = bool(g('depth_enable').value)
         self.depth_topic = g('depth_topic').value.strip()
         self.depth_process_hz = float(g('depth_process_hz').value)
         self.depth_min_m = float(g('depth_min_m').value)
@@ -413,6 +559,7 @@ class VLMNavigatorNode(Node):
             g('scan_depth_ground_fill_spacing_m').value
         )
         self.camera_topic = g('camera_topic').value
+        self.camera_enable = bool(g('camera_enable').value)
         self.camera_process_hz = float(g('camera_process_hz').value)
         self.camera_is_panorama = bool(g('camera_is_panorama').value)
         self.camera_project_width = int(g('camera_project_width').value)
@@ -420,6 +567,11 @@ class VLMNavigatorNode(Node):
         self.camera_project_hfov_deg = float(g('camera_project_hfov_deg').value)
         self.camera_height_m = float(g('camera_height_m').value)
         self.camera_elevation_deg = float(g('camera_elevation_deg').value)
+        self.camera_async_processing = bool(g('camera_async_processing').value)
+        self.camera_publish_panoramic = bool(g('camera_publish_panoramic').value)
+        self.camera_publish_target_debug = bool(
+            g('camera_publish_target_debug').value
+        )
         self.camera_panorama_lock_to_vehicle = bool(
             g('camera_panorama_lock_to_vehicle').value
         )
@@ -438,6 +590,7 @@ class VLMNavigatorNode(Node):
         self.camera_heading_debug_log_interval_sec = float(
             g('camera_heading_debug_log_interval_sec').value
         )
+        self.history_enable = bool(g('history_enable').value)
         self.history_length = int(g('history_length').value)
         self.history_max_entries = int(g('history_max_entries').value)
         self.history_sensor_height_m = float(g('history_sensor_height_m').value)
@@ -472,6 +625,7 @@ class VLMNavigatorNode(Node):
         self.history_pose_buffer_sec = float(g('history_pose_buffer_sec').value)
         self.history_pose_max_dt_sec = float(g('history_pose_max_dt_sec').value)
         self.history_depth_max_dt_sec = float(g('history_depth_max_dt_sec').value)
+        self.history_debug_publish_hz = float(g('history_debug_publish_hz').value)
         self.scan_depth_pose_max_dt_sec = float(g('scan_depth_pose_max_dt_sec').value)
         self.target_detection_topic = g('target_detection_topic').value
         self.target_confidence_threshold = float(
@@ -507,6 +661,10 @@ class VLMNavigatorNode(Node):
             f'Loading VLM model from "{self.vlm_checkpoint}" '
             f'with template="{self.vlm_template}" ...'
         )
+        thread = threading.Thread(target=self._load_model_worker, daemon=True)
+        thread.start()
+
+    def _load_model_worker(self):
         try:
             self.vlm.load()
             self._model_loaded = True
@@ -519,6 +677,7 @@ class VLMNavigatorNode(Node):
     def run_current_rgb_template(
         self,
         instruction: Optional[str] = None,
+        current_rgb: Optional[PILImage.Image] = None,
         history_keyframes_single_color=None,
         history_interval_images=None,
         history_action_text: Optional[str] = None,
@@ -535,8 +694,10 @@ class VLMNavigatorNode(Node):
             )
         if not self._model_loaded:
             raise RuntimeError('VLM model is not loaded yet.')
-        if self.latest_rgb_pil is None:
+        rgb_for_prompt = current_rgb or self.latest_rgb_pil
+        if rgb_for_prompt is None:
             raise RuntimeError('No camera frame is available yet.')
+        rgb_for_prompt = rgb_for_prompt.convert('RGB')
 
         resolved_instruction = (instruction or self.current_instruction or '').strip()
         if not resolved_instruction:
@@ -554,18 +715,46 @@ class VLMNavigatorNode(Node):
             history_interval_images = history_inputs['history_interval_images']
             history_action_text = history_inputs['history_action_text']
 
-        prompt_image, _, _, _, _ = self._get_current_prompt_image_and_padding()
+        template_name = str(self.vlm_template)
+        if 'HisKFSingleColor' in template_name and not history_keyframes_single_color:
+            history_keyframes_single_color = self._fallback_history_images(rgb_for_prompt)
+            self.get_logger().warn(
+                f'History is not ready for template "{template_name}". '
+                f'Using {len(history_keyframes_single_color)} current-frame fallback history image(s) '
+                'so VLM inference can start.'
+            )
+        if 'His1Interval' in template_name and not history_interval_images:
+            history_interval_images = self._fallback_history_images(rgb_for_prompt)
+            self.get_logger().warn(
+                f'Interval history is not ready for template "{template_name}". '
+                f'Using {len(history_interval_images)} current-frame fallback history image(s) '
+                'so VLM inference can start.'
+            )
+        if 'HisAction' in template_name and not history_action_text:
+            history_action_text = 'No previous actions yet.'
+
+        if self.vlm_output_template in ('pixelintext', 'action_pixel'):
+            prompt_image = self._pad_current_rgb_for_vlm(rgb_for_prompt)
+        else:
+            prompt_image = rgb_for_prompt
 
         return self.vlm.run_rgb_template(
             instruction=resolved_instruction,
-            current_rgb=self.latest_rgb_pil,
+            current_rgb=rgb_for_prompt,
             current_rgb_padded=prompt_image,
             history_keyframes_single_color=history_keyframes_single_color,
             history_interval_images=history_interval_images,
             history_action_text=history_action_text,
         )
 
+    def _fallback_history_images(self, current_rgb: PILImage.Image) -> Sequence[PILImage.Image]:
+        count = max(1, min(int(self.history_length), 3))
+        rgb = current_rgb.convert('RGB')
+        return [rgb.copy() for _ in range(count)]
+
     def _ensure_history(self, rgb_shape: Tuple[int, int, int]):
+        if not bool(self.history_enable):
+            return
         if self.history is not None:
             return
         h, w = int(rgb_shape[0]), int(rgb_shape[1])
@@ -657,6 +846,8 @@ class VLMNavigatorNode(Node):
         )
 
     def _update_history_from_rgb(self, rgb_arr: np.ndarray):
+        if not bool(self.history_enable):
+            return
         if self.latest_rgb_stamp_s is None:
             return
         pose = self._current_history_pose(float(self.latest_rgb_stamp_s))
@@ -668,58 +859,77 @@ class VLMNavigatorNode(Node):
         ):
             return
 
-        self._ensure_history(rgb_arr.shape)
-        pos, yaw_rad = pose
-        depth_arr = None
-        history_depth = self.latest_history_depth_arr
-        if history_depth is None and self._last_depth_source != 'registered_scan':
-            history_depth = self.latest_depth_arr
-        if history_depth is not None:
-            depth_dt_ok = True
-            if self.latest_history_depth_stamp_s is not None:
-                depth_dt = abs(
-                    float(self.latest_history_depth_stamp_s)
-                    - float(self.latest_rgb_stamp_s)
-                )
-                depth_dt_ok = depth_dt <= max(0.0, float(self.history_depth_max_dt_sec))
-                if not depth_dt_ok:
-                    self.get_logger().debug(
-                        f'History RGB has stale depth: dt={depth_dt:.3f}s '
-                        f'> max_dt={float(self.history_depth_max_dt_sec):.3f}s'
+        history_keyframes_single_color = None
+        with self._history_lock:
+            self._ensure_history(rgb_arr.shape)
+            pos, yaw_rad = pose
+            depth_arr = None
+            history_depth = self.latest_history_depth_arr
+            if history_depth is None and self._last_depth_source != 'registered_scan':
+                history_depth = self.latest_depth_arr
+            if history_depth is not None:
+                depth_dt_ok = True
+                if self.latest_history_depth_stamp_s is not None:
+                    depth_dt = abs(
+                        float(self.latest_history_depth_stamp_s)
+                        - float(self.latest_rgb_stamp_s)
                     )
-            candidate = np.asarray(history_depth, dtype=np.float32)
-            if (
-                depth_dt_ok
-                and candidate.ndim == 2
-                and candidate.shape[:2] == rgb_arr.shape[:2]
-            ):
-                depth_arr = candidate.copy()
-        if self.history is None:
-            return
-        if not self.history.entries:
-            self.history.reset(
-                pos,
-                yaw_rad,
-                rgb_arr,
-                depth=depth_arr,
-                stamp_s=float(self.latest_rgb_stamp_s),
-            )
-        else:
-            self.history.update(
-                pos,
-                yaw_rad,
-                rgb_arr,
-                depth=depth_arr,
-                stamp_s=float(self.latest_rgb_stamp_s),
-            )
-        self._last_history_rgb_stamp_s = float(self.latest_rgb_stamp_s)
+                    depth_dt_ok = depth_dt <= max(
+                        0.0,
+                        float(self.history_depth_max_dt_sec),
+                    )
+                    if not depth_dt_ok:
+                        self.get_logger().debug(
+                            f'History RGB has stale depth: dt={depth_dt:.3f}s '
+                            f'> max_dt={float(self.history_depth_max_dt_sec):.3f}s'
+                        )
+                candidate = np.asarray(history_depth, dtype=np.float32)
+                if (
+                    depth_dt_ok
+                    and candidate.ndim == 2
+                    and candidate.shape[:2] == rgb_arr.shape[:2]
+                ):
+                    depth_arr = candidate.copy()
+            if self.history is None:
+                return
+            if not self.history.entries:
+                self.history.reset(
+                    pos,
+                    yaw_rad,
+                    rgb_arr,
+                    depth=depth_arr,
+                    stamp_s=float(self.latest_rgb_stamp_s),
+                )
+                added_keyframe = True
+            else:
+                added_keyframe = self.history.update(
+                    pos,
+                    yaw_rad,
+                    rgb_arr,
+                    depth=depth_arr,
+                    stamp_s=float(self.latest_rgb_stamp_s),
+                )
+            self._last_history_rgb_stamp_s = float(self.latest_rgb_stamp_s)
 
-        hist_imgs = self.history.get_hist_img(length=self.history_length)
-        history_keyframes_single_color = [
-            PILImage.fromarray(img.astype(np.uint8)).convert('RGB')
-            for img in reversed(hist_imgs.get('fpv_imgs_blue', []))
-        ]
-        self._publish_history_debug_montage(history_keyframes_single_color)
+            debug_hz = float(self.history_debug_publish_hz)
+            now_mono = time.monotonic()
+            publish_debug = debug_hz > 0.0 and (
+                added_keyframe
+                or (
+                    now_mono - float(self._last_history_debug_publish_time_s)
+                    >= (1.0 / max(debug_hz, 1e-3))
+                )
+            )
+            if publish_debug:
+                hist_imgs = self.history.get_hist_img(length=self.history_length)
+                history_keyframes_single_color = [
+                    PILImage.fromarray(img.astype(np.uint8)).convert('RGB')
+                    for img in reversed(hist_imgs.get('fpv_imgs_blue', []))
+                ]
+                self._last_history_debug_publish_time_s = now_mono
+
+        if history_keyframes_single_color is not None:
+            self._publish_history_debug_montage(history_keyframes_single_color)
 
     def _pad_current_rgb_for_vlm(self, image: PILImage.Image) -> PILImage.Image:
         padding = max(0, int(self.vlm_padding_px))
@@ -761,27 +971,35 @@ class VLMNavigatorNode(Node):
         history_interval_images = None
         history_action_text = None
 
-        if self.history is None:
+        if not bool(self.history_enable):
             return {
                 'history_keyframes_single_color': history_keyframes_single_color,
                 'history_interval_images': history_interval_images,
                 'history_action_text': history_action_text,
             }
 
-        hist_imgs = self.history.get_hist_img(length=self.history_length)
-        history_keyframes_single_color = [
-            PILImage.fromarray(img.astype(np.uint8)).convert('RGB')
-            for img in reversed(hist_imgs.get('fpv_imgs_blue', []))
-        ]
-        history_interval_images = [
-            PILImage.fromarray(img.astype(np.uint8)).convert('RGB')
-            for img in reversed(self.history.get_interval_img(length=self.history_length))
-        ]
+        with self._history_lock:
+            if self.history is None:
+                return {
+                    'history_keyframes_single_color': history_keyframes_single_color,
+                    'history_interval_images': history_interval_images,
+                    'history_action_text': history_action_text,
+                }
+
+            hist_imgs = self.history.get_hist_img(length=self.history_length)
+            history_keyframes_single_color = [
+                PILImage.fromarray(img.astype(np.uint8)).convert('RGB')
+                for img in reversed(hist_imgs.get('fpv_imgs_blue', []))
+            ]
+            history_interval_images = [
+                PILImage.fromarray(img.astype(np.uint8)).convert('RGB')
+                for img in reversed(self.history.get_interval_img(length=self.history_length))
+            ]
+
+            if 'HisAction' in str(self.vlm_template):
+                history_action_text = self.history.get_action_summary(recent_n=5)
 
         self._publish_history_debug_montage(history_keyframes_single_color)
-
-        if 'HisAction' in str(self.vlm_template):
-            history_action_text = self.history.get_action_summary(recent_n=5)
 
         return {
             'history_keyframes_single_color': history_keyframes_single_color,
@@ -872,6 +1090,8 @@ class VLMNavigatorNode(Node):
         return math.radians(float(self.camera_yaw_offset_deg))
 
     def _lookup_depth_at_pixel(self, pixel_xy: Tuple[int, int]) -> Optional[float]:
+        if not bool(self.depth_enable):
+            return None
         if self.latest_depth_arr is None:
             return None
 
@@ -895,6 +1115,8 @@ class VLMNavigatorNode(Node):
         return float(np.median(patch[valid]))
 
     def _describe_depth_at_pixel(self, pixel_xy: Tuple[int, int]) -> str:
+        if not bool(self.depth_enable):
+            return 'depth disabled'
         if self.latest_depth_arr is None:
             return 'depth_arr=None'
 
@@ -945,6 +1167,8 @@ class VLMNavigatorNode(Node):
     def _pixel_to_world_waypoint(
         self,
         selected_pixel: Tuple[int, int],
+        pose_sample: Optional[Tuple[float, float, float, float, float]] = None,
+        rgb_size: Optional[Tuple[int, int]] = None,
     ) -> Optional[Tuple[float, float, float]]:
         """
         Convert an unpadded egocentric pixel into a 3D waypoint in map/world frame.
@@ -952,17 +1176,24 @@ class VLMNavigatorNode(Node):
         This follows the same high-level flow as the simulation helper:
         pixel -> depth-based 3D point in camera/agent frame -> world frame.
         """
-        if self.latest_pose_x is None or self.latest_pose_y is None or self.latest_yaw is None:
-            return None
+        if pose_sample is not None:
+            pose_stamp_s, pose_x, pose_y, pose_z, pose_yaw = pose_sample
+        else:
+            if self.latest_pose_x is None or self.latest_pose_y is None or self.latest_yaw is None:
+                return None
+            pose_stamp_s = float(self.latest_pose_stamp_s or 0.0)
+            pose_x = float(self.latest_pose_x)
+            pose_y = float(self.latest_pose_y)
+            pose_z = float(self.latest_pose_z or 0.0)
+            pose_yaw = float(self.latest_yaw)
+        projection_setting = str(
+            getattr(self, 'vlm_waypoint_projection_mode', 'depth_surface')
+        ).strip().lower()
         depth_m = self._lookup_depth_at_pixel(selected_pixel)
-        if depth_m is None:
-            self.get_logger().warn(
-                f'Cannot convert selected pixel {selected_pixel} to waypoint: no valid depth. '
-                f'{self._describe_depth_at_pixel(selected_pixel)}'
-            )
-            return None
 
-        if self.latest_rgb_pil is not None:
+        if rgb_size is not None:
+            rgb_w, rgb_h = int(rgb_size[0]), int(rgb_size[1])
+        elif self.latest_rgb_pil is not None:
             rgb_w, rgb_h = self.latest_rgb_pil.size
         elif self.latest_depth_arr is not None:
             rgb_h, rgb_w = self.latest_depth_arr.shape[:2]
@@ -998,43 +1229,86 @@ class VLMNavigatorNode(Node):
             )
             return None
 
-        depth_scale = float(depth_m) / ray_forward
-        right_m = ray_right * depth_scale
-        down_m = ray_down * depth_scale
-        forward_m = ray_forward * depth_scale
+        depth_scale = None
+        right_m = down_m = forward_m = None
+        if depth_m is not None:
+            depth_scale = float(depth_m) / ray_forward
+            right_m = ray_right * depth_scale
+            down_m = ray_down * depth_scale
+            forward_m = ray_forward * depth_scale
 
         camera_height_m = max(1e-3, float(self.camera_height_m))
         projection_mode = 'depth_surface'
-        if self._last_depth_source != 'registered_scan' and ray_down > 1e-4:
-            ground_scale = camera_height_m / ray_down
-            if ground_scale > 0.0:
-                # When the selected pixel lies on the floor, the ground-plane
-                # intersection should be close to the observed depth. Prefer it
-                # in that case; otherwise keep the depth-based surface point to
-                # avoid shooting waypoints through obstacles.
-                ground_ratio = ground_scale / max(depth_scale, 1e-6)
-                if 0.70 <= ground_ratio <= 1.30:
-                    right_m = ray_right * ground_scale
-                    down_m = ray_down * ground_scale
-                    forward_m = ray_forward * ground_scale
-                    projection_mode = 'ground_intersection'
+        ground_scale = None
+        ground_forward = None
+        if ray_down > 1e-4:
+            candidate_scale = camera_height_m / ray_down
+            candidate_forward = ray_forward * candidate_scale
+            max_ground_m = max(
+                float(self.depth_min_m),
+                float(getattr(self, 'vlm_ground_projection_max_m', self.depth_max_m)),
+            )
+            if (
+                candidate_scale > 0.0
+                and candidate_forward >= float(self.depth_min_m)
+                and candidate_forward <= max_ground_m
+            ):
+                ground_scale = candidate_scale
+                ground_forward = candidate_forward
 
-        camera_yaw = float(self.latest_yaw) + self._camera_yaw_offset_world_rad()
+        use_ground = False
+        if ground_scale is not None:
+            if projection_setting in ('ground', 'ground_intersection', 'floor'):
+                use_ground = True
+            elif projection_setting in ('farther_ground', 'prefer_far_ground'):
+                use_ground = depth_scale is None or ground_scale > depth_scale
+            elif projection_setting in ('ground_if_consistent', 'consistent'):
+                # Keep the old conservative behavior: only replace depth with a
+                # floor intersection when the two estimates roughly agree.
+                if depth_scale is not None:
+                    ground_ratio = ground_scale / max(depth_scale, 1e-6)
+                    use_ground = 0.70 <= ground_ratio <= 1.30
+
+        if use_ground:
+            right_m = ray_right * ground_scale
+            down_m = ray_down * ground_scale
+            forward_m = ray_forward * ground_scale
+            projection_mode = projection_setting
+
+        if forward_m is None or right_m is None or down_m is None:
+            self.get_logger().warn(
+                f'Cannot convert selected pixel {selected_pixel} to waypoint: '
+                f'projection_setting={projection_setting}, no valid ground intersection '
+                f'and no valid depth. {self._describe_depth_at_pixel(selected_pixel)}'
+            )
+            return None
+
+        camera_yaw = float(pose_yaw) + self._camera_yaw_offset_world_rad()
         wx = (
-            float(self.latest_pose_x)
+            float(pose_x)
             + forward_m * math.cos(camera_yaw)
             + right_m * math.sin(camera_yaw)
         )
         wy = (
-            float(self.latest_pose_y)
+            float(pose_y)
             + forward_m * math.sin(camera_yaw)
             - right_m * math.cos(camera_yaw)
         )
-        wz = float(self.latest_pose_z or 0.0) - down_m
+        wz = float(pose_z) - down_m
+        depth_text = f'{float(depth_m):.3f}m' if depth_m is not None else 'n/a'
+        ground_text = (
+            f'{float(ground_forward):.3f}m'
+            if ground_forward is not None
+            else 'n/a'
+        )
         self.get_logger().info(
             f'Pixel {selected_pixel} -> waypoint using {projection_mode}: '
-            f'depth={float(depth_m):.3f}m, camera_height={camera_height_m:.3f}m, '
+            f'pose_stamp={float(pose_stamp_s):.3f}, '
+            f'depth={depth_text}, '
+            f'camera_height={camera_height_m:.3f}m, '
             f'forward={forward_m:.3f}m, right={right_m:.3f}m, '
+            f'ground_forward={ground_text}, '
+            f'projection_setting={projection_setting}, '
             f'depth_source={self._last_depth_source}'
         )
         return (wx, wy, wz)
@@ -1042,21 +1316,27 @@ class VLMNavigatorNode(Node):
     def _limit_waypoint_step(
         self,
         waypoint_xyz: Tuple[float, float, float],
+        origin_xy: Optional[Tuple[float, float]] = None,
     ) -> Tuple[float, float, float]:
         max_step_m = float(self.waypoint_max_step_m)
-        if max_step_m <= 0.0 or self.latest_pose_x is None or self.latest_pose_y is None:
+        if origin_xy is None:
+            if self.latest_pose_x is None or self.latest_pose_y is None:
+                return waypoint_xyz
+            origin_xy = (float(self.latest_pose_x), float(self.latest_pose_y))
+        if max_step_m <= 0.0:
             return waypoint_xyz
 
-        dx = float(waypoint_xyz[0]) - float(self.latest_pose_x)
-        dy = float(waypoint_xyz[1]) - float(self.latest_pose_y)
+        origin_x, origin_y = float(origin_xy[0]), float(origin_xy[1])
+        dx = float(waypoint_xyz[0]) - origin_x
+        dy = float(waypoint_xyz[1]) - origin_y
         dist = math.hypot(dx, dy)
         if dist <= max_step_m or dist <= 1e-6:
             return waypoint_xyz
 
         scale = max_step_m / dist
         limited = (
-            float(self.latest_pose_x) + dx * scale,
-            float(self.latest_pose_y) + dy * scale,
+            origin_x + dx * scale,
+            origin_y + dy * scale,
             float(waypoint_xyz[2]),
         )
         self.get_logger().info(
@@ -1083,32 +1363,279 @@ class VLMNavigatorNode(Node):
             f'to /way_point [{reason}]'
         )
 
-    def _publish_forward_fallback_waypoint(self, reason: str):
-        if self.latest_pose_x is None or self.latest_pose_y is None or self.latest_yaw is None:
+    def _set_pending_vlm_waypoint(
+        self,
+        waypoint_xyz: Tuple[float, float, float],
+        *,
+        reason: str,
+        threshold_m: Optional[float] = None,
+        timeout_s: Optional[float] = None,
+    ):
+        threshold = (
+            float(self.vlm_forward_reinfer_distance_m)
+            if threshold_m is None
+            else float(threshold_m)
+        )
+        self._pending_vlm_waypoint_xyz = (
+            float(waypoint_xyz[0]),
+            float(waypoint_xyz[1]),
+            float(waypoint_xyz[2]),
+        )
+        self._pending_vlm_waypoint_reason = str(reason)
+        self._pending_vlm_waypoint_start_mono_s = time.monotonic()
+        self._pending_vlm_waypoint_threshold_m = max(0.0, threshold)
+        self._pending_vlm_waypoint_timeout_s = (
+            None if timeout_s is None else max(0.0, float(timeout_s))
+        )
+        self.get_logger().info(
+            f'VLM inference paused until waypoint is within '
+            f'{float(self._pending_vlm_waypoint_threshold_m):.2f}m: '
+            f'waypoint=({waypoint_xyz[0]:.2f}, {waypoint_xyz[1]:.2f}, {waypoint_xyz[2]:.2f}) '
+            f'[{reason}]'
+        )
+
+    def _clear_pending_vlm_waypoint(self, reason: str):
+        if self._pending_vlm_waypoint_xyz is not None:
+            self.get_logger().info(f'Cleared pending VLM waypoint gate [{reason}]')
+        self._pending_vlm_waypoint_xyz = None
+        self._pending_vlm_waypoint_reason = ''
+        self._pending_vlm_waypoint_start_mono_s = 0.0
+        self._pending_vlm_waypoint_threshold_m = 0.0
+        self._pending_vlm_waypoint_timeout_s = None
+
+    def _vlm_motion_gate_allows_inference(self, now_mono: float) -> bool:
+        if (
+            bool(self.vlm_wait_for_turn_completion)
+            and abs(float(self._direct_turn_rate_rad_s)) > 1e-6
+            and now_mono < float(self._direct_turn_until_s)
+        ):
+            if now_mono - float(self._last_vlm_gate_log_s) >= 1.0:
+                remaining = float(self._direct_turn_until_s) - now_mono
+                self.get_logger().info(
+                    f'VLM inference paused during direct turn: remaining={remaining:.2f}s'
+                )
+                self._last_vlm_gate_log_s = now_mono
+            return False
+
+        if self._pending_vlm_waypoint_xyz is None:
+            return True
+
+        if self.latest_pose_x is None or self.latest_pose_y is None:
+            if now_mono - float(self._last_vlm_gate_log_s) >= 1.0:
+                self.get_logger().info(
+                    'VLM inference paused for waypoint gate: pose unavailable'
+                )
+                self._last_vlm_gate_log_s = now_mono
+            return False
+
+        wx, wy, _ = self._pending_vlm_waypoint_xyz
+        dist = math.hypot(float(wx) - float(self.latest_pose_x), float(wy) - float(self.latest_pose_y))
+        threshold = max(0.0, float(self._pending_vlm_waypoint_threshold_m))
+        if dist <= threshold:
+            reason = f'forward_waypoint_reached dist={dist:.2f}m <= {threshold:.2f}m'
+            if bool(self.vlm_stop_at_forward_reinfer_distance):
+                self._stop_robot_once(reason)
+            else:
+                self._clear_pending_vlm_waypoint(reason)
+            return True
+
+        timeout_s = (
+            float(self.vlm_forward_reinfer_timeout_sec)
+            if self._pending_vlm_waypoint_timeout_s is None
+            else float(self._pending_vlm_waypoint_timeout_s)
+        )
+        elapsed = now_mono - float(self._pending_vlm_waypoint_start_mono_s)
+        if timeout_s > 0.0 and elapsed >= timeout_s:
+            self.get_logger().warn(
+                f'VLM waypoint gate timed out after {elapsed:.1f}s: '
+                f'dist={dist:.2f}m > {threshold:.2f}m '
+                f'[{self._pending_vlm_waypoint_reason}]'
+            )
+            self._clear_pending_vlm_waypoint('timeout')
+            return True
+
+        if now_mono - float(self._last_vlm_gate_log_s) >= 1.0:
+            self.get_logger().info(
+                f'VLM inference paused until waypoint is reached: '
+                f'dist={dist:.2f}m > {threshold:.2f}m '
+                f'[{self._pending_vlm_waypoint_reason}]'
+            )
+            self._last_vlm_gate_log_s = now_mono
+        return False
+
+    def _publish_forward_fallback_waypoint(
+        self,
+        reason: str,
+        pose_sample: Optional[Tuple[float, float, float, float, float]] = None,
+    ):
+        if pose_sample is not None:
+            _, pose_x, pose_y, pose_z, pose_yaw = pose_sample
+        else:
+            if self.latest_pose_x is None or self.latest_pose_y is None or self.latest_yaw is None:
+                self.get_logger().warn(
+                    f'VLM_FALLBACK_FORWARD_SKIPPED_NO_POSE: {reason}'
+                )
+                return
+            pose_x = float(self.latest_pose_x)
+            pose_y = float(self.latest_pose_y)
+            pose_z = float(self.latest_pose_z or 0.0)
+            pose_yaw = float(self.latest_yaw)
+
+        if pose_x is None or pose_y is None or pose_yaw is None:
             self.get_logger().warn(
                 f'VLM_FALLBACK_FORWARD_SKIPPED_NO_POSE: {reason}'
             )
             return
         distance_m = max(0.2, float(self.waypoint_turn_distance_m))
-        camera_yaw = float(self.latest_yaw) + self._camera_yaw_offset_world_rad()
-        wx = float(self.latest_pose_x) + distance_m * math.cos(camera_yaw)
-        wy = float(self.latest_pose_y) + distance_m * math.sin(camera_yaw)
-        wz = float(self.latest_pose_z or 0.0)
+        camera_yaw = float(pose_yaw) + self._camera_yaw_offset_world_rad()
+        wx = float(pose_x) + distance_m * math.cos(camera_yaw)
+        wy = float(pose_y) + distance_m * math.sin(camera_yaw)
+        wz = float(pose_z)
         self.get_logger().warn(
             f'VLM_FALLBACK_FORWARD_DEPTH_INVALID: publishing forward fallback '
             f'distance={distance_m:.2f}m, waypoint=({wx:.2f}, {wy:.2f}, {wz:.2f}), '
             f'reason={reason}'
         )
-        self._publish_waypoint((wx, wy, wz), reason=reason)
+        waypoint_xyz = (wx, wy, wz)
+        self._publish_waypoint(waypoint_xyz, reason=reason)
+        self._set_pending_vlm_waypoint(waypoint_xyz, reason=reason)
+
+    def _pose_components_for_action(
+        self,
+        pose_sample: Optional[Tuple[float, float, float, float, float]] = None,
+    ) -> Optional[Tuple[float, float, float, float, float]]:
+        if pose_sample is not None:
+            return pose_sample
+        if self.latest_pose_x is None or self.latest_pose_y is None or self.latest_yaw is None:
+            return None
+        return (
+            float(self.latest_pose_stamp_s or 0.0),
+            float(self.latest_pose_x),
+            float(self.latest_pose_y),
+            float(self.latest_pose_z or 0.0),
+            float(self.latest_yaw),
+        )
+
+    def _publish_relative_vlm_waypoint(
+        self,
+        *,
+        angle_deg: float,
+        distance_m: float,
+        reason: str,
+        pose_sample: Optional[Tuple[float, float, float, float, float]] = None,
+        threshold_m: Optional[float] = None,
+        timeout_s: Optional[float] = None,
+    ) -> bool:
+        pose = self._pose_components_for_action(pose_sample)
+        if pose is None:
+            self.get_logger().warn(
+                f'Cannot publish relative VLM waypoint: pose unavailable [{reason}]'
+            )
+            return False
+
+        pose_stamp_s, pose_x, pose_y, pose_z, pose_yaw = pose
+        camera_yaw = float(pose_yaw) + self._camera_yaw_offset_world_rad()
+        target_yaw = camera_yaw + math.radians(float(angle_deg))
+        distance = max(0.0, float(distance_m))
+        waypoint_xyz = (
+            float(pose_x) + distance * math.cos(target_yaw),
+            float(pose_y) + distance * math.sin(target_yaw),
+            float(pose_z),
+        )
+        self.get_logger().warn(
+            f'VLM_RELATIVE_WAYPOINT: angle={float(angle_deg):.1f}deg, '
+            f'distance={distance:.2f}m, pose_stamp={float(pose_stamp_s):.3f}, '
+            f'waypoint=({waypoint_xyz[0]:.2f}, {waypoint_xyz[1]:.2f}, {waypoint_xyz[2]:.2f}) '
+            f'[{reason}]'
+        )
+        self._publish_waypoint(waypoint_xyz, reason=reason)
+        self._set_pending_vlm_waypoint(
+            waypoint_xyz,
+            reason=reason,
+            threshold_m=threshold_m,
+            timeout_s=timeout_s,
+        )
+        return True
+
+    def _vlm_turn_mode_is_direct(self) -> bool:
+        mode = str(getattr(self, 'vlm_turn_mode', 'waypoint')).strip().lower()
+        return mode in ('direct', 'direct_turn', 'in_place', 'rotate')
+
+    def _handle_turn_padding_output(
+        self,
+        *,
+        direction: str,
+        text_output: str,
+        pose_sample: Optional[Tuple[float, float, float, float, float]] = None,
+    ):
+        direction_norm = str(direction).strip().lower()
+        self._consecutive_turn_outputs += 1
+        limit = max(1, int(self.vlm_turn_streak_limit))
+        raw = str(text_output).strip()
+
+        if self._consecutive_turn_outputs >= limit:
+            self.get_logger().warn(
+                f'VLM_TURN_STREAK_BYPASS: consecutive_turn_outputs='
+                f'{self._consecutive_turn_outputs} >= {limit}; '
+                f'publishing forward waypoint instead of {direction_norm}. raw="{raw}"'
+            )
+            ok = self._publish_relative_vlm_waypoint(
+                angle_deg=0.0,
+                distance_m=float(self.vlm_turn_streak_forward_distance_m),
+                reason=f'vlm_turn_streak_forward raw="{raw}"',
+                pose_sample=pose_sample,
+                threshold_m=float(self.vlm_turn_streak_forward_reinfer_distance_m),
+            )
+            self._consecutive_turn_outputs = 0
+            if not ok:
+                self._try_rotate_in_place(
+                    yaw_rate_rad_s=(
+                        abs(float(self.direct_turn_rate_rad_s))
+                        if direction_norm == 'left'
+                        else -abs(float(self.direct_turn_rate_rad_s))
+                    ),
+                    reason=f'vlm_{direction_norm}_padding raw="{raw}"',
+            )
+            return
+
+        signed_angle = abs(float(self.vlm_turn_waypoint_angle_deg))
+        if direction_norm == 'right':
+            signed_angle *= -1.0
+        elif direction_norm != 'left':
+            self.get_logger().warn(f'Unknown turn direction: {direction!r}')
+            return
+
+        if self._vlm_turn_mode_is_direct():
+            direct_angle = abs(float(self.vlm_direct_turn_angle_deg))
+            yaw_rate = abs(float(self.direct_turn_rate_rad_s))
+            if direction_norm == 'right':
+                yaw_rate *= -1.0
+            self._try_rotate_in_place(
+                yaw_rate_rad_s=yaw_rate,
+                reason=f'vlm_{direction_norm}_direct_turn_{direct_angle:.1f}deg raw="{raw}"',
+                angle_deg=direct_angle,
+            )
+            return
+
+        if not self._publish_relative_vlm_waypoint(
+            angle_deg=signed_angle,
+            distance_m=float(self.vlm_turn_waypoint_distance_m),
+            reason=f'vlm_{direction_norm}_waypoint raw="{raw}"',
+            pose_sample=pose_sample,
+            threshold_m=float(self.vlm_turn_waypoint_reinfer_distance_m),
+            timeout_s=float(self.vlm_turn_waypoint_timeout_sec),
+        ):
+            self._try_rotate_in_place(
+                yaw_rate_rad_s=(
+                    abs(float(self.direct_turn_rate_rad_s))
+                    if direction_norm == 'left'
+                    else -abs(float(self.direct_turn_rate_rad_s))
+                ),
+                reason=f'vlm_{direction_norm}_padding raw="{raw}"',
+            )
 
     def _direct_turn_timer_callback(self):
         now_s = time.monotonic()
-        if now_s >= float(self._direct_turn_until_s) or abs(float(self._direct_turn_rate_rad_s)) <= 1e-6:
-            return
-        if now_s < float(self._direct_turn_start_s):
-            self._publish_zero_cmd_vel('waiting_before_direct_turn')
-            return
-
         twist = TwistStamped()
         twist.header.stamp = self.get_clock().now().to_msg()
         twist.header.frame_id = 'vehicle'
@@ -1117,26 +1644,55 @@ class VLMNavigatorNode(Node):
         twist.twist.linear.z = 0.0
         twist.twist.angular.x = 0.0
         twist.twist.angular.y = 0.0
-        twist.twist.angular.z = float(self._direct_turn_rate_rad_s)
-        self.cmd_vel_pub.publish(twist)
 
-    def _try_rotate_in_place(self, yaw_rate_rad_s: float, reason: str):
+        if abs(float(self._direct_turn_rate_rad_s)) > 1e-6:
+            if now_s >= float(self._direct_turn_until_s):
+                self._direct_turn_rate_rad_s = 0.0
+                self._direct_turn_start_s = 0.0
+                self._direct_turn_until_s = 0.0
+                return
+            if now_s < float(self._direct_turn_start_s):
+                self._publish_zero_cmd_vel('waiting_before_direct_turn')
+                twist.twist.angular.z = 0.0
+                self.direct_turn_cmd_pub.publish(twist)
+                return
+            twist.twist.angular.z = float(self._direct_turn_rate_rad_s)
+            self.direct_turn_cmd_pub.publish(twist)
+            return
+
+        if now_s < float(self._direct_stop_until_s):
+            twist.twist.angular.z = 0.0
+            self.direct_turn_cmd_pub.publish(twist)
+
+    def _try_rotate_in_place(
+        self,
+        yaw_rate_rad_s: float,
+        reason: str,
+        *,
+        angle_deg: Optional[float] = None,
+    ):
         """
         Best-effort in-place rotation.
 
-        The stack already has a /cmd_vel -> vehicleSimulator path, so we publish
-        a short zero-linear, non-zero-yaw command.
+        The pathFollower node owns /cmd_vel, so we publish an override command
+        that pathFollower forwards after zeroing linear velocity.
         """
+        self._clear_pending_vlm_waypoint(f'direct_turn_start {reason}')
         self._stop_robot_once(f'stop_before_direct_turn [{reason}]')
         self._direct_turn_rate_rad_s = float(yaw_rate_rad_s)
+        yaw_rate_abs = abs(float(yaw_rate_rad_s))
+        if angle_deg is not None and yaw_rate_abs > 1e-6:
+            duration_s = math.radians(abs(float(angle_deg))) / yaw_rate_abs
+        else:
+            duration_s = float(self.direct_turn_duration_sec)
         self._direct_turn_start_s = time.monotonic()
         self._direct_turn_until_s = self._direct_turn_start_s + max(
-            0.1, float(self.direct_turn_duration_sec)
+            0.1, float(duration_s)
         )
         self.get_logger().info(
-            f'Trying direct in-place rotation via /cmd_vel immediately after stop: '
+            f'Trying direct in-place rotation via /vlm_direct_turn_cmd: '
             f'yaw_rate={float(yaw_rate_rad_s):.3f} rad/s, '
-            f'duration={float(self.direct_turn_duration_sec):.2f}s [{reason}]'
+            f'duration={float(duration_s):.2f}s [{reason}]'
         )
 
     def _publish_zero_cmd_vel(self, reason: str):
@@ -1153,9 +1709,13 @@ class VLMNavigatorNode(Node):
         self.get_logger().info(f'Published zero /cmd_vel [{reason}]')
 
     def _stop_robot_once(self, reason: str):
+        self._clear_pending_vlm_waypoint(f'stop_robot {reason}')
         self._direct_turn_rate_rad_s = 0.0
         self._direct_turn_start_s = 0.0
         self._direct_turn_until_s = 0.0
+        self._direct_stop_until_s = time.monotonic() + max(
+            0.0, float(self.direct_stop_hold_duration_sec)
+        )
         if self.latest_pose_x is not None and self.latest_pose_y is not None:
             self._publish_waypoint(
                 (
@@ -1168,6 +1728,10 @@ class VLMNavigatorNode(Node):
         else:
             self.get_logger().warn(f'Cannot publish hold waypoint: pose unavailable [{reason}]')
         self._publish_zero_cmd_vel(reason)
+        self.get_logger().info(
+            f'Published VLM stop override for {float(self.direct_stop_hold_duration_sec):.2f}s '
+            f'[{reason}]'
+        )
 
     def _mark_instruction_finished(self, reason: str):
         self.get_logger().warn(
@@ -1176,6 +1740,9 @@ class VLMNavigatorNode(Node):
         self._direct_turn_rate_rad_s = 0.0
         self._direct_turn_start_s = 0.0
         self._direct_turn_until_s = 0.0
+        self._direct_stop_until_s = 0.0
+        self._vlm_pre_inference_stop_until_s = 0.0
+        self._clear_pending_vlm_waypoint(f'instruction_finished {reason}')
 
         finished_msg = Bool()
         finished_msg.data = True
@@ -1191,6 +1758,7 @@ class VLMNavigatorNode(Node):
         self._last_vlm_inference_stamp_s = None
         self._last_vlm_inference_time_mono_s = 0.0
         self._last_vlm_output_text = ''
+        self._consecutive_turn_outputs = 0
 
     def _publish_vlm_pixel_debug(
         self,
@@ -1208,16 +1776,6 @@ class VLMNavigatorNode(Node):
         v = int(np.clip(padded_pixel_xy[1], 0, rgb.shape[0] - 1))
         color = (0, 255, 0) if in_forward_region else (255, 0, 0)
         cv2.circle(rgb, (u, v), 6, color, -1)
-        cv2.putText(
-            rgb,
-            'VLM_PIXEL',
-            (min(rgb.shape[1] - 80, u + 8), max(16, v - 8)),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.45,
-            color,
-            1,
-            cv2.LINE_AA,
-        )
         self._publish_rgb_image(self.vlm_pixel_debug_pub, rgb, frame_id='camera')
         self._cache_debug_image('vlm_pixel_debug', rgb)
 
@@ -1227,14 +1785,29 @@ class VLMNavigatorNode(Node):
             cu = int(np.clip(u, 0, current_dbg.shape[1] - 1))
             cv_pt = int(np.clip(v, 0, current_dbg.shape[0] - 1))
             cv2.circle(current_dbg, (cu, cv_pt), 7, text_color, -1)
+            label = (
+                f'({cu}, {cv_pt})'
+                if in_forward_region
+                else f'{decision_label}: ({cu}, {cv_pt})'
+            )
+            font_scale = 0.38
+            thickness = 1
+            label_size, _ = cv2.getTextSize(
+                label,
+                cv2.FONT_HERSHEY_SIMPLEX,
+                font_scale,
+                thickness,
+            )
+            label_x = int(np.clip(cu + 8, 4, max(4, current_dbg.shape[1] - label_size[0] - 4)))
+            label_y = int(np.clip(cv_pt - 8, label_size[1] + 4, current_dbg.shape[0] - 4))
             cv2.putText(
                 current_dbg,
-                f'{decision_label}: ({cu}, {cv_pt})',
-                (min(current_dbg.shape[1] - 230, cu + 10), max(20, cv_pt - 10)),
+                label,
+                (label_x, label_y),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.55,
+                font_scale,
                 text_color,
-                2,
+                thickness,
                 cv2.LINE_AA,
             )
         else:
@@ -1243,9 +1816,9 @@ class VLMNavigatorNode(Node):
                 f'DECISION: {decision_label}',
                 (18, 30),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
+                0.55,
                 text_color,
-                2,
+                1,
                 cv2.LINE_AA,
             )
             cv2.putText(
@@ -1253,9 +1826,9 @@ class VLMNavigatorNode(Node):
                 f'Prompt pixel: ({u}, {v})',
                 (18, 58),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.55,
+                0.42,
                 text_color,
-                2,
+                1,
                 cv2.LINE_AA,
             )
         self._publish_rgb_image(
@@ -1265,13 +1838,30 @@ class VLMNavigatorNode(Node):
         )
         self._cache_debug_image('vlm_current_decision_debug', current_dbg)
 
-    def _process_vlm_output_to_waypoint(self, text_output: str):
+    def _process_vlm_output_to_waypoint(
+        self,
+        text_output: str,
+        *,
+        rgb_stamp_s: Optional[float] = None,
+        current_rgb: Optional[PILImage.Image] = None,
+        pose_sample: Optional[Tuple[float, float, float, float, float]] = None,
+    ):
         x_1000, y_1000 = self._parse_pixelintext(text_output, lo=0, hi=1000)
-        prompt_image, pad_left, pad_right, pad_top, pad_bottom = (
-            self._get_current_prompt_image_and_padding()
-        )
+        rgb_for_geometry = current_rgb or self.latest_rgb_pil
+        if rgb_for_geometry is None:
+            self.get_logger().warn('Cannot process VLM output: no RGB image is available.')
+            return
+        rgb_for_geometry = rgb_for_geometry.convert('RGB')
+        use_padding = self.vlm_output_template in ('pixelintext', 'action_pixel')
+        if use_padding:
+            prompt_image = self._pad_current_rgb_for_vlm(rgb_for_geometry)
+            padding = max(0, int(self.vlm_padding_px))
+            pad_left, pad_right, pad_top, pad_bottom = padding, padding, 0, 2 * padding
+        else:
+            prompt_image = rgb_for_geometry
+            pad_left = pad_right = pad_top = pad_bottom = 0
         padded_w, padded_h = prompt_image.size
-        rgb_w, rgb_h = self.latest_rgb_pil.size
+        rgb_w, rgb_h = rgb_for_geometry.size
 
         x = int((float(x_1000) / 1000.0) * float(padded_w))
         y = int((float(y_1000) / 1000.0) * float(padded_h))
@@ -1286,8 +1876,20 @@ class VLMNavigatorNode(Node):
         selected_pixel = None
         if in_forward_region:
             selected_pixel = (int(x - rgb_x0), int(y - rgb_y0))
+        stamp_text = (
+            f'rgb_stamp={float(rgb_stamp_s):.3f}, '
+            if rgb_stamp_s is not None
+            else ''
+        )
+        pose_text = (
+            f'pose_stamp={float(pose_sample[0]):.3f}, '
+            if pose_sample is not None
+            else 'pose_stamp=None, '
+        )
         self.get_logger().info(
             f'VLM_PIXEL_TRACE: raw="{str(text_output).strip()}", '
+            f'{stamp_text}'
+            f'{pose_text}'
             f'normalized=({x_1000}, {y_1000}), padded_pixel=({x}, {y}), '
             f'padded_size=({padded_w}, {padded_h}), '
             f'rgb_region=({rgb_x0}:{rgb_x1}, {rgb_y0}:{rgb_y1}), '
@@ -1301,10 +1903,30 @@ class VLMNavigatorNode(Node):
         )
 
         if in_forward_region:
-            waypoint_xyz = self._pixel_to_world_waypoint(selected_pixel)
+            self._consecutive_turn_outputs = 0
+            if pose_sample is None:
+                self.get_logger().warn(
+                    f'Cannot convert selected pixel {selected_pixel}: '
+                    f'no timestamp-aligned pose for rgb_stamp={rgb_stamp_s}. '
+                    'Skipping waypoint instead of using latest pose.'
+                )
+                return
+            waypoint_xyz = self._pixel_to_world_waypoint(
+                selected_pixel,
+                pose_sample=pose_sample,
+                rgb_size=rgb_for_geometry.size,
+            )
             if waypoint_xyz is not None:
-                waypoint_xyz = self._limit_waypoint_step(waypoint_xyz)
+                origin_xy = (float(pose_sample[1]), float(pose_sample[2]))
+                waypoint_xyz = self._limit_waypoint_step(
+                    waypoint_xyz,
+                    origin_xy=origin_xy,
+                )
                 self._publish_waypoint(
+                    waypoint_xyz,
+                    reason=f'vlm_forward_pixel={selected_pixel} raw="{str(text_output).strip()}"',
+                )
+                self._set_pending_vlm_waypoint(
                     waypoint_xyz,
                     reason=f'vlm_forward_pixel={selected_pixel} raw="{str(text_output).strip()}"',
                 )
@@ -1318,7 +1940,8 @@ class VLMNavigatorNode(Node):
                 + self._describe_depth_at_pixel(selected_pixel)
             )
             self._publish_forward_fallback_waypoint(
-                reason=f'vlm_forward_fallback raw="{str(text_output).strip()}"'
+                reason=f'vlm_forward_fallback raw="{str(text_output).strip()}"',
+                pose_sample=pose_sample,
             )
             return
 
@@ -1334,9 +1957,10 @@ class VLMNavigatorNode(Node):
                 selected_pixel_xy=None,
                 decision_label='TURN_LEFT',
             )
-            self._try_rotate_in_place(
-                yaw_rate_rad_s=abs(float(self.direct_turn_rate_rad_s)),
-                reason=f'vlm_left_padding raw="{str(text_output).strip()}"',
+            self._handle_turn_padding_output(
+                direction='left',
+                text_output=text_output,
+                pose_sample=pose_sample,
             )
             return
 
@@ -1352,13 +1976,15 @@ class VLMNavigatorNode(Node):
                 selected_pixel_xy=None,
                 decision_label='TURN_RIGHT',
             )
-            self._try_rotate_in_place(
-                yaw_rate_rad_s=-abs(float(self.direct_turn_rate_rad_s)),
-                reason=f'vlm_right_padding raw="{str(text_output).strip()}"',
+            self._handle_turn_padding_output(
+                direction='right',
+                text_output=text_output,
+                pose_sample=pose_sample,
             )
             return
 
         if pad_bottom > 0 and y >= rgb_y1:
+            self._consecutive_turn_outputs = 0
             self.get_logger().warn(
                 f'VLM_FALLBACK_STOP_PADDING: pixel=({x}, {y}), '
                 f'rgb_region=({rgb_x0}:{rgb_x1}, {rgb_y0}:{rgb_y1}), '
@@ -1389,31 +2015,106 @@ class VLMNavigatorNode(Node):
         if self.vlm is None or not self._model_loaded:
             return
         if self.latest_rgb_pil is None or self.latest_rgb_stamp_s is None:
+            now_mono = time.monotonic()
+            if now_mono - float(self._last_camera_wait_log_s) >= 2.0:
+                self.get_logger().warn(
+                    f'VLM inference waiting for camera image on {self.camera_topic}. '
+                    'Check topic name and image encoding if this persists.'
+                )
+                self._last_camera_wait_log_s = now_mono
             return
         if not self.current_instruction.strip():
+            self._vlm_pre_inference_stop_until_s = 0.0
             return
         now_mono = time.monotonic()
+        if not self._vlm_motion_gate_allows_inference(now_mono):
+            self._vlm_pre_inference_stop_until_s = 0.0
+            return
         min_interval = max(0.2, float(self.vlm_inference_interval_sec))
         if (
             now_mono - float(self._last_vlm_inference_time_mono_s)
             < min_interval
         ):
             return
+        with self._vlm_thread_lock:
+            if self._vlm_inference_running:
+                return
 
+        pre_stop_s = max(0.0, float(self.vlm_pre_inference_stop_sec))
+        if pre_stop_s > 0.0:
+            if float(self._vlm_pre_inference_stop_until_s) <= 0.0:
+                self._stop_robot_once('pre_vlm_inference_stop')
+                self._vlm_pre_inference_stop_until_s = now_mono + pre_stop_s
+                self.get_logger().info(
+                    f'VLM inference waiting {pre_stop_s:.2f}s after stop '
+                    'before taking latest egocentric RGB'
+                )
+                return
+            if now_mono < float(self._vlm_pre_inference_stop_until_s):
+                return
+            self._vlm_pre_inference_stop_until_s = 0.0
+
+        rgb_snapshot = self.latest_rgb_pil.copy()
+        rgb_stamp_s = float(self.latest_rgb_stamp_s)
+        pose_sample = self._pose_sample_for_stamp(
+            rgb_stamp_s,
+            self.vlm_pose_max_dt_sec,
+        )
+        if pose_sample is None:
+            self.get_logger().warn(
+                f'No timestamp-aligned pose for VLM RGB stamp {rgb_stamp_s:.3f}; '
+                f'forward pixel outputs will skip waypoint projection. '
+                f'max_dt={float(self.vlm_pose_max_dt_sec):.3f}s'
+            )
+        else:
+            pose_dt = abs(float(pose_sample[0]) - rgb_stamp_s)
+            self.get_logger().info(
+                f'VLM inference snapshot aligned: rgb_stamp={rgb_stamp_s:.3f}, '
+                f'pose_stamp={float(pose_sample[0]):.3f}, pose_dt={pose_dt:.3f}s'
+            )
+        instruction = self.current_instruction.strip()
+        with self._vlm_thread_lock:
+            if self._vlm_inference_running:
+                return
+            self._vlm_inference_running = True
+            self._last_vlm_inference_time_mono_s = now_mono
+
+        thread = threading.Thread(
+            target=self._vlm_inference_worker,
+            args=(rgb_snapshot, rgb_stamp_s, instruction, pose_sample),
+            daemon=True,
+        )
+        thread.start()
+
+    def _vlm_inference_worker(
+        self,
+        rgb_snapshot: PILImage.Image,
+        rgb_stamp_s: float,
+        instruction: str,
+        pose_sample: Optional[Tuple[float, float, float, float, float]],
+    ):
         try:
-            result = self.run_current_rgb_template()
+            result = self.run_current_rgb_template(
+                instruction=instruction,
+                current_rgb=rgb_snapshot,
+            )
+            self._last_vlm_inference_stamp_s = float(rgb_stamp_s)
+            self._last_vlm_output_text = str(result)
+            self.vlm_output_pub.publish(String(data=str(result)))
+            self.get_logger().info(
+                f'VLM output for instruction "{instruction}": {str(result).strip()}'
+            )
+            self._process_vlm_output_to_waypoint(
+                str(result),
+                rgb_stamp_s=rgb_stamp_s,
+                current_rgb=rgb_snapshot,
+                pose_sample=pose_sample,
+            )
         except Exception as e:
             self.get_logger().warn(f'VLM inference skipped: {e}')
-            return
-
-        self._last_vlm_inference_time_mono_s = now_mono
-        self._last_vlm_inference_stamp_s = float(self.latest_rgb_stamp_s)
-        self._last_vlm_output_text = str(result)
-        self.vlm_output_pub.publish(String(data=str(result)))
-        self.get_logger().info(
-            f'VLM output for instruction "{self.current_instruction}": {str(result).strip()}'
-        )
-        self._process_vlm_output_to_waypoint(str(result))
+        finally:
+            with self._vlm_thread_lock:
+                self._vlm_inference_running = False
 
     # ------------------------------------------------------------------
     # Pose / goal callbacks
@@ -1474,15 +2175,21 @@ class VLMNavigatorNode(Node):
         self._last_vlm_inference_stamp_s = None
         self._last_vlm_inference_time_mono_s = 0.0
         self._last_vlm_output_text = ''
+        self._clear_pending_vlm_waypoint('instruction_changed')
+        self._consecutive_turn_outputs = 0
         self._direct_turn_until_s = 0.0
         self._direct_turn_start_s = 0.0
         self._direct_turn_rate_rad_s = 0.0
+        self._vlm_pre_inference_stop_until_s = 0.0
+        self._direct_stop_until_s = 0.0
 
     # ------------------------------------------------------------------
     # Camera processing
     # ------------------------------------------------------------------
 
     def _depth_callback(self, msg: Image):
+        if not bool(self.depth_enable):
+            return
         now_mono = time.monotonic()
         depth_hz = max(0.1, float(self.depth_process_hz))
         if now_mono - float(self._last_depth_process_time_s) < (1.0 / depth_hz):
@@ -1520,6 +2227,8 @@ class VLMNavigatorNode(Node):
             self.get_logger().warn(f'Depth callback error: {e}')
 
     def _scan_depth_callback(self, msg: PointCloud2):
+        if not bool(self.depth_enable):
+            return
         now_mono = time.monotonic()
         scan_hz = max(0.1, float(self.scan_depth_process_hz))
         if now_mono - float(self._last_scan_depth_process_time_s) < (1.0 / scan_hz):
@@ -1547,6 +2256,24 @@ class VLMNavigatorNode(Node):
             self._publish_depth_status_image(self._last_depth_status_text)
             return
 
+        with self._scan_depth_thread_lock:
+            if self._scan_depth_running:
+                return
+            self._scan_depth_running = True
+
+        thread = threading.Thread(
+            target=self._scan_depth_worker,
+            args=(msg, pose_sample, scan_stamp_s),
+            daemon=True,
+        )
+        thread.start()
+
+    def _scan_depth_worker(
+        self,
+        msg: PointCloud2,
+        pose_sample: Tuple[float, float, float, float, float],
+        scan_stamp_s: float,
+    ):
         try:
             depth_arr, used_points, projected_points = self._project_scan_to_depth_image(
                 msg,
@@ -1569,6 +2296,9 @@ class VLMNavigatorNode(Node):
             self._last_depth_status_text = f'Scan depth projection error: {e}'
             self._publish_depth_status_image(self._last_depth_status_text)
             self.get_logger().warn(f'Scan depth projection error: {e}')
+        finally:
+            with self._scan_depth_thread_lock:
+                self._scan_depth_running = False
 
     def _project_scan_to_depth_image(
         self,
@@ -1840,12 +2570,37 @@ class VLMNavigatorNode(Node):
         return filled
 
     def _camera_callback(self, msg: Image):
+        # return  # Disable camera processing for now to save CPU, since the compressed source is not working in the current Unity setup.  Re-enable when we have a working camera feed.
         now_mono = time.monotonic()
         cam_hz = max(0.1, float(self.camera_process_hz))
         if now_mono - float(self._last_camera_process_time_s) < (1.0 / cam_hz):
             return
         self._last_camera_process_time_s = now_mono
 
+        if bool(self.camera_async_processing):
+            with self._camera_thread_lock:
+                if self._camera_processing_running:
+                    return
+                self._camera_processing_running = True
+            thread = threading.Thread(
+                target=self._camera_worker,
+                args=(msg,),
+                daemon=True,
+            )
+            thread.start()
+            return
+
+        self._camera_worker(msg)
+
+    def _camera_worker(self, msg: Image):
+        try:
+            self._process_camera_msg(msg)
+        finally:
+            if bool(self.camera_async_processing):
+                with self._camera_thread_lock:
+                    self._camera_processing_running = False
+
+    def _process_camera_msg(self, msg: Image):
         self.latest_rgb_stamp_s = (
             float(msg.header.stamp.sec)
             + float(msg.header.stamp.nanosec) * 1e-9
@@ -1855,24 +2610,41 @@ class VLMNavigatorNode(Node):
             if n == 0:
                 return
             raw = bytes(msg.data)
-            if msg.encoding == 'rgb8':
+            enc = str(msg.encoding).lower()
+            if enc in ('rgb8', '8uc3'):
                 arr = np.frombuffer(raw, dtype=np.uint8).reshape(
                     msg.height, msg.width, 3
                 )
-            elif msg.encoding in ('bgr8', 'bgr8; jpeg compressed bgr8'):
+            elif enc in ('bgr8', 'bgr8; jpeg compressed bgr8'):
                 arr = np.frombuffer(raw, dtype=np.uint8).reshape(
                     msg.height, msg.width, 3
                 )
                 arr = arr[:, :, ::-1].copy()
-            elif msg.encoding == 'mono8':
+            elif enc in ('rgba8', 'bgra8', '8uc4'):
+                arr = np.frombuffer(raw, dtype=np.uint8).reshape(
+                    msg.height, msg.width, 4
+                )
+                arr = arr[:, :, :3]
+                if enc == 'bgra8':
+                    arr = arr[:, :, ::-1]
+                arr = arr.copy()
+            elif enc in ('mono8', '8uc1'):
                 arr = np.frombuffer(raw, dtype=np.uint8).reshape(msg.height, msg.width)
                 arr = np.stack([arr, arr, arr], axis=-1)
             else:
+                key = (str(msg.encoding), int(msg.width), int(msg.height))
+                if key not in self._unsupported_camera_encoding_logged:
+                    self.get_logger().warn(
+                        f'Unsupported camera image encoding on {self.camera_topic}: '
+                        f'encoding="{msg.encoding}", size={msg.width}x{msg.height}. '
+                        'VLM will keep waiting for a decodable RGB image.'
+                    )
+                    self._unsupported_camera_encoding_logged.add(key)
                 return
 
-            panoramic_rgb = arr.copy()
             if self.camera_is_panorama:
-                self.latest_panoramic_arr = panoramic_rgb
+                if bool(self.camera_publish_panoramic):
+                    self.latest_panoramic_arr = arr.copy()
                 arr = self._project_panorama_to_pinhole(arr)
             else:
                 self._last_projected_crop_heading = 0.0
@@ -1881,7 +2653,12 @@ class VLMNavigatorNode(Node):
             self.latest_rgb_pil = PILImage.fromarray(arr)
             self._update_history_from_rgb(arr)
 
-            self._publish_rgb_image(self.panoramic_pub, panoramic_rgb, frame_id='camera')
+            if bool(self.camera_publish_panoramic) and self.latest_panoramic_arr is not None:
+                self._publish_rgb_image(
+                    self.panoramic_pub,
+                    self.latest_panoramic_arr,
+                    frame_id='camera',
+                )
             self._publish_rgb_image(self.rgb_pub, arr, frame_id='camera')
 
             if self.egocentric_rgb_debug_pub.get_subscription_count() > 0:
@@ -1892,7 +2669,8 @@ class VLMNavigatorNode(Node):
                 )
                 self._cache_debug_image('egocentric_rgb', ego_dbg)
 
-            self._publish_target_debug_overlay()
+            if bool(self.camera_publish_target_debug):
+                self._publish_target_debug_overlay()
         except Exception as e:
             self.get_logger().warn(f'Camera callback error: {e}')
 
@@ -2351,6 +3129,8 @@ class VLMNavigatorNode(Node):
         self._cache_debug_image('vlm_depth_debug', color_rgb)
 
     def _depth_debug_timer_callback(self):
+        if not bool(self.depth_enable):
+            return
         if self.latest_depth_arr is not None:
             return
         self._publish_depth_status_image(self._last_depth_status_text)

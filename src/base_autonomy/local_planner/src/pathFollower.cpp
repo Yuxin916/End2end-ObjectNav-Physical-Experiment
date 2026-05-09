@@ -75,6 +75,7 @@ bool manualMode = false;
 bool autonomyMode = false;
 double autonomySpeed = 1.0;
 double joyToSpeedDelay = 2.0;
+double directTurnTimeout = 0.3;
 
 float joySpeed = 0;
 float joySpeedRaw = 0;
@@ -101,9 +102,11 @@ float vehicleYawRec = 0;
 
 float vehicleYawRate = 0;
 float vehicleSpeed = 0;
+float directTurnYawRate = 0;
 
 double odomTime = 0;
 double joyTime = 0;
+double directTurnTime = 0;
 double slowInitTime = 0;
 double stopInitTime = false;
 int pathPointID = 0;
@@ -202,6 +205,12 @@ void speedHandler(const std_msgs::msg::Float32::ConstSharedPtr speed)
   }
 }
 
+void directTurnHandler(const geometry_msgs::msg::TwistStamped::ConstSharedPtr twist)
+{
+  directTurnTime = nh->now().seconds();
+  directTurnYawRate = twist->twist.angular.z;
+}
+
 void stopHandler(const std_msgs::msg::Int8::ConstSharedPtr stop)
 {
   safetyStop = stop->data;
@@ -251,6 +260,7 @@ int main(int argc, char** argv)
   nh->declare_parameter<bool>("autonomyMode", autonomyMode);
   nh->declare_parameter<double>("autonomySpeed", autonomySpeed);
   nh->declare_parameter<double>("joyToSpeedDelay", joyToSpeedDelay);
+  nh->declare_parameter<double>("directTurnTimeout", directTurnTimeout);
 
   nh->get_parameter("realRobot", realRobot);
   nh->get_parameter("serialPort", serialPort);
@@ -286,6 +296,7 @@ int main(int argc, char** argv)
   nh->get_parameter("autonomyMode", autonomyMode);
   nh->get_parameter("autonomySpeed", autonomySpeed);
   nh->get_parameter("joyToSpeedDelay", joyToSpeedDelay);
+  nh->get_parameter("directTurnTimeout", directTurnTimeout);
 
   auto subOdom = nh->create_subscription<nav_msgs::msg::Odometry>("/state_estimation", 5, odomHandler);
 
@@ -294,6 +305,8 @@ int main(int argc, char** argv)
   auto subJoystick = nh->create_subscription<sensor_msgs::msg::Joy>("/joy", 5, joystickHandler);
 
   auto subSpeed = nh->create_subscription<std_msgs::msg::Float32>("/speed", 5, speedHandler);
+
+  auto subDirectTurn = nh->create_subscription<geometry_msgs::msg::TwistStamped>("/vlm_direct_turn_cmd", 5, directTurnHandler);
 
   auto subStop = nh->create_subscription<std_msgs::msg::Int8>("/stop", 5, stopHandler);
 
@@ -439,6 +452,13 @@ int main(int argc, char** argv)
           cmd_vel.twist.angular.z = maxYawRate * PI / 180.0 * joyManualYaw;
         }
 
+        if (!manualMode && safetyStop < 2 && nh->now().seconds() - directTurnTime <= directTurnTimeout) {
+          vehicleSpeed = 0;
+          cmd_vel.twist.linear.x = 0;
+          cmd_vel.twist.linear.y = 0;
+          cmd_vel.twist.angular.z = directTurnYawRate;
+        }
+
         pubSpeed->publish(cmd_vel);
         pubSkipCount = pubSkipNum;
 
@@ -469,6 +489,28 @@ int main(int argc, char** argv)
             }
             initFrameCount++;
           }
+        }
+      }
+    } else if (!manualMode && safetyStop < 2 && nh->now().seconds() - directTurnTime <= directTurnTimeout) {
+      pubSkipCount--;
+      if (pubSkipCount < 0) {
+        vehicleSpeed = 0;
+        cmd_vel.header.stamp = nh->now();
+        cmd_vel.twist.linear.x = 0;
+        cmd_vel.twist.linear.y = 0;
+        cmd_vel.twist.angular.z = directTurnYawRate;
+        pubSpeed->publish(cmd_vel);
+        pubSkipCount = pubSkipNum;
+
+        if (realRobot && serialOpen) {
+          value = cmd_vel.twist.linear.x;
+          memcpy(serialBuffer, &value, size);
+          value = cmd_vel.twist.linear.y;
+          memcpy(serialBuffer + size, &value, size);
+          value = cmd_vel.twist.angular.z;
+          memcpy(serialBuffer + 2 * size, &value, size);
+          serialBuffer[3 * size] = '\n';
+          motorCtrSerial->write(serialBuffer, 3 * size + 1);
         }
       }
     }

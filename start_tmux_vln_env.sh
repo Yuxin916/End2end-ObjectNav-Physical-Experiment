@@ -30,10 +30,11 @@ done
 # setup for all panes
 # tmux starts interactive zsh shells, so ~/.zshrc already handles venv + ROS sourcing.
 FULL_SETUP="cd \"$WORKDIR\" && export ROS_LOG_DIR=\"$ROS_LOG_DIR\" && mkdir -p \"$ROS_LOG_DIR\""
+CONFIG_FILE="$WORKDIR/src/vln_bridge/config/vln_bridge.yaml"
 
 # commands to run
 CMD_PANE0="./system_real_robot.sh"
-CMD_PANE1="ros2 launch vln_bridge vln_bridge.launch.py depth_topic:=/camera/depth instruction_topic:=/instruction template:=RGB_HisKFSingleColor"
+CMD_PANE1="ros2 launch vln_bridge vln_bridge.launch.py config_file:=$CONFIG_FILE instruction_topic:=/instruction template:=RGB_HisKFSingleColor depth_enable:=true camera_enable:=true camera_is_panorama:=true history_enable:=true"
 CMD_PANE2="bash \"$WORKDIR/instruction_console.sh\""
 CMD_PANE3="ros2 launch receive_theta receive_theta_sensorpod.launch"
 CMD_PANE4="echo 'Pane 4 ready. Run ./record.sh manually when needed.'"

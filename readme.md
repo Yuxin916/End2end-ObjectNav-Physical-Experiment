@@ -42,3 +42,14 @@ bash start_tmux_VLN_env.sh
 pkill -9 -f ros
 pkill -9 -f unity
 ```
+
+```bash
+# record ros bag
+cd ../rosbag && ros2 bag record -o vln_rviz_16 /tf /tf_static /camera/image /camera/semantic_image /registered_scan /sensor_scan /terrain_map /terrain_map_ext /path /free_paths /way_point /fake_way_point /navigation_boundary /added_obstacles /overall_map /explored_areas /trajectory /egocentric_rgb /vlm_depth_debug /vlm_current_decision_debug /vlm_history_debug /vlm_bev_debug /sam2_detection_debug /fov /frontier_rgb_debug /vlm_sam2_segmentation_debug
+
+
+# replay
+rviz2 -d /home/muyi/muyi/End2end-ObjectNav-Physical-Experiment/src/base_autonomy/vehicle_simulator/rviz/vehicle_simulator.rviz
+ros2 bag play vln_rviz_11/ --storage mcap 
+
+```
