@@ -234,6 +234,8 @@ class SAM2DetectorNode(Node):
         _t1 = time.time()
         all_detections = self._perceiver.perceive(rgb)
         _t2 = time.time()
+        # YOLOE TensorRT forward latency (real-time profiling, info level).
+        self.get_logger().info(f'[detector_ms] {(_t2 - _t1) * 1e3:.1f}')
         goal_detections = [d for d in all_detections if d['label'] == self.object_goal]
 
         json_detections = []

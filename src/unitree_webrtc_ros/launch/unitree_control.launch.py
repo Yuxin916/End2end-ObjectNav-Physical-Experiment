@@ -31,6 +31,20 @@ def generate_launch_description():
         description='Control mode: sport_cmd or wireless_controller'
     )
 
+    aes_128_key_arg = DeclareLaunchArgument(
+        'aes_128_key',
+        default_value='',
+        description='Per-device AES-128 key (32 hex chars) for the LAN flow on '
+                    'G1 fw >= 1.5.1 / Go2 fw >= 1.1.15. Empty falls back to the '
+                    'UNITREE_AES_KEY env var.'
+    )
+
+    device_type_arg = DeclareLaunchArgument(
+        'device_type',
+        default_value='G1',
+        description='Robot device type: Go2 or G1'
+    )
+
     # Create node
     unitree_control_node = Node(
         package='unitree_webrtc_ros',
@@ -41,6 +55,8 @@ def generate_launch_description():
             'robot_ip': LaunchConfiguration('robot_ip'),
             'connection_method': LaunchConfiguration('connection_method'),
             'control_mode': LaunchConfiguration('control_mode'),
+            'aes_128_key': LaunchConfiguration('aes_128_key'),
+            'device_type': LaunchConfiguration('device_type'),
         }],
         remappings=[
             # Uncomment if you need to remap topics
@@ -52,5 +68,7 @@ def generate_launch_description():
         robot_ip_arg,
         connection_method_arg,
         control_mode_arg,
+        aes_128_key_arg,
+        device_type_arg,
         unitree_control_node,
     ])

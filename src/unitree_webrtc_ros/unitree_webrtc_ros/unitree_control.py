@@ -5,6 +5,7 @@ Subscribes to cmd_vel and provides sport mode command services.
 """
 
 import asyncio
+import os
 import threading
 
 import rclpy
@@ -27,11 +28,19 @@ class UnitreeControlNode(Node):
         self.declare_parameter('robot_ip', '192.168.8.181')
         self.declare_parameter('connection_method', 'LocalSTA')
         self.declare_parameter('control_mode', 'sport_cmd')  # Options: 'sport_cmd' or 'wireless_controller'
+        # Per-device AES-128 key (32 hex chars). Required for the LAN flow on
+        # G1 firmware >= 1.5.1 / Go2 >= 1.1.15, where con_notify returns
+        # data2 == 3. Empty falls back to the UNITREE_AES_KEY env var. Fetch
+        # once via unitree_webrtc_connect.unitree_cloud.fetch_aes_key().
+        self.declare_parameter('aes_128_key', '')
+        self.declare_parameter('device_type', 'G1')  # 'Go2' or 'G1'
 
         # Get parameters
         self.robot_ip = self.get_parameter('robot_ip').value
         connection_method_str = self.get_parameter('connection_method').value
         self.control_mode = self.get_parameter('control_mode').value
+        self.device_type = self.get_parameter('device_type').value
+        self.aes_128_key = self.get_parameter('aes_128_key').value or os.environ.get('UNITREE_AES_KEY', '')
 
         # Map connection method string to enum
         connection_method_map = {
@@ -45,6 +54,13 @@ class UnitreeControlNode(Node):
 
         self.get_logger().info(f'Connecting to robot at {self.robot_ip} using {connection_method_str}')
         self.get_logger().info(f'Control mode: {self.control_mode}')
+        self.get_logger().info(f'Device type: {self.device_type}')
+        if self.connection_method == WebRTCConnectionMethod.LocalSTA and not self.aes_128_key:
+            self.get_logger().warn(
+                'No aes_128_key set. LAN connection will FAIL on G1 firmware '
+                '>= 1.5.1 (con_notify data2==3). Set the aes_128_key param or '
+                'the UNITREE_AES_KEY env var.'
+            )
 
         # Initialize WebRTC connection
         self.conn = None
@@ -100,7 +116,9 @@ class UnitreeControlNode(Node):
             # Create connection
             self.conn = UnitreeWebRTCConnection(
                 self.connection_method,
-                ip=self.robot_ip
+                ip=self.robot_ip,
+                aes_128_key=self.aes_128_key or None,
+                device_type=self.device_type,
             )
 
             # Connect

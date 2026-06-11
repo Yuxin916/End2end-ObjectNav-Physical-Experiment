@@ -46,10 +46,18 @@ tmux send-keys -t "$SESSION_NAME":0.0 \
     "./system_real_robot_g1.sh robot_ip:=$G1_IP connection_method:=$CONNECTION_METHOD control_mode:=$CONTROL_MODE" C-m
 
 # Pane 1: VLM navigation bridge
-tmux send-keys -t "$SESSION_NAME":0.1 "ros2 launch vlm_nav_bridge vlm_nav_bridge.launch.py" C-m
+# Tee stdout to ./log so all get_logger() timing markers (pipeline_ms, bev_update_ms,
+# lidar_hz, robot_speed, wp_exec_s, re_query_stats, cam_timing, GPU memory) are
+# captured. NOTE: the node's target_debug_*.log only captures direct _file_logger
+# calls (det_cb/target_state); get_logger() output goes to stdout, not that file.
+tmux send-keys -t "$SESSION_NAME":0.1 \
+    "mkdir -p log && ros2 launch vlm_nav_bridge vlm_nav_bridge.launch.py 2>&1 | tee log/vlm_$(date +%Y%m%d_%H%M%S).log" C-m
 
 # Pane 2: SAM2/YOLOE object detector
-tmux send-keys -t "$SESSION_NAME":0.2 "ros2 launch sam2_detector sam2_detector.launch.py" C-m
+# Tee stdout to ./log so the [detector_ms] timing markers are captured for the
+# real-time profiling report (sam2_detector has no on-disk file logger of its own).
+tmux send-keys -t "$SESSION_NAME":0.2 \
+    "mkdir -p log && ros2 launch sam2_detector sam2_detector.launch.py 2>&1 | tee log/detector_$(date +%Y%m%d_%H%M%S).log" C-m
 
 # Pane 3: Receive JPEG frames from Jetson over TCP and publish /camera/image
 tmux send-keys -t "$SESSION_NAME":0.3 "ros2 launch vlm_nav_bridge rs_tcp_receiver.launch.py" C-m

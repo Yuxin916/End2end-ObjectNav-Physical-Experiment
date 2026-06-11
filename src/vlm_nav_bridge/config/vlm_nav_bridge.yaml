@@ -30,7 +30,7 @@ vlm_navigator:
     # Seconds between VLM inference calls (wall-clock timer).
     # Also re-triggers early when the robot reaches the current waypoint.
     # Lower = more responsive, higher = less GPU load.
-    inference_interval: 20.0
+    inference_interval: 40.0
 
     # Beam search width used by InternVL generation.
     # MP3D default is 1 (greedy-like).
@@ -101,7 +101,7 @@ vlm_navigator:
     # Excludes floor returns from the obstacle map.
     # Tune for robot: Go2 sensor is ~0.3–0.5 m above floor → 0.1 m min excludes floor well.
     # G1 sensor is ~1.0 m above floor → 0.1 m min may miss low furniture (try -0.3 to -0.5).
-    obstacle_height_min: -0.2
+    obstacle_height_min: -1.0
 
     # Points above (robot_z + obstacle_height_max) are NOT counted as obstacles.
     # Excludes ceiling and high mounted objects.

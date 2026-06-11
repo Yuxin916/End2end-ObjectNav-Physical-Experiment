@@ -34,7 +34,7 @@ localPlanner:
     # Driving mode
     twoWayDrive: true
 
-    # Voxel / terrain
+    # Voxel / tessh unitree@192.168.123.164rrain
     laserVoxelSize: 0.05
     terrainVoxelSize: 0.2
     useTerrainAnalysis: true
@@ -57,8 +57,8 @@ localPlanner:
     maxRelZ: 0.3
 
     # Speed limits
-    maxSpeed: 0.75
-    autonomySpeed: 0.75
+    maxSpeed: 0.50
+    autonomySpeed: 0.50
 
     # Direction / heading
     dirWeight: 0.02
@@ -102,8 +102,8 @@ pathFollower:
 
     # Driving mode
     lookAheadDis: 0.5
-    maxSpeed: 0.75
-    maxAccel: 1.5
+    maxSpeed: 0.50
+    maxAccel: 1.0
     switchTimeThre: 1.0
     omniDirDiffThre: 1.5
     slowDwnDisThre: 0.875
@@ -125,13 +125,13 @@ pathFollower:
     noRotAtGoal: true
 
     # Speed / autonomy
-    autonomySpeed: 0.75
+    autonomySpeed: 0.50
 
     # Yaw control
     goalYawGain: 2.0
     yawRateGain: 1.5
     stopYawRateGain: 1.5
-    maxYawRate: 40.0
+    maxYawRate: 30.0
     dirDiffThre: 0.4
     stopDisThre: 0.4
 

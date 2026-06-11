@@ -9,6 +9,11 @@ source .venv/bin/activate
 
 source ./install/setup.bash
 
+# Load the per-device AES-128 key (UNITREE_AES_KEY) for the G1 WebRTC LAN
+# handshake from a private, untracked file (kept out of git). Required on G1
+# firmware >= 1.5.1 (con_notify data2==3). See ~/.unitree_g1.env.
+[ -f "$HOME/.unitree_g1.env" ] && source "$HOME/.unitree_g1.env"
+
 export ROBOT_CONFIG_PATH="unitree/unitree_g1"
 
 # Pass all arguments through to the launch file, e.g.:

@@ -202,6 +202,34 @@ class VLMNavigatorNode(Node):
         self._last_projected_crop_heading: Optional[float] = None
 
         # ------------------------------------------------------------------
+        # Real-time profiling instrumentation (CORL appendix timing study).
+        # All timings use wall-clock time.time(); logs use info level so they
+        # are captured for offline aggregation. None/0 until first measured.
+        # ------------------------------------------------------------------
+        # Most recent LiDAR BEV map-update latency (ms), passed from
+        # _scan_callback to the _run_vlm_step_once pipeline summary.
+        self._last_bev_update_ms: Optional[float] = None
+        # Wall-clock time the current waypoint was published (for wp exec time).
+        self._wp_publish_time: Optional[float] = None
+        # LiDAR scan frequency tracking (averaged every 20 callbacks).
+        self._lidar_prev_cb_time: Optional[float] = None
+        self._lidar_interval_accum: float = 0.0
+        self._lidar_interval_count: int = 0
+        # Robot speed tracking (averaged every 50 pose updates).
+        self._speed_prev_pose: Optional[Tuple[float, float, float]] = None  # (x, y, t)
+        self._speed_accum: float = 0.0
+        self._speed_count: int = 0
+        # Early re-query trigger-reason statistics (logged every 10 steps).
+        self._rq_periodic: int = 0
+        self._rq_waypoint: int = 0
+        self._rq_detection: int = 0
+        self._rq_new_goal: int = 0
+        self._rq_total: int = 0
+        self._rq_interval_accum: float = 0.0
+        self._rq_interval_count: int = 0
+        self._rq_prev_step_time: Optional[float] = None
+
+        # ------------------------------------------------------------------
         # Subscriptions
         # ------------------------------------------------------------------
         self.create_subscription(
@@ -562,6 +590,17 @@ class VLMNavigatorNode(Node):
             self.vlm.load()
             self._model_loaded = True
             self.get_logger().info('VLM model ready.')
+            # Report peak GPU memory after model load (real-time profiling).
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    peak = torch.cuda.max_memory_allocated() / 1e9
+                    total = torch.cuda.get_device_properties(0).total_memory / 1e9
+                    self.get_logger().info(
+                        f'GPU memory: peak={peak:.2f}GB / total={total:.2f}GB'
+                    )
+            except Exception as _e:
+                self.get_logger().warn(f'GPU memory query failed: {_e}')
         except Exception as e:
             self.get_logger().error(f'VLM load failed: {e}')
 
@@ -590,6 +629,24 @@ class VLMNavigatorNode(Node):
             self.last_camera_heading_rad = 0.0
             self.last_camera_heading_source = 'yaw'
         self._pose_received = True
+
+        # --- Robot speed: instantaneous |displacement|/dt, averaged every 50 ---
+        _spd_now = time.time()
+        if self._speed_prev_pose is not None:
+            _px, _py, _pt = self._speed_prev_pose
+            _ddt = _spd_now - _pt
+            if _ddt > 1e-6:
+                _disp = math.hypot(float(p.x) - _px, float(p.y) - _py)
+                self._speed_accum += _disp / _ddt
+                self._speed_count += 1
+                if self._speed_count >= 50:
+                    _avg_v = self._speed_accum / self._speed_count
+                    self.get_logger().info(
+                        f'[robot_speed] avg={_avg_v:.2f}m/s  (over last 50 pose updates)'
+                    )
+                    self._speed_accum = 0.0
+                    self._speed_count = 0
+        self._speed_prev_pose = (float(p.x), float(p.y), _spd_now)
 
         # Initialise mapper on first pose
         if not self.mapper.is_initialised:
@@ -633,10 +690,16 @@ class VLMNavigatorNode(Node):
         self.current_wp_y = None
         self.current_wp_is_target = False
 
+        # --- Waypoint execution time: publish → reached wall-clock duration ---
+        if self._wp_publish_time is not None:
+            wp_exec_s = time.time() - self._wp_publish_time
+            self.get_logger().info(f'[wp_exec_s] {wp_exec_s:.2f}s  dist={dist:.2f}m')
+            self._wp_publish_time = None
+
         self.get_logger().info(
             f'Waypoint reached (dist={dist:.2f} m). Re-triggering VLM.'
         )
-        self._run_vlm_step()
+        self._run_vlm_step(reason='waypoint_reached')
         self.vlm_timer.reset()
 
     def _lookup_pose_at(self, stamp_s: float):
@@ -678,6 +741,21 @@ class VLMNavigatorNode(Node):
 
     def _scan_callback(self, msg: PointCloud2):
         """Parse PointCloud2 → (N, 3) float32 array and update BEV map."""
+        # --- LiDAR scan frequency: average inter-callback interval every 20 cb ---
+        _cb_now = time.time()
+        if self._lidar_prev_cb_time is not None:
+            self._lidar_interval_accum += (_cb_now - self._lidar_prev_cb_time)
+            self._lidar_interval_count += 1
+            if self._lidar_interval_count >= 20:
+                _avg_int = self._lidar_interval_accum / self._lidar_interval_count
+                _freq = (1.0 / _avg_int) if _avg_int > 0 else 0.0
+                self.get_logger().info(
+                    f'[lidar_hz] avg_interval={_avg_int:.3f}s  freq={_freq:.1f}Hz'
+                )
+                self._lidar_interval_accum = 0.0
+                self._lidar_interval_count = 0
+        self._lidar_prev_cb_time = _cb_now
+
         self.latest_scan_stamp_s = float(msg.header.stamp.sec) + float(msg.header.stamp.nanosec) * 1e-9
         pts = self._parse_pointcloud2(msg)
         if pts is None or len(pts) == 0:
@@ -702,6 +780,7 @@ class VLMNavigatorNode(Node):
                 pose_yaw = self.latest_yaw
                 matched_pose_stamp = self.latest_pose_stamp_s
 
+            _t_bev_0 = time.time()
             self.mapper.update(
                 pts,
                 float(pose_x),
@@ -709,6 +788,9 @@ class VLMNavigatorNode(Node):
                 float(pose_z),
                 float(pose_yaw),
             )
+            _bev_update_ms = (time.time() - _t_bev_0) * 1e3
+            self._last_bev_update_ms = _bev_update_ms
+            self.get_logger().info(f'[bev_update_ms] {_bev_update_ms:.1f}')
             pose_scan_dt = abs(float(self.latest_scan_stamp_s) - float(matched_pose_stamp))
             if pose_scan_dt > float(self.max_sensor_skew_sec):
                 self.get_logger().warn(
@@ -774,7 +856,7 @@ class VLMNavigatorNode(Node):
                 ego_dbg = None
             _t6 = time.time()
             _t7 = time.time()
-            self.get_logger().debug(
+            self.get_logger().info(
                 f'[cam_timing ms] decode={(_t1-_t0)*1e3:.1f}'
                 f' project={(_t2-_t1)*1e3:.1f}'
                 f' pub_ego={(_t3-_t2)*1e3:.1f}'
@@ -1075,7 +1157,7 @@ class VLMNavigatorNode(Node):
             # arrives, then reset the timer so subsequent ticks are aligned
             # from this point (avoiding a redundant fire right after).
             if new_goal and self._model_loaded and self._pose_received:
-                self._run_vlm_step()
+                self._run_vlm_step(reason='new_goal')
                 self.vlm_timer.reset()
 
     # ------------------------------------------------------------------
@@ -1089,7 +1171,7 @@ class VLMNavigatorNode(Node):
             return
         if not self._model_loaded:
             return
-        self._run_vlm_step()
+        self._run_vlm_step(reason='periodic_timer')
 
     def _live_debug_timer_callback(self):
         """Continuously publish BEV/FOV debug streams for RVIZ."""
@@ -1166,19 +1248,49 @@ class VLMNavigatorNode(Node):
         stop_msg.data = int(level)
         self.stop_pub.publish(stop_msg)
 
-    def _run_vlm_step(self):
-        """Core step wrapper with re-entry guard."""
+    def _run_vlm_step(self, reason: str = 'periodic_timer'):
+        """Core step wrapper with re-entry guard.
+
+        reason: trigger source for early re-query statistics. One of
+        'periodic_timer', 'waypoint_reached', 'detection_interrupt', 'new_goal'.
+        """
         if self._running_vlm_step:
             self.get_logger().debug('Skip VLM step: previous step still running.')
             return
         self._running_vlm_step = True
         try:
+            # --- Early re-query trigger-reason statistics ---
+            if reason == 'waypoint_reached':
+                self._rq_waypoint += 1
+            elif reason == 'detection_interrupt':
+                self._rq_detection += 1
+            elif reason == 'new_goal':
+                self._rq_new_goal += 1
+            else:
+                self._rq_periodic += 1
+            self._rq_total += 1
+            _step_now = time.time()
+            if self._rq_prev_step_time is not None:
+                self._rq_interval_accum += (_step_now - self._rq_prev_step_time)
+                self._rq_interval_count += 1
+            self._rq_prev_step_time = _step_now
+            if self._rq_total % 10 == 0:
+                _avg_int = (
+                    self._rq_interval_accum / self._rq_interval_count
+                    if self._rq_interval_count > 0 else 0.0
+                )
+                self.get_logger().info(
+                    f'[re_query_stats] periodic={self._rq_periodic} '
+                    f'waypoint={self._rq_waypoint} detection={self._rq_detection} '
+                    f'new_goal={self._rq_new_goal}  avg_interval={_avg_int:.2f}s'
+                )
             self._run_vlm_step_once()
         finally:
             self._running_vlm_step = False
 
     def _run_vlm_step_once(self):
         """Core step: BEV → frontiers → VLM → waypoint."""
+        _t_total_0 = time.time()
         if self.mapper.local_map is None:
             return
         self._log_sensor_skew()
@@ -1190,10 +1302,13 @@ class VLMNavigatorNode(Node):
         target_pixel = self.target_pixel_local
 
         # ---- Extract frontiers (global map for stability) -----------------
+        _t_fr_0 = time.time()
         raw_frontiers = self._extract_frontiers_global()
         frontiers, pre_removed, post_removed = self._filter_frontiers_for_reach(
             raw_frontiers, local_map, local_r, local_c
         )
+        _t_fr_1 = time.time()
+        frontier_ms = (_t_fr_1 - _t_fr_0) * 1e3
         self.get_logger().info(
             f'Frontier filter counts: raw={len(raw_frontiers)} pre_removed={pre_removed} '
             f'post_removed={post_removed} final={len(frontiers)} '
@@ -1201,11 +1316,14 @@ class VLMNavigatorNode(Node):
         )
 
         # ---- Render BEV image -------------------------------------------
+        _t_render_0 = time.time()
         bev_rgb = self.mapper.render_local_bev(
             frontier_centers_2d=frontiers if len(frontiers) > 0 else None,
             target_position=target_pixel,
             draw_fov=True,
         )
+        _t_render_1 = time.time()
+        render_ms = (_t_render_1 - _t_render_0) * 1e3
         self._publish_bev_debug(bev_rgb)
 
         if len(frontiers) == 0 and target_pixel is None:
@@ -1266,6 +1384,14 @@ class VLMNavigatorNode(Node):
             frontier_rgb_images=frontier_rgb_images if self.vlm.is_dual_vit else None,
         )
         dt = time.time() - t0
+        # Current GPU memory in use during inference (GB); -1 if no CUDA.
+        _current_mem_gb = -1.0
+        try:
+            import torch
+            if torch.cuda.is_available():
+                _current_mem_gb = torch.cuda.memory_allocated() / 1e9
+        except Exception:
+            pass
         self.get_logger().info(
             f'VLM selected frontier {idx}/{len(frontiers)} '
             f'in {dt:.2f} s  (goal="{self.object_goal}")'
@@ -1338,6 +1464,10 @@ class VLMNavigatorNode(Node):
         fake_wp_msg.point.z = 0.0
         self.fake_way_point_pub.publish(fake_wp_msg)
 
+        # Total decision-cycle latency: start of step → waypoint published.
+        self._wp_publish_time = time.time()
+        total_ms = (self._wp_publish_time - _t_total_0) * 1e3
+
         self.current_wp_x = wx
         self.current_wp_y = wy
         _is_target_selection = bool(target_pixel is not None and idx == len(frontiers))
@@ -1358,6 +1488,15 @@ class VLMNavigatorNode(Node):
             f'Target status: found={self.target_found}, in_local={target_pixel is not None}, '
             f'target_pixel={target_pixel}, selected_idx={idx}, '
             f'selected_is_target={target_pixel is not None and idx == len(frontiers)}'
+        )
+
+        # ---- Pipeline timing summary (one line per completed decision cycle) ----
+        _bev_update_ms = self._last_bev_update_ms if self._last_bev_update_ms is not None else -1.0
+        _candidates = len(frontiers) + (1 if target_pixel is not None else 0)
+        self.get_logger().info(
+            f'[pipeline_ms] bev_update={_bev_update_ms:.1f} frontier={frontier_ms:.1f} '
+            f'render={render_ms:.1f} vlm={dt * 1e3:.1f} total={total_ms:.1f} '
+            f'candidates={_candidates} gpu_mem={_current_mem_gb:.2f}GB'
         )
 
     # ------------------------------------------------------------------

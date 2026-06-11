@@ -19,6 +19,8 @@ def generate_launch_description():
   robot_ip = LaunchConfiguration('robot_ip')
   connection_method = LaunchConfiguration('connection_method')
   control_mode = LaunchConfiguration('control_mode')
+  aes_128_key = LaunchConfiguration('aes_128_key')
+  device_type = LaunchConfiguration('device_type')
 
   declare_world_name = DeclareLaunchArgument('world_name', default_value='real_world', description='')
   declare_sensorOffsetX = DeclareLaunchArgument('sensorOffsetX', default_value='0.05', description='')
@@ -44,6 +46,19 @@ def generate_launch_description():
     'control_mode',
     default_value='wireless_controller',
     description='Unitree G1 control mode: wireless_controller or sport_cmd'
+  )
+
+  declare_aes_128_key = DeclareLaunchArgument(
+    'aes_128_key',
+    default_value='',
+    description='Per-device AES-128 key (32 hex chars) for the LAN flow on G1 fw >= 1.5.1 '
+                '(con_notify data2==3). Empty falls back to the UNITREE_AES_KEY env var.'
+  )
+
+  declare_device_type = DeclareLaunchArgument(
+    'device_type',
+    default_value='G1',
+    description='Robot device type: Go2 or G1'
   )
 
   start_local_planner = IncludeLaunchDescription(
@@ -124,6 +139,8 @@ def generate_launch_description():
       'robot_ip': robot_ip,
       'connection_method': connection_method,
       'control_mode': control_mode,
+      'aes_128_key': aes_128_key,
+      'device_type': device_type,
     }.items()
   )
 
@@ -140,6 +157,8 @@ def generate_launch_description():
   ld.add_action(declare_robot_ip)
   ld.add_action(declare_connection_method)
   ld.add_action(declare_control_mode)
+  ld.add_action(declare_aes_128_key)
+  ld.add_action(declare_device_type)
 
   ld.add_action(start_local_planner)
   ld.add_action(start_terrain_analysis)
