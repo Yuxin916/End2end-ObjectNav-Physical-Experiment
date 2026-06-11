@@ -36,3 +36,5 @@ bags/
 dist/
 build/
 *.egg-info/
+# docker build logs
+docker/*.log

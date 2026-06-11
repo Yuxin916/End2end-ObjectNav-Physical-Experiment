@@ -1,0 +1,36 @@
+# Fast incremental build: layers the unitree_sdk2 (DDS) control stack on top of
+# the already-built heavy-deps image (autonomy_stack:heavy = ROS Jazzy + Sophus
+# /Ceres/GTSAM/Livox-SDK2). Avoids recompiling GTSAM on every iteration.
+#
+# docker/Dockerfile remains the canonical from-scratch build (same result).
+FROM autonomy_stack:heavy
+
+ARG DEBIAN_FRONTEND=noninteractive
+SHELL ["/bin/bash", "-c"]
+
+# Drop the legacy WebRTC venv (SDK backend doesn't need it).
+RUN rm -rf /opt/uvenv
+
+# cyclonedds 0.10.2 (required by unitree_sdk2_python), built from source.
+RUN git clone --depth 1 --branch 0.10.2 \
+        https://github.com/eclipse-cyclonedds/cyclonedds /tmp/cyclonedds \
+    && cmake -S /tmp/cyclonedds -B /tmp/cyclonedds/build \
+        -DCMAKE_INSTALL_PREFIX=/opt/cyclonedds -DBUILD_IDLC=YES -DCMAKE_BUILD_TYPE=Release \
+    && cmake --build /tmp/cyclonedds/build --target install -j"$(nproc)" \
+    && rm -rf /tmp/cyclonedds
+ENV CYCLONEDDS_HOME=/opt/cyclonedds
+ENV LD_LIBRARY_PATH=/opt/cyclonedds/lib:${LD_LIBRARY_PATH}
+
+# numpy + cyclonedds python binding, then the latest SDK (--no-deps avoids
+# pulling opencv-python; g1 loco only needs cyclonedds + numpy).
+RUN pip install --no-cache-dir --break-system-packages cyclonedds==0.10.2 numpy \
+    && git clone --depth 1 https://github.com/unitreerobotics/unitree_sdk2_python \
+        /opt/unitree_sdk2_python \
+    && pip install --no-cache-dir --break-system-packages --no-deps -e /opt/unitree_sdk2_python
+
+COPY docker/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+WORKDIR /workspace
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["bash"]

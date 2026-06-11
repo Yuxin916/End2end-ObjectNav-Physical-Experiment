@@ -5,7 +5,8 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, TimerAction
 from launch.launch_description_sources import PythonLaunchDescriptionSource, FrontendLaunchDescriptionSource
 from launch_ros.actions import Node
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, EqualsSubstitution
+from launch.conditions import IfCondition
 
 def generate_launch_description():
   world_name = LaunchConfiguration('world_name')
@@ -21,6 +22,10 @@ def generate_launch_description():
   control_mode = LaunchConfiguration('control_mode')
   aes_128_key = LaunchConfiguration('aes_128_key')
   device_type = LaunchConfiguration('device_type')
+
+  # Velocity control backend: 'sdk' (unitree_sdk2 DDS, no AES) or 'webrtc' (legacy)
+  control_backend = LaunchConfiguration('control_backend')
+  network_interface = LaunchConfiguration('network_interface')
 
   declare_world_name = DeclareLaunchArgument('world_name', default_value='real_world', description='')
   declare_sensorOffsetX = DeclareLaunchArgument('sensorOffsetX', default_value='0.05', description='')
@@ -59,6 +64,18 @@ def generate_launch_description():
     'device_type',
     default_value='G1',
     description='Robot device type: Go2 or G1'
+  )
+
+  declare_control_backend = DeclareLaunchArgument(
+    'control_backend',
+    default_value='sdk',
+    description="Velocity control backend: 'sdk' (unitree_sdk2 DDS, no AES key) or 'webrtc' (legacy)."
+  )
+
+  declare_network_interface = DeclareLaunchArgument(
+    'network_interface',
+    default_value='eth0',
+    description='Wired NIC on the 192.168.123.x robot net (used by the sdk backend).'
   )
 
   start_local_planner = IncludeLaunchDescription(
@@ -128,13 +145,31 @@ def generate_launch_description():
       [get_package_share_directory('livox_ros_driver2'), '/launch_ROS2/msg_MID360_launch.py']),
   )
 
-  # G1-specific WebRTC control node (subscribes to cmd_vel, supports arm gestures)
+  # --- Velocity control backend (mutually exclusive via control_backend) ---
+
+  # Preferred: unitree_sdk2 LocoClient over DDS. No AES key / WebRTC. Starts
+  # DISABLED -- robot will not stand or move until commanded via its services.
+  start_g1_sdk = IncludeLaunchDescription(
+    PythonLaunchDescriptionSource(os.path.join(
+      get_package_share_directory('unitree_g1_sdk_bridge'),
+      'launch',
+      'g1_sdk_control.launch.py')
+    ),
+    condition=IfCondition(EqualsSubstitution(control_backend, 'sdk')),
+    launch_arguments={
+      'network_interface': network_interface,
+      'enable_on_start': 'false',
+    }.items()
+  )
+
+  # Legacy: G1 WebRTC control node (needs AES key on fw >= 1.5.1).
   start_g1_webrtc = IncludeLaunchDescription(
     PythonLaunchDescriptionSource(os.path.join(
       get_package_share_directory('unitree_webrtc_ros'),
       'launch',
       'unitree_control.launch.py')
     ),
+    condition=IfCondition(EqualsSubstitution(control_backend, 'webrtc')),
     launch_arguments={
       'robot_ip': robot_ip,
       'connection_method': connection_method,
@@ -159,6 +194,8 @@ def generate_launch_description():
   ld.add_action(declare_control_mode)
   ld.add_action(declare_aes_128_key)
   ld.add_action(declare_device_type)
+  ld.add_action(declare_control_backend)
+  ld.add_action(declare_network_interface)
 
   ld.add_action(start_local_planner)
   ld.add_action(start_terrain_analysis)
@@ -168,6 +205,7 @@ def generate_launch_description():
   ld.add_action(start_visualization_tools)
   ld.add_action(start_joy)
   ld.add_action(start_mid360)
+  ld.add_action(start_g1_sdk)
   ld.add_action(start_g1_webrtc)
 
   return ld
