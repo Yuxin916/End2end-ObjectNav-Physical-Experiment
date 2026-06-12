@@ -18,6 +18,7 @@ for d in /dev/ttyACM0 /dev/ttyACM1 /dev/ttyUSB0; do
   [ -e "$d" ] && DEV_ARGS+=(--device "$d")
 done
 
+# WebRTC control on G1 fw >= 1.5.1 needs UNITREE_AES_KEY from this file.
 ENV_FILE_ARGS=()
 [ -f "$HOME/.unitree_g1.env" ] && ENV_FILE_ARGS+=(-v "$HOME/.unitree_g1.env:/root/.unitree_g1.env:ro")
 
@@ -38,6 +39,7 @@ docker run -it --rm \
   -e XDG_RUNTIME_DIR=/tmp/runtime-root \
   -v /tmp/.X11-unix:/tmp/.X11-unix:rw \
   -v "$REPO_DIR":/workspace/autonomy_stack:rw \
+  -v /dev:/dev \
   "${ENV_FILE_ARGS[@]}" \
   "${DEV_ARGS[@]}" \
   autonomy_stack:jazzy \

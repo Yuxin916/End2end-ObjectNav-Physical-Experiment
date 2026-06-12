@@ -17,7 +17,8 @@ ROS2 **Jazzy** 导航栈跑在 Unitree G1 的 Jetson 上的完整说明：安装
 目标命令（导航 + SLAM + 雷达 + 控制）**全是 CPU 模块，不需要 GPU**；GPU 模块
 （`sam2_detector`、`vlm_nav_bridge`）**没有编进来**。
 
-机器人速度控制走 **`unitree_sdk2`（DDS over eth0）**，不是 WebRTC —— 所以**不需要 AES key**。
+机器人速度控制走 **WebRTC（`unitree_webrtc_connect`）**。G1 固件 >= 1.5.1 的 LAN 连接
+需要**每台机器人自己的 AES key**，放在宿主机 `~/.unitree_g1.env`（见 §5）。
 
 ---
 
@@ -26,8 +27,8 @@ ROS2 **Jazzy** 导航栈跑在 Unitree G1 的 Jetson 上的完整说明：安装
 ```
 宿主机 Jetson (Ubuntu 20.04, Docker)
 │
-├─ autonomy_stack:heavy   ← docker/Dockerfile       （ROS Jazzy + Sophus/Ceres/GTSAM/Livox-SDK2）
-│      └─ autonomy_stack:jazzy ← docker/Dockerfile.sdk （+ cyclonedds 0.10.2 + unitree_sdk2_python）
+├─ autonomy_stack:heavy   ← docker/Dockerfile          （ROS Jazzy + Sophus/Ceres/GTSAM/Livox-SDK2）
+│      └─ autonomy_stack:jazzy ← docker/Dockerfile.webrtc （+ /opt/uvenv：unitree_webrtc_connect + cyclonedds RMW）
 │
 └─ docker run --network host  （容器）
        ├─ 挂载宿主仓库 → /workspace/autonomy_stack   （源码 + install/ 实时同步）
@@ -52,9 +53,8 @@ ROS2 **Jazzy** 导航栈跑在 Unitree G1 的 Jetson 上的完整说明：安装
 bash docker/build.sh
 ```
 - 自动判断：`autonomy_stack:heavy` 不存在 → 先建（**~30–40 分钟**，编 ROS desktop + GTSAM 等）；
-  已存在 → 跳过，只建 `autonomy_stack:jazzy`（**几分钟**，加 cyclonedds + SDK）。
+  已存在 → 跳过，只建 `autonomy_stack:jazzy`（**几分钟**，装 WebRTC venv + cyclonedds RMW）。
 - 强制重建重依赖层：`bash docker/build.sh --rebuild-heavy`。
-- 后台构建看进度：`tail -f docker/build_sdk.log`。
 
 ### 2.3 编译 ROS 工作区（一次性；改了 C++ 后再跑）
 ```bash
@@ -84,8 +84,8 @@ bash docker/run.sh build
 | `utilities/livox_ros_driver2` | Livox Mid-360 雷达驱动（+ `Livox-SDK2`） | ✅ |
 | `utilities/serial`, `teleop_joy_controller` | 串口、手柄遥操 | ✅ |
 | `utilities/*_rviz_plugin`, `goalpoint_rviz_plugin` | RViz 交互插件（设目标点等） | ✅ |
-| **`unitree_g1_sdk_bridge`** | **cmd_vel → G1 `unitree_sdk2` LocoClient（DDS，本项目新增）** | ✅ 默认 |
-| `unitree_webrtc_ros` | 旧 WebRTC 控制（需 AES key），保留做回退 | 可选 |
+| **`unitree_webrtc_ros`** | **cmd_vel → G1 WebRTC 控制（需 AES key）** | ✅ 默认 |
+| `unitree_g1_sdk_bridge` | unitree_sdk2 LocoClient 桥（**本镜像没装 unitree_sdk2，容器内不可用**；仍参与编译，launch 解析需要） | 否 |
 | `route_planner/*`（far_planner 等） | 全局路由规划（可视图） | 否 |
 | `exploration_planner/tare_planner` | 自主探索 | 否 |
 | `sam2_detector`, `vlm_nav_bridge` | GPU AI（**未编入容器**） | 否 |
@@ -107,37 +107,44 @@ bash docker/run.sh ros2 topic list  # 在容器环境里跑任意一条命令
 # 进容器后：
 ./system_real_robot_g1.sh robot_ip:=192.168.123.161 connection_method:=LocalSTA control_mode:=wireless_controller
 ```
-- 默认 `control_backend:=sdk`（unitree_sdk2，无需 AES key）。
-- 回退旧 WebRTC：追加 `control_backend:=webrtc`（需 `~/.unitree_g1.env` 里的 `UNITREE_AES_KEY`）。
+- 默认 `control_backend:=webrtc`（unitree_webrtc_connect；fw >= 1.5.1 需
+  `~/.unitree_g1.env` 里的 `UNITREE_AES_KEY`，`docker/run.sh` 会自动只读挂进容器）。
+- `control_backend:=sdk` 在本镜像里**不可用**（unitree_sdk2 / cyclonedds python 没装）。
 - 启动会拉起：local_planner、terrain、sensor_scan、arise_slam、visualization、joy、
-  livox(Mid-360)、g1_sdk_bridge，并打开 RViz。
+  livox(Mid-360)、unitree_control(WebRTC)，并打开 RViz。
 
 ---
 
-## 5. G1 控制流程（安全第一，默认机器人不动）
+## 5. G1 控制流程（WebRTC）
 
-`g1_sdk_bridge` 启动后是 **DISABLED**：收 `cmd_vel` 但**不下发**，机器人不站不动。
-要让它动，另开一个终端（`docker exec -it autonomy_stack bash`）按顺序调 service：
+### 5.1 AES key（fw >= 1.5.1 必须）
+
+宿主机建 `~/.unitree_g1.env`（`docker/run.sh` 会只读挂载，启动脚本自动 source）：
+```bash
+export UNITREE_AES_KEY=<本机器人的32位hex key>
+```
+没有 key 时 LAN 连接会失败（con_notify data2==3），节点启动时会给出警告。
+
+### 5.2 ⚠️ 安全：WebRTC 节点没有 enable 闸门
+
+和旧 sdk 桥不同，`unitree_control`（WebRTC）**连上即放行**：
+- 导航/手柄发的每条 `cmd_vel` 都直接转成机器人移动指令；
+- **没有** `cmd_vel` 超时自动归零 —— 停下要靠上游发 0；
+- **没有**速度夹紧、退出时也不会自动进阻尼。
+
+所以：起系统前先用遥控器让机器人站稳，确认没有节点在发非零 `cmd_vel`，
+场地空旷、急停在手边。
+
+### 5.3 动作 service（另开终端 `docker exec -it autonomy_stack bash`）
 
 ```bash
-# 1) 站起来（Damp -> Squat2StandUp）
-ros2 service call /g1_sdk_bridge/stand_up std_srvs/srv/Trigger
-# 2) 放行 cmd_vel —— 此后导航/手柄速度才真正驱动机器人
-ros2 service call /g1_sdk_bridge/enable std_srvs/srv/SetBool "{data: true}"
-
-# —— 软急停（进阻尼，并自动 disable）——
-ros2 service call /g1_sdk_bridge/damp std_srvs/srv/Trigger
-# 其它：坐下 / 进运控模式
-ros2 service call /g1_sdk_bridge/sit   std_srvs/srv/Trigger
-ros2 service call /g1_sdk_bridge/start std_srvs/srv/Trigger
+ros2 service call /standup        std_srvs/srv/Trigger   # 站立
+ros2 service call /liedown        std_srvs/srv/Trigger   # 趴下
+ros2 service call /recovery_stand std_srvs/srv/Trigger   # 恢复站立
 ```
 
-保护参数（`src/unitree_g1_sdk_bridge/launch/g1_sdk_control.launch.py`）：
-- 速度夹紧：`max_vx=0.6` `max_vy=0.4` `max_vyaw=0.8`
-- `cmd_vel` 超过 `0.5s` 没更新 → 自动发 0
-- 节点退出 → 自动 `Damp()`
-
-G1 FSM id 参考：ZeroTorque=0, Damp=1, Sit=3, Start=200, Lie2StandUp=702, Squat2StandUp=706。
+`control_mode` launch 参数：`wireless_controller`（默认，模拟手柄摇杆）或
+`sport_cmd`（走 SPORT_CMD["Move"] API）。
 
 ---
 
@@ -145,11 +152,13 @@ G1 FSM id 参考：ZeroTorque=0, Damp=1, Sit=3, Start=200, Lie2StandUp=702, Squa
 
 ### 6.1 网络规划
 `src/utilities/livox_ros_driver2/config/MID360_config.json` 里写死：
-- **电脑接收 IP（host_net_info）= `192.168.123.103`**
+- **电脑接收 IP（host_net_info）= `192.168.123.164`**（= Jetson eth0 的 IP，必须一致）
 - **雷达 IP = `192.168.123.120`**
 
-而 Jetson 现状是 eth0 `192.168.123.164` / wlan0 `192.168.123.110`，**两块网卡都在 123 网段**，
-会导致发往雷达 `.120` 的包从 wlan0 漏出去 → 雷达不出点云。
+install/ 里的该 json 是指回 src/ 的软链接，**改 src 里的 json 即时生效，不用重编**。
+
+⚠️ 若有第二块网卡（如 wlan0）也配在 123 网段，发往雷达 `.120` 的包可能从
+wlan0 漏出去 → 雷达不出点云。Wi-Fi 在别的网段（如 10.0.2.x）则无此问题。
 
 ### 6.2 起雷达前的自检（在宿主机做，不连机器人控制）
 ```bash
@@ -166,14 +175,14 @@ ping -c 3 192.168.123.161
 ip neigh | grep 192.168.123.120
 ```
 
-### 6.3 修复（二选一 / 通常都要）
+### 6.3 修复（仅当 6.2 自检不通过时）
 ```bash
-# A. 让 123.x 只走 eth0（关掉同段的 wlan0，或把 wlan0 改到别的网段）
-sudo ip link set wlan0 down
+# A. 若 wlan 也在 123 网段：让 123.x 只走 eth0
+sudo ip link set wlan0 down   # 或把 wlan 改到别的网段
 
-# B. 给 eth0 配上 MID360_config 要的接收 IP .103
-sudo ip addr add 192.168.123.103/24 dev eth0
-#   或者：把 json 里的 192.168.123.103 改成 192.168.123.164，然后 `bash docker/run.sh build` 重编 livox 配置
+# B. 若 eth0 的 IP 变了：把 MID360_config.json 的 host_net_info 四个 *_ip
+#    改成 eth0 的实际 IP（软链接，改完即生效，无需重编）
+ip -brief addr   # 看 eth0 实际 IP
 ```
 改完再 `ping 192.168.123.120` 确认 ARP 走 eth0、能通。
 
@@ -183,7 +192,8 @@ bash docker/run.sh ros2 launch livox_ros_driver2 msg_MID360_launch.py
 # 另一终端： docker exec -it autonomy_stack bash -lc "source install/setup.bash && ros2 topic hz /livox/lidar"
 ```
 
-> 机器人 `.161` 走 eth0 已可达，`unitree_sdk2` DDS 不受雷达网络问题影响。
+> WebRTC 连机器人 `.161` 同样走 123 网段 —— wlan0/eth0 同段的路由问题
+> 一样可能影响控制连接，先按上面修好网络再起系统。
 
 ---
 
@@ -199,5 +209,6 @@ xhost +local:root                    # RViz 起不来时（X11 权限）
 
 ## 8. 安全提示
 - **建镜像、编工作区都不会让机器人动。**
-- 只有跑 `system_real_robot_g1.sh` **且** 调了 `stand_up` + `enable true` 之后机器人才会动。
+- 跑 `system_real_robot_g1.sh` 后，WebRTC 一连上 `cmd_vel` **立即生效**
+  （没有 enable 闸门，见 §5.2）。
 - 首次务必：场地空旷、人手急停、先用小速度测试。

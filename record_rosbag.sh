@@ -20,4 +20,4 @@ echo "Recording bag to: $OUTPUT_DIR"
 echo "ros2 bag record args: ${RECORD_ARGS[*]}"
 echo "Press Ctrl+C to stop recording."
 
-ros2 bag record "${RECORD_ARGS[@]}" -o "$OUTPUT_DIR"
+ros2 bag record "${RECORD_ARGS[@]}" -o "$OUTPUT_DIR" /imu/data /lidar/scan

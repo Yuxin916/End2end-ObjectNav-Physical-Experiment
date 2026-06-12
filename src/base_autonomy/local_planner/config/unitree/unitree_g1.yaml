@@ -57,8 +57,8 @@ localPlanner:
     maxRelZ: 0.3
 
     # Speed limits
-    maxSpeed: 0.50
-    autonomySpeed: 0.50
+    maxSpeed: 1.0
+    autonomySpeed: 1.0
 
     # Direction / heading
     dirWeight: 0.02
@@ -102,11 +102,11 @@ pathFollower:
 
     # Driving mode
     lookAheadDis: 0.5
-    maxSpeed: 0.50
+    maxSpeed: 1.0
     maxAccel: 1.0
     switchTimeThre: 1.0
     omniDirDiffThre: 1.5
-    slowDwnDisThre: 0.875
+    slowDwnDisThre: 0.85
 
     # Inclination-based slowdown / stop
     useInclRateToSlow: false
@@ -131,7 +131,7 @@ pathFollower:
     goalYawGain: 2.0
     yawRateGain: 1.5
     stopYawRateGain: 1.5
-    maxYawRate: 30.0
+    maxYawRate: 50.0
     dirDiffThre: 0.4
     stopDisThre: 0.4
 

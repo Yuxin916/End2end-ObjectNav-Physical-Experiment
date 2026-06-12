@@ -68,8 +68,9 @@ def generate_launch_description():
 
   declare_control_backend = DeclareLaunchArgument(
     'control_backend',
-    default_value='sdk',
-    description="Velocity control backend: 'sdk' (unitree_sdk2 DDS, no AES key) or 'webrtc' (legacy)."
+    default_value='webrtc',
+    description="Velocity control backend: 'webrtc' (unitree_webrtc_connect, needs AES key on "
+                "fw >= 1.5.1) or 'sdk' (unitree_sdk2 DDS; NOT available in the webrtc container)."
   )
 
   declare_network_interface = DeclareLaunchArgument(

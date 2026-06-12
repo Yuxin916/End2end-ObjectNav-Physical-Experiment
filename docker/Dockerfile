@@ -1,7 +1,7 @@
 # Stage 1 (heavy deps) of the autonomy_stack image for Unitree G1 Jetson.
 # Builds ROS2 Jazzy + the vendored C++ deps (Sophus, Ceres, GTSAM, Livox-SDK2)
-# into /usr/local. Produces the slow-changing base; the unitree_sdk2 control
-# layer is added by docker/Dockerfile.sdk (FROM this image, tagged :heavy).
+# into /usr/local. Produces the slow-changing base; the WebRTC control layer
+# is added by docker/Dockerfile.webrtc (FROM this image, tagged :heavy).
 #
 # Host is Ubuntu 20.04/Focal + L4T R35, which can't run Jazzy natively, so the
 # whole stack runs in this native arm64 Jazzy container. The target launch is

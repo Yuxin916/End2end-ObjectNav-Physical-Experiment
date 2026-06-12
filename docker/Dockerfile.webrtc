@@ -1,0 +1,40 @@
+# Fast incremental build: layers the WebRTC control stack on top of the
+# already-built heavy-deps image (autonomy_stack:heavy = ROS Jazzy + Sophus
+# /Ceres/GTSAM/Livox-SDK2). Avoids recompiling GTSAM on every iteration.
+#
+# Robot control goes through unitree_webrtc_connect (WebRTC). On G1 fw >= 1.5.1
+# the LAN flow needs the per-device AES key (UNITREE_AES_KEY in
+# ~/.unitree_g1.env, mounted by docker/run.sh).
+FROM autonomy_stack:heavy
+
+ARG DEBIAN_FRONTEND=noninteractive
+SHELL ["/bin/bash", "-c"]
+
+# - rmw_cyclonedds: system_real_robot_g1.sh exports
+#   RMW_IMPLEMENTATION=rmw_cyclonedds_cpp; the heavy image only ships fastrtps.
+# - portaudio: build dep of pyaudio / runtime dep of sounddevice (both pulled
+#   in by unitree_webrtc_connect).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ros-jazzy-rmw-cyclonedds-cpp \
+      portaudio19-dev libportaudio2 \
+    && rm -rf /var/lib/apt/lists/*
+
+# WebRTC venv at /opt/uvenv. --system-site-packages keeps the apt-installed
+# Python tooling (colcon, ros2cli deps, yaml, ...) importable while the venv
+# is active; the entrypoint activates it so the unitree_control node's
+# `#!/usr/bin/env python3` resolves to this interpreter.
+RUN python3 -m venv --system-site-packages /opt/uvenv \
+    && /opt/uvenv/bin/pip install --no-cache-dir unitree_webrtc_connect
+
+# Image-wide ROS env so `docker exec` shells match system_real_robot_g1.sh
+# (which exports the same values): cyclonedds RMW, and domain 1 to stay off
+# the G1's onboard DDS (domain 0).
+ENV RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+ENV ROS_DOMAIN_ID=1
+
+COPY docker/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+WORKDIR /workspace
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["bash"]
