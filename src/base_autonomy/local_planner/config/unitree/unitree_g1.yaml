@@ -66,8 +66,8 @@ localPlanner:
     dirToVehicle: false
 
     # Path planning
-    pathScale: 0.875
-    minPathScale: 0.675
+    pathScale: 0.85
+    minPathScale: 0.85
     pathScaleStep: 0.1
     pathScaleBySpeed: true
     minPathRange: 0.8
