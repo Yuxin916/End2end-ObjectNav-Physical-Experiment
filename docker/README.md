@@ -71,6 +71,38 @@ bash docker/run.sh build
 
 ---
 
+## 2.5 看画面：显示器接口 / RViz / 远程可视化
+
+RViz 是 GPU 3D 程序，怎么看到它有三条路，**强烈推荐物理显示器**（本机 GPU 渲染，最流畅）。
+
+### 2.5.1 ⚠️ 物理显示器必须插对口：**[9] 号 Type-C**
+G1 脖子后面那排 Type-C 口里：
+- **[6][7][8] = 纯 USB3.0 Host**（只有数据，**没有视频**）
+- **[9] = Alt-Mode Type-C，USB3.2 + DisplayPort 1.4 ← 只有这个口能出视频**
+
+用 **Type-C→HDMI 转接头插到 [9] 号口**，再接 HDMI 线和显示器，才能看到 Jetson 桌面。
+插错口（6–8）的症状：USB 设备（手柄等）正常枚举，但 Jetson 的 `DP-0/DP-1` 读不到 EDID、
+显示器不亮（`xrandr` 看 `DP-0 disconnected`、分辨率掉到 640x480）。插对 [9] 后 `DP-0 connected 1920x1080`。
+> Tegra/NVIDIA 显示栈对热插拔不总是灵敏；最好**开机时就插着显示器**。插对口后桌面在物理 `:0`。
+
+### 2.5.2 在物理显示器上看 RViz
+直接在那台显示器的桌面终端起系统（见 §4.2），RViz 自动出现在 `:0`。
+若从 SSH 起、想把窗口送到物理屏：`export DISPLAY=:0 && xhost +local:root` 后再 `docker exec -e DISPLAY=:0 ...`。
+
+### 2.5.3 远程看（没有物理显示器时）
+- **Foxglove（推荐的远程方案，GPU 在你本机渲染，不卡）**：容器里跑 foxglove_bridge，
+  本机浏览器/桌面端连 `ws://192.168.123.164:8765`。
+  ```bash
+  # 容器内（镜像若没预装，先 apt-get install -y ros-jazzy-foxglove-bridge）：
+  ros2 run foxglove_bridge foxglove_bridge --ros-args -p port:=8765 -p address:=0.0.0.0
+  ```
+  那些 `unitree_api/unitree_go` 的 schema 报错可忽略（机器人自带 DDS 话题缺消息定义，不影响标准话题）。
+- **X11 转发**（`ssh -Y` 把容器里 RViz 画到本机）：能用但 3D **非常卡**，不推荐。
+- **NoMachine**：连的是 NoMachine 虚拟桌面 `:1001`，默认分辨率可能只有 768x576（壁纸被放大、没任务栏）。
+  修：`DISPLAY=:1001 XAUTHORITY=~/.nx/M-ubuntu-*/authority xrandr --output nxoutput0 --mode 1920x1080`。
+
+---
+
 ## 3. 模块说明（`src/`）
 
 | 目录 | 作用 | 目标 launch 用到 |
@@ -102,15 +134,48 @@ bash docker/run.sh ros2 topic list  # 在容器环境里跑任意一条命令
 ```
 `run.sh` 自动带：`--network host`、`/dev/input/js0`、X11、（存在则）挂 `~/.unitree_g1.env`。
 
-### 4.2 容器内：启动整套系统
+### 4.2 ✅ 标准启动流程（一步步，建议在物理显示器的桌面终端跑）
+
+**阶段 0｜清掉旧容器**（同名会冲突）
 ```bash
-# 进容器后：
-./system_real_robot_g1.sh robot_ip:=192.168.123.161 connection_method:=LocalSTA control_mode:=wireless_controller
+docker rm -f autonomy_stack 2>/dev/null
 ```
-- 默认 `control_backend:=sdk`（unitree_sdk2，无需 AES key）。
-- 回退旧 WebRTC：追加 `control_backend:=webrtc`（需 `~/.unitree_g1.env` 里的 `UNITREE_AES_KEY`）。
-- 启动会拉起：local_planner、terrain、sensor_scan、arise_slam、visualization、joy、
-  livox(Mid-360)、g1_sdk_bridge，并打开 RViz。
+
+**阶段 1｜起前网络自检（每次开机做一次，需 sudo 密码 `123`）**
+雷达路由不持久，重启后要重做（详见 §6）：
+```bash
+sudo ip route add 192.168.123.120/32 dev eth0          # 雷达只走 eth0
+sudo ip neigh del 192.168.123.120 dev wlan0 2>/dev/null # 清掉漏到无线的坏 ARP
+ping -c 3 192.168.123.161    # 机器人，应通 ~0.1ms
+ping -c 3 192.168.123.120    # 雷达，应通（不通别往下走）
+```
+
+**阶段 2｜起整套系统 + RViz**
+```bash
+cd ~/projects/autonomy_stack
+
+# A) 纯可视化 / 调试（机器人物理上不可能动，推荐先用这个）：
+bash docker/run.sh ./system_real_robot_g1.sh control_backend:=none network_interface:=eth0
+
+# B) 带控制能力（要驱动机器人时，务必场地空旷+握急停）：
+bash docker/run.sh ./system_real_robot_g1.sh control_backend:=sdk network_interface:=eth0 \
+    robot_ip:=192.168.123.161 connection_method:=LocalSTA control_mode:=wireless_controller
+```
+- `control_backend:=none` → 控制节点不启动；`:=sdk` → 起 `g1_sdk_bridge`（unitree_sdk2，无需 AES key，
+  **启动即 DISABLED**，机器人仍不动，要调 service 才动，见 §5）；`:=webrtc` → 旧 WebRTC 回退（需 AES key）。
+- 拉起：local_planner、terrain、sensor_scan、arise_slam、visualization、joy、livox(Mid-360)、控制后端，并开 RViz。
+- RViz 出现在物理显示器（`:0`）。**停止**：该终端 `Ctrl+C`。
+
+**阶段 3｜验证（另开一个终端）**
+```bash
+docker exec -it autonomy_stack bash
+source install/setup.bash
+ros2 topic hz /state_estimation   # SLAM 里程计 ~42Hz
+ros2 topic hz /terrain_map        # 地形 ~3Hz
+```
+> ⚠️ **机器人吊在龙门架上、脚不沾地时**：arise_slam(LIO) 约束不足 → `/state_estimation` 漂移、`/tf` 不发
+> 动态变换（RViz 里看不到机器人本体帧）。这是正常的，**等机器人落地站稳、走两步给运动激励后** SLAM 才收敛。
+> 这跟 cyclonedds 无关（ROS2 栈走 Fast DDS，cyclonedds 只给 §5 的控制桥用）。
 
 ---
 
@@ -139,43 +204,66 @@ ros2 service call /g1_sdk_bridge/start std_srvs/srv/Trigger
 
 G1 FSM id 参考：ZeroTorque=0, Damp=1, Sit=3, Start=200, Lie2StandUp=702, Squat2StandUp=706。
 
+> **cyclonedds 崩溃补丁（已内置，勿删）**：本机 G1 固件 + Ubuntu 24.04 fortify 下，unitree_sdk2 的
+> `ChannelConfigHasInterface` 里那段 `<Tracing>` 会让 `ChannelFactoryInitialize` 直接
+> `*** buffer overflow detected ***` 崩。`g1_sdk_control.py` 已内置 `_patch_cyclonedds_tracing()`
+> 在初始化前把那段去掉（容器内实测：不打补丁崩、打了正常）。所以 `control_backend:=sdk` 现在能正常起。
+
 ---
 
 ## 6. 雷达（Livox Mid-360）—— 起之前必看
 
 ### 6.1 网络规划
-`src/utilities/livox_ros_driver2/config/MID360_config.json` 里写死：
-- **电脑接收 IP（host_net_info）= `192.168.123.103`**
-- **雷达 IP = `192.168.123.120`**
+`src/utilities/livox_ros_driver2/config/MID360_config.json`：
+- **电脑接收 IP（host_net_info）= `192.168.123.164`** ✅（已改好；原厂默认是 `.103`，但 eth0 是 `.164`，
+  接收 IP 必须等于 eth0 实际 IP，否则雷达把点云发到一个不存在的地址 → ping 通也没点云）
+- **雷达 IP = `192.168.123.120`**（注意：Weston 文档写 `.20` 是笔误，本机实测是 `.120`）
 
-而 Jetson 现状是 eth0 `192.168.123.164` / wlan0 `192.168.123.110`，**两块网卡都在 123 网段**，
-会导致发往雷达 `.120` 的包从 wlan0 漏出去 → 雷达不出点云。
+而 Jetson 现状是 eth0 `192.168.123.164` / wlan0 `192.168.123.110`，**两块网卡都在 123 网段**。
+路由表里 wlan0 的 `192.168.123.0/24` metric=50 比 eth0 的 metric=100 小 → 内核默认拿 wlan0 解析
+123.x。机器人 `.161` 能通，是因为另有一条专门的主机路由 `192.168.123.161 dev eth0`；而雷达
+`.120` 没有这条路由，于是 ARP 漏到 wlan0（`ip neigh` 显示 `192.168.123.120 dev wlan0 INCOMPLETE`）
+→ ping 全丢、雷达不出点云。**eth0 物理链路本身是好的**（`carrier=1`、1000Mb/s）。
 
-### 6.2 起雷达前的自检（在宿主机做，不连机器人控制）
+### 6.2 ✅ 起系统前自检（在宿主机做，不连机器人控制 / 不发移动指令）
+**这是每次起 `system_real_robot_g1.sh` 之前必做的一步。**
 ```bash
-# 1) 看网卡（确认 eth0 在 123.x；注意 wlan0 是否也在 123.x）
+# 1) 看网卡（确认 eth0 在 123.x 且 UP；注意 wlan0 是否也在 123.x）
 ip -brief addr
 
-# 2) ping 雷达（应通；不通见下方排查）
-ping -c 3 192.168.123.120
+# 2) 确认 eth0 网线物理在线（应为 1 / yes）
+cat /sys/class/net/eth0/carrier            # 1 = 网线插着且通
+ethtool eth0 | grep -E "Speed|Link detected"
 
-# 3) ping 机器人（应通，走 eth0）
+# 3) ping 机器人（应通，走 eth0，~0.1ms）
 ping -c 3 192.168.123.161
 
-# 4) 看 ARP 是从哪块网卡解析雷达的（应是 eth0，不该是 wlan0）
+# 4) ping 雷达（首次大概率不通，见 6.3 修复后必须通）
+ping -c 3 192.168.123.120
+
+# 5) 关键：看 ARP 是从哪块网卡解析雷达的（必须是 eth0，绝不能是 wlan0）
 ip neigh | grep 192.168.123.120
 ```
+**判读**：`.161` 不通 → 查 eth0 网线/机器人电源；`.120` 不通且 ARP 落在 `wlan0` →
+路由漏到无线网卡，按 6.3 修；`.120` 走 eth0 仍 INCOMPLETE/不通 → 才是雷达供电/网线问题。
 
-### 6.3 修复（二选一 / 通常都要）
+### 6.3 修复路由（实测有效，**保留 wifi**，不需要关 wlan0）
+给雷达 `.120` 加一条强制走 eth0 的主机路由，并清掉 wlan0 上那条坏 ARP：
 ```bash
-# A. 让 123.x 只走 eth0（关掉同段的 wlan0，或把 wlan0 改到别的网段）
-sudo ip link set wlan0 down
-
-# B. 给 eth0 配上 MID360_config 要的接收 IP .103
-sudo ip addr add 192.168.123.103/24 dev eth0
-#   或者：把 json 里的 192.168.123.103 改成 192.168.123.164，然后 `bash docker/run.sh build` 重编 livox 配置
+sudo ip neigh del 192.168.123.120 dev wlan0 2>/dev/null   # 清掉漏到无线的坏 ARP
+sudo ip route add 192.168.123.120/32 dev eth0             # 雷达只走 eth0
+ping -c 3 192.168.123.120                                 # 现在应当 ping 通
 ```
-改完再 `ping 192.168.123.120` 确认 ARP 走 eth0、能通。
+> 注：路由不持久，Jetson 重启后要重跑。备选方案：`sudo ip link set wlan0 down`（会断 wifi/联网），
+> 或把 wlan0 换到别的网段。
+
+**点云还需要 host 接收 IP（ping 通≠出点云）**：`MID360_config.json` 写死电脑接收 IP=`192.168.123.103`，
+而 eth0 是 `.164`，否则雷达没有目标地址发点云。二选一：
+```bash
+# A. 给 eth0 加上 .103 别名（临时，重启失效）
+sudo ip addr add 192.168.123.103/24 dev eth0
+# B. 把 json 里的 192.168.123.103 改成 192.168.123.164，再 `bash docker/run.sh build` 重编 livox 配置（持久）
+```
 
 ### 6.4 单独验证雷达出点云（不启动整套系统）
 ```bash

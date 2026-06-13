@@ -32,6 +32,36 @@ from unitree_sdk2py.core.channel import ChannelFactoryInitialize
 from unitree_sdk2py.g1.loco.g1_loco_client import LocoClient
 
 
+# ---------------------------------------------------------------------------
+# cyclonedds config patch -- REQUIRED on this G1 firmware under Ubuntu 24.04.
+#
+# unitree_sdk2py's ChannelConfigHasInterface embeds a <Tracing><Verbosity>
+# config</Verbosity></Tracing> block. Under 24.04's _FORTIFY_SOURCE, cyclonedds'
+# do_print_uint32_bitset -> __snprintf_chk aborts with
+# "*** buffer overflow detected ***" inside ChannelFactoryInitialize, so the
+# bridge dies before it ever talks to the robot. The same DDS config WITHOUT the
+# <Tracing> block initializes cleanly. We monkeypatch the value the SDK reads
+# (channel module global, keeping the $__IF_NAME__$ placeholder) before init.
+# ---------------------------------------------------------------------------
+_CYCLONEDDS_CONFIG_NO_TRACING = '''<?xml version="1.0" encoding="UTF-8" ?>
+    <CycloneDDS>
+        <Domain Id="any">
+            <General>
+                <Interfaces>
+                    <NetworkInterface name="$__IF_NAME__$" priority="default" multicast="default"/>
+                </Interfaces>
+            </General>
+        </Domain>
+    </CycloneDDS>'''
+
+
+def _patch_cyclonedds_tracing():
+    """Strip the SDK's <Tracing> DDS config so ChannelFactoryInitialize won't
+    abort with a fortify buffer-overflow on Ubuntu 24.04. Idempotent."""
+    import unitree_sdk2py.core.channel as _ch
+    _ch.ChannelConfigHasInterface = _CYCLONEDDS_CONFIG_NO_TRACING
+
+
 def clamp(v, lo, hi):
     return max(lo, min(hi, v))
 
@@ -62,6 +92,7 @@ class G1SdkBridge(Node):
 
         # ---- unitree_sdk2 channel + loco client ----
         self.get_logger().info(f'Initializing unitree_sdk2 DDS on interface "{iface}" ...')
+        _patch_cyclonedds_tracing()  # must run before ChannelFactoryInitialize on 24.04
         ChannelFactoryInitialize(0, iface)
         self.client = LocoClient()
         self.client.SetTimeout(10.0)
