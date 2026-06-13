@@ -1,5 +1,12 @@
 #!/bin/bash
 
+# Isolate the ROS2 stack from the robot's native DDS (it floods domain 0 with
+# ~100 participants -> Fast DDS discovery congestion drops IMU/lidar frames ->
+# SLAM drift). Move to domain 1 + cyclonedds RMW. (Borrowed from will_nx.)
+# Also baked as ENV in docker/Dockerfile.sdk so `docker exec` shells match.
+export ROS_DOMAIN_ID=1
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 
 cd $SCRIPT_DIR

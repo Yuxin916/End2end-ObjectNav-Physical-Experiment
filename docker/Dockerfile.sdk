@@ -11,13 +11,6 @@ SHELL ["/bin/bash", "-c"]
 # Drop the legacy WebRTC venv (SDK backend doesn't need it).
 RUN rm -rf /opt/uvenv
 
-# foxglove_bridge: remote viz over WebSocket (ws://<jetson>:8765), GPU-rendered on
-# the client. The reliable way to view point cloud / SLAM when there is no monitor
-# on Jetson port [9]. See docker/README.md §2.5.3.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      ros-jazzy-foxglove-bridge \
-    && rm -rf /var/lib/apt/lists/*
-
 # cyclonedds 0.10.2 (required by unitree_sdk2_python), built from source.
 RUN git clone --depth 1 --branch 0.10.2 \
         https://github.com/eclipse-cyclonedds/cyclonedds /tmp/cyclonedds \
@@ -34,6 +27,24 @@ RUN pip install --no-cache-dir --break-system-packages cyclonedds==0.10.2 numpy 
     && git clone --depth 1 https://github.com/unitreerobotics/unitree_sdk2_python \
         /opt/unitree_sdk2_python \
     && pip install --no-cache-dir --break-system-packages --no-deps -e /opt/unitree_sdk2_python
+
+# Extra ROS packages (kept in one late layer so the heavy steps above stay cached):
+#   - foxglove-bridge: remote viz over WebSocket ws://<jetson>:8765 (README §2.5.3)
+#   - rmw-cyclonedds-cpp: alternative ROS2 RMW. With ROS_DOMAIN_ID=1 below it
+#     isolates the autonomy stack from the robot's ~100 domain-0 DDS participants,
+#     which otherwise congest Fast DDS discovery and drop IMU/lidar frames -> SLAM
+#     drift. (Borrowed from the will_nx branch's localization fix.)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ros-jazzy-foxglove-bridge \
+      ros-jazzy-rmw-cyclonedds-cpp \
+    && rm -rf /var/lib/apt/lists/*
+
+# Isolate ROS2 traffic from the robot's native DDS (domain 0) and use cyclonedds.
+# Applies to every shell in the container (launch, `docker exec`, foxglove).
+# Does NOT affect unitree_sdk2 control: it talks raw cyclonedds on its own domain
+# via ChannelFactoryInitialize(0, iface), independent of these ROS2 env vars.
+ENV ROS_DOMAIN_ID=1
+ENV RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
