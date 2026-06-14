@@ -11,15 +11,23 @@
     <param name="limitGroundLift" value="false" />
     <param name="maxGroundLift" value="0.15" />
     <param name="clearDyObs" value="true" />
+    <param name="sensorPitch" value="0.0" />
     <param name="minDyObsDis" value="0.14" />
     <param name="absDyObsRelZThre" value="0.2" />
-    <param name="minDyObsVFOV" value="-30.0" />
-    <param name="maxDyObsVFOV" value="35.0" />
+    <param name="minDyObsVFOV" value="-40.0" />
+    <param name="maxDyObsVFOV" value="10.0" />
     <param name="minDyObsPointNum" value="1" />
     <param name="minOutOfFovPointNum" value="10" />
     <param name="obstacleHeightThre" value="0.1" />
+    <param name="nearObstacle" value="true" />
+    <param name="nearObstacleDis" value="2.5" />
+    <param name="nearObstacleRelZThre" value="-1.0" />
+    <param name="negObstacle" value="-1" /> <!--'-1': off, '0': wrt ground height, '1': wrt sensor height /-->
+    <param name="negObstacleDis" value="10.0" />
+    <param name="negObstacleRelZThre" value="-0.2" />
     <param name="noDataObstacle" value="false" />
-    <param name="noDataBlockSkipNum" value="0" />
+    <param name="noDataBlockShrinkNum" value="0" />
+    <param name="noDataBlockExpandNum" value="1" />
     <param name="minBlockPointNum" value="10" />
     <param name="vehicleHeight" value="1.5" />
     <param name="voxelPointUpdateThre" value="100" />

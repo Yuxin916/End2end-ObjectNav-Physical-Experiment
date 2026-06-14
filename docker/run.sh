@@ -12,6 +12,14 @@ REPO_DIR="$( cd "$SCRIPT_DIR/.." && pwd )"
 
 xhost +local:root >/dev/null 2>&1 || true
 
+# Lock CPU/GPU clocks to max (host-side L4T tool; reduces livox driver
+# timestamp jitter that desyncs SLAM). Asks for the sudo password once;
+# failure is non-fatal.
+if command -v jetson_clocks >/dev/null 2>&1; then
+  echo ">>> jetson_clocks (max clocks for sensor timing; sudo may prompt)"
+  sudo jetson_clocks || echo "WARN: jetson_clocks failed -- SLAM timing jitter may be higher"
+fi
+
 DEV_ARGS=()
 [ -e /dev/input/js0 ] && DEV_ARGS+=(--device /dev/input/js0)
 for d in /dev/ttyACM0 /dev/ttyACM1 /dev/ttyUSB0; do
