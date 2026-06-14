@@ -1,65 +1,39 @@
 #!/usr/bin/env python3
-"""
-Bridge ROS2 cmd_vel -> Unitree G1 high-level locomotion via unitree_sdk2.
+"""Bridge ROS2 cmd_vel -> Unitree G1 high-level locomotion (ROS-facing half).
 
-Talks to the robot over DDS on the wired 192.168.123.x network (default iface
-eth0). With the container started using --network host, the robot at
-192.168.123.161 is directly reachable, so no WebRTC / AES key is needed.
+This node owns NO unitree LocoClient. unitree_sdk2's cyclonedds runtime cannot
+live in the same process as rmw_cyclonedds_cpp (the ROS stack now uses cyclonedds
+for SLAM stability) -- the pair segfaults at LocoClient() construction (verified
+2026-06-14). So the actual SDK control runs in a separate rclpy-free child
+process, g1_loco_driver.py, which this node spawns and feeds over localhost UDP.
 
-SAFETY MODEL (the robot must NOT move unexpectedly):
-  * Starts DISABLED. cmd_vel is received but NOT forwarded until enabled.
-  * The robot does not stand on its own -- call the ~/stand_up service first.
-  * Velocities are clamped to max_vx / max_vy / max_vyaw.
-  * If no cmd_vel arrives within cmd_timeout seconds, zero velocity is sent.
-  * ~/damp is a soft e-stop (FSM damping); ~/enable false also zeroes motion.
+SAFETY MODEL (unchanged; enforced in BOTH halves):
+  * Starts DISABLED. cmd_vel is received but NOT forwarded until ~/enable true.
+  * Velocities are clamped to max_vx / max_vy / max_vyaw (here AND in the driver).
+  * If no cmd_vel arrives within cmd_timeout -> zero velocity. If the ROS node
+    dies, the driver stops receiving packets and zeroes/Damps on its own.
+  * ~/damp is a soft e-stop; ~/enable false also zeroes motion.
 
 Services (std_srvs):
-  ~/enable   (SetBool)  : true  -> forward cmd_vel ; false -> stop + hold stand
+  ~/enable   (SetBool)  : true  -> forward cmd_vel ; false -> stop + hold
   ~/stand_up (Trigger)  : Damp -> Squat2StandUp (robot stands, still disabled)
   ~/sit      (Trigger)  : StandUp2Squat
   ~/damp     (Trigger)  : soft e-stop -> FSM damping (also disables)
-  ~/start    (Trigger)  : enter main operation control (FSM 200)
+  ~/start    (Trigger)  : enter main operation control
 """
+import os
+import sys
+import json
+import socket
+import atexit
 import threading
+import subprocess
 
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from geometry_msgs.msg import TwistStamped
 from std_srvs.srv import Trigger, SetBool
-
-from unitree_sdk2py.core.channel import ChannelFactoryInitialize
-from unitree_sdk2py.g1.loco.g1_loco_client import LocoClient
-
-
-# ---------------------------------------------------------------------------
-# cyclonedds config patch -- REQUIRED on this G1 firmware under Ubuntu 24.04.
-#
-# unitree_sdk2py's ChannelConfigHasInterface embeds a <Tracing><Verbosity>
-# config</Verbosity></Tracing> block. Under 24.04's _FORTIFY_SOURCE, cyclonedds'
-# do_print_uint32_bitset -> __snprintf_chk aborts with
-# "*** buffer overflow detected ***" inside ChannelFactoryInitialize, so the
-# bridge dies before it ever talks to the robot. The same DDS config WITHOUT the
-# <Tracing> block initializes cleanly. We monkeypatch the value the SDK reads
-# (channel module global, keeping the $__IF_NAME__$ placeholder) before init.
-# ---------------------------------------------------------------------------
-_CYCLONEDDS_CONFIG_NO_TRACING = '''<?xml version="1.0" encoding="UTF-8" ?>
-    <CycloneDDS>
-        <Domain Id="any">
-            <General>
-                <Interfaces>
-                    <NetworkInterface name="$__IF_NAME__$" priority="default" multicast="default"/>
-                </Interfaces>
-            </General>
-        </Domain>
-    </CycloneDDS>'''
-
-
-def _patch_cyclonedds_tracing():
-    """Strip the SDK's <Tracing> DDS config so ChannelFactoryInitialize won't
-    abort with a fortify buffer-overflow on Ubuntu 24.04. Idempotent."""
-    import unitree_sdk2py.core.channel as _ch
-    _ch.ChannelConfigHasInterface = _CYCLONEDDS_CONFIG_NO_TRACING
 
 
 def clamp(v, lo, hi):
@@ -71,12 +45,13 @@ class G1SdkBridge(Node):
         super().__init__('g1_sdk_bridge')
 
         self.declare_parameter('network_interface', 'eth0')
-        self.declare_parameter('max_vx', 0.6)      # m/s forward/back
-        self.declare_parameter('max_vy', 0.4)      # m/s lateral
-        self.declare_parameter('max_vyaw', 0.8)    # rad/s yaw
-        self.declare_parameter('cmd_timeout', 0.5) # s; zero motion if stale
+        self.declare_parameter('max_vx', 0.6)
+        self.declare_parameter('max_vy', 0.4)
+        self.declare_parameter('max_vyaw', 0.8)
+        self.declare_parameter('cmd_timeout', 0.5)
         self.declare_parameter('control_rate', 50.0)
         self.declare_parameter('enable_on_start', False)
+        self.declare_parameter('driver_port', 43897)
 
         iface = self.get_parameter('network_interface').value
         self.max_vx = float(self.get_parameter('max_vx').value)
@@ -84,20 +59,35 @@ class G1SdkBridge(Node):
         self.max_vyaw = float(self.get_parameter('max_vyaw').value)
         self.cmd_timeout = float(self.get_parameter('cmd_timeout').value)
         rate = float(self.get_parameter('control_rate').value)
+        port = int(self.get_parameter('driver_port').value)
 
         self._lock = threading.Lock()
         self.enabled = bool(self.get_parameter('enable_on_start').value)
         self.vx = self.vy = self.vyaw = 0.0
         self.last_cmd_t = self.get_clock().now()
 
-        # ---- unitree_sdk2 channel + loco client ----
-        self.get_logger().info(f'Initializing unitree_sdk2 DDS on interface "{iface}" ...')
-        _patch_cyclonedds_tracing()  # must run before ChannelFactoryInitialize on 24.04
-        ChannelFactoryInitialize(0, iface)
-        self.client = LocoClient()
-        self.client.SetTimeout(10.0)
-        self.client.Init()
-        self.get_logger().info('LocoClient ready. Bridge is DISABLED until ~/enable true.')
+        # ---- UDP link to the rclpy-free SDK driver child ----
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._sock.bind(('127.0.0.1', 0))          # ephemeral; receives acks
+        self._sock.settimeout(0.2)
+        self._driver_addr = ('127.0.0.1', port)
+        self._acks = {}
+        self._ack_lock = threading.Lock()
+        self._cmd_id = 0
+
+        driver = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              'g1_loco_driver.py')
+        if not os.path.exists(driver):
+            raise FileNotFoundError('SDK driver not found: %s' % driver)
+        self.get_logger().info('Spawning SDK driver %s (iface=%s udp=%d)'
+                               % (driver, iface, port))
+        self._child = subprocess.Popen(
+            [sys.executable, driver, str(iface), str(port),
+             str(self.max_vx), str(self.max_vy), str(self.max_vyaw),
+             str(self.cmd_timeout), str(rate)])
+        atexit.register(self._kill_child)
+
+        threading.Thread(target=self._recv_acks, daemon=True).start()
 
         qos = QoSProfile(depth=10)
         qos.reliability = ReliabilityPolicy.BEST_EFFORT
@@ -111,6 +101,61 @@ class G1SdkBridge(Node):
         self.create_service(Trigger, '~/start', self.srv_start)
 
         self.create_timer(1.0 / rate, self.tick)
+        self.get_logger().warn('Bridge up (driver PID %d). DISABLED until ~/enable true.'
+                               % self._child.pid)
+
+    # ---- child lifecycle ----
+    def _kill_child(self):
+        try:
+            if getattr(self, '_child', None) and self._child.poll() is None:
+                self._child.terminate()
+                try:
+                    self._child.wait(timeout=3)
+                except Exception:  # noqa: BLE001
+                    self._child.kill()
+        except Exception:  # noqa: BLE001
+            pass
+
+    # ---- UDP ----
+    def _send(self, obj):
+        try:
+            self._sock.sendto(json.dumps(obj).encode(), self._driver_addr)
+        except OSError as e:
+            self.get_logger().error('UDP send failed: %s' % e)
+
+    def _recv_acks(self):
+        while True:
+            try:
+                data, _addr = self._sock.recvfrom(4096)
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            try:
+                msg = json.loads(data.decode())
+            except Exception:  # noqa: BLE001
+                continue
+            if msg.get('t') == 'ack':
+                with self._ack_lock:
+                    box = self._acks.get(msg.get('id'))
+                if box is not None:
+                    box['resp'] = msg
+                    box['ev'].set()
+
+    def _send_cmd(self, name, timeout=12.0):
+        with self._ack_lock:
+            self._cmd_id += 1
+            cid = self._cmd_id
+            ev = threading.Event()
+            self._acks[cid] = {'ev': ev, 'resp': None}
+        self._send({'t': 'cmd', 'id': cid, 'name': name})
+        got = ev.wait(timeout)
+        with self._ack_lock:
+            box = self._acks.pop(cid, None)
+        if not got or not box or not box['resp']:
+            return False, '%s: no ack from SDK driver (timeout)' % name
+        r = box['resp']
+        return bool(r.get('ok')), str(r.get('msg'))
 
     # ---- cmd_vel ----
     def cmd_cb(self, msg: TwistStamped):
@@ -121,67 +166,45 @@ class G1SdkBridge(Node):
             self.last_cmd_t = self.get_clock().now()
 
     def tick(self):
+        if self._child.poll() is not None:
+            with self._lock:
+                was = self.enabled
+                self.enabled = False
+            if was:
+                self.get_logger().error('SDK driver child died -- bridge DISABLED.')
         with self._lock:
-            if not self.enabled:
-                return
+            en = self.enabled
             stale = (self.get_clock().now() - self.last_cmd_t).nanoseconds > self.cmd_timeout * 1e9
             vx, vy, vyaw = (0.0, 0.0, 0.0) if stale else (self.vx, self.vy, self.vyaw)
-        try:
-            self.client.Move(vx, vy, vyaw)
-        except Exception as e:  # noqa: BLE001
-            self.get_logger().error(f'Move failed: {e}')
+        self._send({'t': 'vel', 'vx': vx, 'vy': vy, 'vyaw': vyaw, 'en': en})
 
     # ---- services ----
     def srv_enable(self, req, resp):
         with self._lock:
             self.enabled = req.data
-            if not self.enabled:
-                try:
-                    self.client.Move(0.0, 0.0, 0.0)
-                except Exception:  # noqa: BLE001
-                    pass
+        self._send({'t': 'vel', 'vx': 0.0, 'vy': 0.0, 'vyaw': 0.0, 'en': req.data})
         resp.success = True
-        resp.message = f'cmd_vel forwarding {"ENABLED" if req.data else "DISABLED"}'
+        resp.message = 'cmd_vel forwarding %s' % ('ENABLED' if req.data else 'DISABLED')
         self.get_logger().warn(resp.message)
         return resp
 
     def srv_stand_up(self, req, resp):
-        import time
-        self.get_logger().warn('stand_up: Damp -> Squat2StandUp')
-        try:
-            self.client.Damp()
-            time.sleep(0.5)
-            self.client.Squat2StandUp()
-            resp.success, resp.message = True, 'standing up'
-        except Exception as e:  # noqa: BLE001
-            resp.success, resp.message = False, str(e)
+        resp.success, resp.message = self._send_cmd('stand_up')
         return resp
 
     def srv_sit(self, req, resp):
-        try:
-            self.client.StandUp2Squat()
-            resp.success, resp.message = True, 'sitting / squatting'
-        except Exception as e:  # noqa: BLE001
-            resp.success, resp.message = False, str(e)
+        resp.success, resp.message = self._send_cmd('sit')
         return resp
 
     def srv_damp(self, req, resp):
         with self._lock:
             self.enabled = False
-        try:
-            self.client.Damp()
-            resp.success, resp.message = True, 'DAMPING (soft e-stop), bridge disabled'
-        except Exception as e:  # noqa: BLE001
-            resp.success, resp.message = False, str(e)
+        resp.success, resp.message = self._send_cmd('damp')
         self.get_logger().warn(resp.message)
         return resp
 
     def srv_start(self, req, resp):
-        try:
-            self.client.Start()
-            resp.success, resp.message = True, 'main operation control (FSM 200)'
-        except Exception as e:  # noqa: BLE001
-            resp.success, resp.message = False, str(e)
+        resp.success, resp.message = self._send_cmd('start')
         return resp
 
 
@@ -193,10 +216,7 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        try:
-            node.client.Damp()  # leave the robot in a safe damping state
-        except Exception:  # noqa: BLE001
-            pass
+        node._kill_child()
         node.destroy_node()
         rclpy.shutdown()
 

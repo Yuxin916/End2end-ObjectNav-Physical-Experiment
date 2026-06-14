@@ -39,12 +39,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ros-jazzy-rmw-cyclonedds-cpp \
     && rm -rf /var/lib/apt/lists/*
 
-# Isolate ROS2 traffic from the robot's native DDS (domain 0) and use cyclonedds.
+# Isolate ROS2 traffic from the robot's native DDS (domain 0) via ROS_DOMAIN_ID=1.
+# RMW = Fast DDS (default). cyclonedds was tried (will_nx) but CAUSED LIO drift on
+# the Jetson (drops/delays 200Hz IMU + lidar under load); owner commit d92956f also
+# removed it to fix localization. So: Fast DDS + domain isolation. (rmw-cyclonedds-cpp
+# is still installed but only the unitree_sdk2 SDK side uses cyclonedds, not ROS.)
 # Applies to every shell in the container (launch, `docker exec`, foxglove).
 # Does NOT affect unitree_sdk2 control: it talks raw cyclonedds on its own domain
 # via ChannelFactoryInitialize(0, iface), independent of these ROS2 env vars.
 ENV ROS_DOMAIN_ID=1
-ENV RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+ENV RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

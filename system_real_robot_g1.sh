@@ -5,7 +5,7 @@
 # SLAM drift). Move to domain 1 + cyclonedds RMW. (Borrowed from will_nx.)
 # Also baked as ENV in docker/Dockerfile.sdk so `docker exec` shells match.
 export ROS_DOMAIN_ID=1
-export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp   # reverted: cyclonedds caused LIO drift on Jetson (owner commit d92956f); Fast DDS + DOMAIN_ID=1 isolation is the known-good config
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 
