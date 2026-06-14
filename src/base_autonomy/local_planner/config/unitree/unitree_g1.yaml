@@ -9,10 +9,10 @@ sensorMountingOffsets:
 feature_extraction_node:
   ros__parameters:
     lidar_flip: false
-    blindFront: 0.2
-    blindBack: -0.2
-    blindLeft: 0.3
-    blindRight: -0.3
+    blindFront: 0.1
+    blindBack: -0.5
+    blindLeft: 0.25
+    blindRight: -0.25
     blindDiskLow: -0.05
     blindDiskHigh: 0.05
     blindDiskRadius: 0.5
@@ -137,5 +137,5 @@ pathFollower:
 
 terrainAnalysis:
   ros__parameters:
-    minDyObsVFOV: -55.0
+    minDyObsVFOV: -40.0
     maxDyObsVFOV: 10.0

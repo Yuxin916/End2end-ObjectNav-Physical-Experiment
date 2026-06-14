@@ -10,7 +10,7 @@ from ament_index_python.packages import get_package_share_directory
 
 def generate_launch_description():
     # Get robot config from environment variable or use default
-    robot_config_env = os.environ.get('ROBOT_CONFIG_PATH', 'unitree/unitree_go2_slow')
+    robot_config_env = os.environ.get('ROBOT_CONFIG_PATH', 'unitree/unitree_g1')
 
     # Declare launch arguments
     robot_config_arg = DeclareLaunchArgument(
@@ -31,15 +31,23 @@ def generate_launch_description():
         'limitGroundLift': False,
         'maxGroundLift': 0.15,
         'clearDyObs': True,
+        'sensorPitch': 0.0,
         'minDyObsDis': 0.14,
         'absDyObsRelZThre': 0.2,
-        'minDyObsVFOV': -30.0,
-        'maxDyObsVFOV': 35.0,
+        'minDyObsVFOV': -40.0,
+        'maxDyObsVFOV': 10.0,
         'minDyObsPointNum': 1,
         'minOutOfFovPointNum': 10,
         'obstacleHeightThre': 0.1,
+        'nearObstacle': True,
+        'nearObstacleDis': 2.5,
+        'nearObstacleRelZThre': -1.0,
+        'negObstacle': -1,
+        'negObstacleDis': 10.0,
+        'negObstacleRelZThre': -0.2,
         'noDataObstacle': False,
-        'noDataBlockSkipNum': 0,
+        'noDataBlockShrinkNum': 0,
+        'noDataBlockExpandNum': 1,
         'minBlockPointNum': 10,
         'vehicleHeight': 1.5,
         'voxelPointUpdateThre': 100,

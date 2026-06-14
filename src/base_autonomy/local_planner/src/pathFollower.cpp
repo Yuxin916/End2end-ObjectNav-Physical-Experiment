@@ -167,7 +167,7 @@ void pathHandler(const nav_msgs::msg::Path::ConstSharedPtr pathIn)
       double roll, pitch, yaw;
       tf2::Matrix3x3(q).getRPY(roll, pitch, yaw);
       goalYaw = yaw;
-      hasGoalYaw = true;
+      // hasGoalYaw = true;
     } else {
       hasGoalYaw = false;
     }
