@@ -5,6 +5,53 @@ ROS2 **Jazzy** 导航栈跑在 Unitree G1 的 Jetson 上的完整说明：安装
 
 ---
 
+## 🚀 快速启动（每次开机，TL;DR）
+
+> 这是日常起系统的**实际操作序列**。前 3 条在 **宿主机 Jetson** 上跑（需 sudo 密码 `123`），
+> 后 2 条把你带进容器再起整套系统。想看原理 / 排错，往下翻 §0–§8。
+
+**① 宿主机：每次开机做一次**
+```bash
+# (a) 锁 Jetson CPU/GPU 频率到最高 —— 稳住 Mid-360 雷达时间戳，避免 SLAM 漂移
+#     （docker/run.sh 里也会跑一次，这里再跑无妨）
+sudo jetson_clocks
+
+# (b) 把发往 192.168.123.120 的流量强制走有线 eth0（源 IP 用 eth0 的 .164）。
+#     eth0(.164) 和 wlan0(.110) 都在 192.168.123.0/24，不加这条路由内核可能把 .120
+#     漏到 wlan0（详见 §6.3）
+sudo ip route add 192.168.123.120/32 dev eth0 src 192.168.123.164
+
+# (c) 放开 X 服务器本地访问，让容器里(以 root 运行)的 RViz 能在物理显示器(:0)弹窗
+sudo env DISPLAY=:0 XAUTHORITY=/var/run/lightdm/root/:0 xhost +local:
+```
+
+**② 进容器**
+```bash
+./docker/run.sh            # 进容器交互 bash（镜像 autonomy_stack:jazzy）
+```
+
+**③ 容器内：起整套系统 + RViz**
+```bash
+./system_real_robot_g1.sh \
+  control_backend:=webrtc \
+  robot_ip:=192.168.123.161 \
+  connection_method:=LocalSTA \
+  control_mode:=wireless_controller
+```
+
+参数含义：
+
+| 参数 | 含义 |
+|---|---|
+| `control_backend:=webrtc` | 用旧 WebRTC 控制路径（需 `~/.unitree_g1.env` 里的 AES key）。换 `:=sdk` 走 unitree_sdk2 DDS（无需 AES key，启动即 DISABLED，要 §5 调 service 才动）；换 `:=none` 不起控制，纯可视化最安全 |
+| `robot_ip:=192.168.123.161` | G1 在有线网上的 IP |
+| `connection_method:=LocalSTA` | 走有线局域网（G1 作为局域网内的 station） |
+| `control_mode:=wireless_controller` | 用手柄遥控 |
+
+> 停止：起系统的那个终端按 `Ctrl+C`。验证话题频率、控制机器人站起/放行速度等，见 §3 / §5。
+
+---
+
 ## 0. 背景：为什么必须用 Docker
 
 | | 实际情况 |
