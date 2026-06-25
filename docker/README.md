@@ -134,7 +134,14 @@ G1 脖子后面那排 Type-C 口里：
 
 ### 2.5.2 在物理显示器上看 RViz
 直接在那台显示器的桌面终端起系统（见 §4.2），RViz 自动出现在 `:0`。
-若从 SSH 起、想把窗口送到物理屏：`export DISPLAY=:0 && xhost +local:root` 后再 `docker exec -e DISPLAY=:0 ...`。
+
+若**从 SSH 起**、想把窗口送到物理屏（`:0`）：SSH 会话不是物理屏的 X server 属主，
+直接 `xhost` 会报 `cannot open display`，必须用 `sudo env` 把 `DISPLAY` 带进去给 X 授权：
+```bash
+sudo env DISPLAY=:0 xhost +local:root   # 关键：给物理屏 :0 的 X server 放行 root/容器
+docker exec -e DISPLAY=:0 -it autonomy_stack bash   # 之后容器里起的 RViz 才会画到物理屏
+```
+> 在物理显示器自己的桌面终端跑则不用 `sudo env`，`xhost +local:root` 即可（见 §2.1）。
 
 ### 2.5.3 远程看（没有物理显示器时）
 - **Foxglove（推荐的远程方案，GPU 在你本机渲染，不卡）**：容器里跑 foxglove_bridge，
@@ -180,6 +187,9 @@ bash docker/run.sh build            # 编译工作区
 bash docker/run.sh ros2 topic list  # 在容器环境里跑任意一条命令
 ```
 `run.sh` 自动带：`--network host`、`/dev/input/js0`、X11、（存在则）挂 `~/.unitree_g1.env`。
+> 它还会在起容器前自动 `sudo jetson_clocks`（锁 CPU/GPU 到最高频，降低 livox 时间戳抖动→
+> 减少 SLAM 漂移）。会弹一次 sudo 密码（`123`）；失败不致命，只是时序抖动可能变大。
+> 想手动单独跑：`sudo jetson_clocks`（查看当前状态：`sudo jetson_clocks --show`）。
 
 ### 4.2 ✅ 标准启动流程（一步步，建议在物理显示器的桌面终端跑）
 
