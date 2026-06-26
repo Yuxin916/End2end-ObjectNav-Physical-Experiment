@@ -32,8 +32,12 @@ for i in $(seq 1 5); do
     tmux select-layout -t "$SESSION_NAME":0 tiled
 done
 
-# Activate venv so unitree_webrtc_connect is available, then source ROS workspace
-FULL_SETUP="cd \"$WORKDIR\" && source .venv/bin/activate"
+# Activate venv so unitree_webrtc_connect is available, then source ROS workspace.
+# Force ROS_DOMAIN_ID=1 + Fast DDS in EVERY pane so VLM bridge / detector / camera
+# receiver (panes 1-3) share the same DDS domain as the nav stack (pane 0, set by
+# system_real_robot_g1.sh). Without this they inherit .zshrc's ROS_DOMAIN_ID=80 and
+# can't see pane 0's topics. RMW must match too.
+FULL_SETUP="cd \"$WORKDIR\" && source /opt/ros/jazzy/setup.zsh && source install/setup.zsh && source .venv/bin/activate && export ROS_DOMAIN_ID=1 && export RMW_IMPLEMENTATION=rmw_fastrtps_cpp"
 
 for pane in 0 1 2 3 4 5; do
     tmux send-keys -t "$SESSION_NAME":0.$pane "$FULL_SETUP" C-m

@@ -1,6 +1,6 @@
 import os
 
-from ament_index_python.packages import get_package_share_directory
+from ament_index_python.packages import get_package_share_directory, PackageNotFoundError
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, TimerAction
 from launch.launch_description_sources import PythonLaunchDescriptionSource, FrontendLaunchDescriptionSource
@@ -68,7 +68,7 @@ def generate_launch_description():
 
   declare_control_backend = DeclareLaunchArgument(
     'control_backend',
-    default_value='sdk',
+    default_value='webrtc',
     description="Velocity control backend: 'sdk' (unitree_sdk2 DDS, no AES key) or 'webrtc' (legacy)."
   )
 
@@ -147,20 +147,28 @@ def generate_launch_description():
 
   # --- Velocity control backend (mutually exclusive via control_backend) ---
 
-  # Preferred: unitree_sdk2 LocoClient over DDS. No AES key / WebRTC. Starts
+  # Optional: unitree_sdk2 LocoClient over DDS. No AES key / WebRTC. Starts
   # DISABLED -- robot will not stand or move until commanded via its services.
-  start_g1_sdk = IncludeLaunchDescription(
-    PythonLaunchDescriptionSource(os.path.join(
-      get_package_share_directory('unitree_g1_sdk_bridge'),
-      'launch',
-      'g1_sdk_control.launch.py')
-    ),
-    condition=IfCondition(EqualsSubstitution(control_backend, 'sdk')),
-    launch_arguments={
-      'network_interface': network_interface,
-      'enable_on_start': 'false',
-    }.items()
-  )
+  # unitree_g1_sdk_bridge is optional: webrtc-only setups don't build it. If it
+  # isn't installed, skip the include instead of crashing the whole launch
+  # (get_package_share_directory is eager, so it must be guarded here, not by the
+  # IfCondition which is evaluated only after path resolution).
+  start_g1_sdk = None
+  try:
+    start_g1_sdk = IncludeLaunchDescription(
+      PythonLaunchDescriptionSource(os.path.join(
+        get_package_share_directory('unitree_g1_sdk_bridge'),
+        'launch',
+        'g1_sdk_control.launch.py')
+      ),
+      condition=IfCondition(EqualsSubstitution(control_backend, 'sdk')),
+      launch_arguments={
+        'network_interface': network_interface,
+        'enable_on_start': 'false',
+      }.items()
+    )
+  except PackageNotFoundError:
+    start_g1_sdk = None
 
   # Legacy: G1 WebRTC control node (needs AES key on fw >= 1.5.1).
   start_g1_webrtc = IncludeLaunchDescription(
@@ -205,7 +213,8 @@ def generate_launch_description():
   ld.add_action(start_visualization_tools)
   ld.add_action(start_joy)
   ld.add_action(start_mid360)
-  ld.add_action(start_g1_sdk)
+  if start_g1_sdk is not None:
+    ld.add_action(start_g1_sdk)
   ld.add_action(start_g1_webrtc)
 
   return ld
